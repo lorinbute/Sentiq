@@ -40,7 +40,8 @@ export type ModifySeed =
     };
 
 /** A level is added as a new order that only closes (futures) or as eToro's own position level. */
-export const canAddProtection = (account: AccountView, market: TradeMarket): boolean => account.exchange === 'etoro' || (account.kind === 'crypto' && market === 'futures');
+export const canAddProtection = (account: AccountView, market: TradeMarket): boolean =>
+  account.exchange === 'etoro' || account.exchange === 'paper' || (account.kind === 'crypto' && market === 'futures');
 
 /** The quote a symbol is priced in: "BTC/USDT:USDT" → USDT, "AAPL/USD" → USD. */
 const quoteOf = (symbol: string, fallback: string) => symbol.split('/')[1]?.split(':')[0] || fallback;
@@ -79,7 +80,9 @@ export function positionSeed(account: AccountView, p: Pick<Portfolio, 'orders'>,
   const stocks = account.kind === 'stocks';
   const base = pos.symbol.split('/')[0] ?? pos.symbol;
   const input: PnlInput = { base, quote: quoteOf(pos.symbol, stocks ? 'USD' : 'USDT'), lastPrice: pos.markPrice, positions: [pos], balances: [], orders: p.orders, accountId: account.id, stock: stocks };
-  return tradeSeed(account, stocks ? 'stock' : 'futures', input, stocks ? base : pos.symbol, stocks ? base : pos.symbol);
+  // FIX-PAPERLEV: a profile's spot position (a pair without settlement) is on spot.
+  const market = stocks ? 'stock' : account.exchange === 'paper' && !pos.symbol.includes(':') ? 'spot' : 'futures';
+  return tradeSeed(account, market, input, stocks ? base : pos.symbol, stocks ? base : pos.symbol);
 }
 
 /** "SL / TP" on a holding (eToro: one position; elsewhere: the stop / limit sells there are). */

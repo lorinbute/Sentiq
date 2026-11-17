@@ -92,11 +92,12 @@ export function AiSection({ s }: { s: SettingsView }) {
             if (key.trim()) saveKey.mutate(key.trim());
           }}
         >
-          <label className="flex flex-col gap-1">
+          {/* FIX-FITWIDTH: on a phone the key and the model take the panel's width (a fixed 320 px went past the screen). */}
+          <label className="flex flex-col gap-1 max-sm:w-full">
             <span className="text-faint">
               Cheia API {info.name} {keyView.set && <>(salvată: {keyView.hint})</>}
             </span>
-            <input type="password" autoComplete="off" value={key} onChange={(e) => setKey(e.target.value)} placeholder={info.keyPlaceholder} className="w-80 max-w-full" />
+            <input type="password" autoComplete="off" value={key} onChange={(e) => setKey(e.target.value)} placeholder={info.keyPlaceholder} className="w-80 max-w-full max-sm:w-full" />
           </label>
           <button className="btn" disabled={!key.trim() || saveKey.isPending}>
             {saveKey.isPending ? 'Se verifică…' : keyView.set ? 'Înlocuiește cheia' : 'Salvează cheia'}
@@ -122,9 +123,9 @@ export function AiSection({ s }: { s: SettingsView }) {
           <p className="text-faint">Pe nivelul gratuit Gemini, Google poate folosi datele trimise ca să-și îmbunătățească produsele; cu facturarea pornită, nu le folosește.</p>
         )}
 
-        <label className="flex flex-col gap-1 self-start">
+        <label className="flex flex-col gap-1 self-start max-sm:w-full">
           <span className="text-faint">Model</span>
-          <select value={model} onChange={(e) => choose({ model: e.target.value })} disabled={save.isPending} className="w-80 max-w-full">
+          <select value={model} onChange={(e) => choose({ model: e.target.value })} disabled={save.isPending} className="w-80 max-w-full max-sm:w-full">
             {options.map((id) => (
               <option key={id} value={id} title={id}>
                 {modelLabel(id)}
@@ -156,7 +157,8 @@ export function AiSection({ s }: { s: SettingsView }) {
             </span>
             <span className={keyView.set ? undefined : 'text-faint'}>
               <strong>{info.product}</strong> ({model}), cu cheia ta: înțelege mai bine implicațiile macro. Titlurile știrilor din ultimele 48 de ore se trimit la {info.name}, în
-              loturi de 25; costul crește cu numărul de știri (de obicei câteva sute pe zi). Scorurile și sentimentul zilei calculate așa le vezi doar tu.
+              loturi de 25; costul crește cu numărul de știri (de obicei câteva sute pe zi). Scorurile și sentimentul zilei calculate așa le vezi doar tu. Cheia ta
+              lucrează doar cât ai Sentiq deschis și îl folosești; când revii, AI-ul evaluează și știrile apărute între timp (din ultimele 48 de ore).
               {!keyView.set && ' Pune întâi cheia.'}
             </span>
           </label>
@@ -221,7 +223,7 @@ export function AiSection({ s }: { s: SettingsView }) {
               </li>
             )}
           </ul>
-          <p className="text-faint">Prețul în dolari îl arată consola furnizorului. Se trimit doar titlurile știrilor (pentru scor) și datele zilei din Sentiq (pentru Rezumat: sentimentul, știrile, calendarul, indicatorii, contextul pieței, simbolurile tale urmărite; pentru Traduceri: descrierea companiei sau a monedei; pentru Boți: semnalul, nivelurile lui, sentimentul, știrile simbolului, calendarul și rezultatele botului în procente), niciodată conturile, cheile, sumele sau portofoliile.</p>
+          <p className="text-faint">Prețul în dolari îl arată consola furnizorului. Se trimit doar titlurile știrilor (pentru scor) și datele zilei din Sentiq (pentru Rezumat: sentimentul, știrile, calendarul, indicatorii, contextul pieței, simbolurile tale urmărite; pentru Traduceri: descrierea companiei sau a monedei; pentru Boți: semnalul, nivelurile lui, sentimentul, știrile simbolului, calendarul și rezultatele botului în procente), niciodată conturile, cheile, sumele sau portofoliile. Boții cu „AI confirmă” folosesc cheia și când Sentiq e închis.</p>
         </section>
 
         {aiScoring && (

@@ -4,7 +4,7 @@ import { silentLogger } from '../log.ts';
 import { parseTradingView, type RawEvent } from '../calendar/sources.ts';
 import { readJobData } from '../jobs/scheduler.ts';
 import { ECON_SOURCE_COUNTRIES } from './names.ts';
-import { ECON_JOB, EconomyService, fetchEconRange, indicatorKey, KEEP_MS, TV_CAP } from './service.ts';
+import { ECON_JOB, EconomyService, fetchEconRange, indicatorKey, KEEP_MS, REKEY_DAYS, TV_CAP } from './service.ts';
 
 const DAY = 86_400_000;
 const NOW = Date.UTC(2026, 9, 13, 12);
@@ -14,6 +14,9 @@ interface Ev {
   id?: string;
   country: string;
   indicator: string;
+  /** The event's title; the indicator's name when not given (as the source sent them until late Oct 2026). */
+  title?: string;
+  source?: string;
   ticker?: string | null;
   category?: string | null;
   date: number;
@@ -34,14 +37,14 @@ function tv(events: Ev[]): RawEvent[] {
       status: 'ok',
       result: events.map((e) => ({
         id: e.id ?? String(nextId++),
-        title: e.indicator,
+        title: e.title ?? e.indicator,
         country: e.country,
         indicator: e.indicator,
         ticker: e.ticker === undefined ? `ECONOMICS:${e.country}${e.indicator.replace(/\W/g, '').toUpperCase()}` : e.ticker,
         category: e.category === undefined ? 'prce' : e.category,
         period: e.period ?? '',
         referenceDate: e.ref ? new Date(e.ref).toISOString() : undefined,
-        source: 'Bureau of Labor Statistics',
+        source: e.source ?? 'Bureau of Labor Statistics',
         source_url: 'https://www.bls.gov',
         comment: 'Consumer prices.',
         actual: e.actual ?? null,
@@ -312,5 +315,159 @@ describe('the sense of each indicator (FD-ECONCOLOR, research §11)', () => {
     expect(polarityOf('prce', 'Brand New Price Gauge')).toBe(-1);
     expect(polarityOf('cnsm', 'Brand New Spending Gauge')).toBe(1);
     expect(polarityOf('enrg', 'Brand New Energy Gauge')).toBe(0);
+  });
+});
+
+describe('the source renaming its indicators (FD-CALACTUAL §4)', () => {
+  /** A row stored by the version before: a ticker-less indicator under "country:name", with one release. */
+  const leftover = async (db: Awaited<ReturnType<typeof testDb>>, key: string, name: string, id: string, ts: number, actual: number | null, importance = -1) => {
+    await db.run('INSERT INTO econ_indicators([key], country, name, category, importance, source, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)', [key, key.slice(0, 2), name, 'prce', importance, 'Bureau of Labor Statistics', 1]);
+    await db.run('INSERT INTO econ_releases(id, [key], ts, period, actual, fetched_at) VALUES (?, ?, ?, ?, ?, ?)', [id, key, ts, id, actual, 1]);
+  };
+  const keys = async (db: Awaited<ReturnType<typeof testDb>>) => (await db.all<{ key: string }>('SELECT [key] FROM econ_indicators ORDER BY [key]')).map((r) => r.key);
+
+  it('a renamed indicator keeps its Romanian name and sense through its former name (the title); an unrelated title changes nothing', async () => {
+    const { econ } = await setup();
+    await econ.ingest(
+      tv([
+        { country: 'US', title: 'Core Inflation Rate MoM', indicator: 'Core CPI MM, SA', ticker: 'ECONOMICS:USCIRMM', actual: 0.3, previous: 0.2, date: NOW - DAY, importance: 1 },
+        // The source puts the German rate's ticker on a speech: the known name stays the indicator's own.
+        { country: 'DE', title: 'Bundesbank Speech', indicator: 'Interest Rate', ticker: 'ECONOMICS:DEINTR', category: 'mny', actual: 2, date: NOW - DAY },
+      ]),
+      undefined,
+      NOW,
+    );
+    const view = await econ.view(NOW);
+    expect(view.countries[0]!.indicators[0]).toMatchObject({ key: 'ECONOMICS:USCIRMM', name: 'Inflația de bază (lunară)', original: 'Core CPI MM, SA', polarity: -1, group: 'prce' });
+    expect(view.countries[0]!.indicators[0]?.explanation).toMatch(/Inflația/);
+    const de = view.countries.find((c) => c.code === 'EU')!.indicators.find((i) => i.key === 'ECONOMICS:DEINTR');
+    expect(de).toMatchObject({ original: 'Interest Rate', countryName: 'Germania' });
+    expect(de?.name).not.toBe('Bundesbank Speech');
+  });
+
+  it('a ticker added and a short name: the rows left behind join it, a release sent twice is kept once, with its value', async () => {
+    const { db, econ } = await setup();
+    const title = 'PPI Ex Food Energy and Trade Services MoM';
+    // Stored before: under the title (until late Oct), then under the short name, the October release with its value.
+    await leftover(db, 'US:ppi ex food energy and trade services mom', title, 'aug', NOW - 60 * DAY, 0.3, 1);
+    await db.run('INSERT INTO econ_releases(id, [key], ts, period, actual, fetched_at) VALUES (?, ?, ?, ?, ?, ?)', ['sep', 'US:ppi ex food energy and trade services mom', NOW - 30 * DAY, 'Sep', 0.5, 1]);
+    await leftover(db, 'US:ppi ex food/energy/tr mm', 'PPI ex Food/Energy/Tr MM', 'oct-old', NOW - DAY, 0.4);
+    // Now: a ticker, the short name, the same October release under a new id (no value yet), and November ahead.
+    await econ.ingest(
+      tv([
+        { id: 'oct-new', country: 'US', title, indicator: 'PPI ex Food/Energy/Tr MM', ticker: 'ECONOMICS:USPPIEFETSMM', actual: null, date: NOW - DAY },
+        { id: 'nov', country: 'US', title, indicator: 'PPI ex Food/Energy/Tr MM', ticker: 'ECONOMICS:USPPIEFETSMM', date: NOW + 30 * DAY },
+      ]),
+      undefined,
+      NOW,
+    );
+    expect(await keys(db)).toEqual(['ECONOMICS:USPPIEFETSMM']);
+    // October twice: the one with a value counts (the new id, without one yet, stays for when its value comes).
+    expect((await db.all<{ id: string }>('SELECT id FROM econ_releases ORDER BY ts, id')).map((r) => r.id)).toEqual(['aug', 'sep', 'oct-new', 'oct-old', 'nov']);
+    const [i] = (await econ.view(NOW)).countries[0]!.indicators;
+    expect(i).toMatchObject({ key: 'ECONOMICS:USPPIEFETSMM', original: 'PPI ex Food/Energy/Tr MM', latest: { value: 0.4 }, next: { ts: NOW + 30 * DAY, overdue: false }, important: true });
+    expect(i?.history.map((h) => h[1])).toEqual([0.3, 0.5, 0.4]);
+    // Sent again with its value: the new id's value wins over nothing; the old one, a duplicate now, goes.
+    await leftover(db, 'US:ppi ex food/energy/tr mm', 'PPI ex Food/Energy/Tr MM', 'oct-dup', NOW - DAY, null);
+    await econ.ingest(tv([{ id: 'oct-new', country: 'US', title, indicator: 'PPI ex Food/Energy/Tr MM', ticker: 'ECONOMICS:USPPIEFETSMM', actual: 0.5, date: NOW - DAY }]), undefined, NOW);
+    expect(await keys(db)).toEqual(['ECONOMICS:USPPIEFETSMM']);
+    expect((await db.all<{ id: string }>("SELECT id FROM econ_releases WHERE id LIKE 'oct%' ORDER BY id")).map((r) => r.id)).toEqual(['oct-new', 'oct-old']);
+    // Both with a value: the one read last.
+    expect((await econ.view(NOW + 61_000)).countries[0]!.indicators[0]?.latest.value).toBe(0.5);
+  });
+
+  it('a ticker lost: the event stays with the coded indicator of the same name, unless two have it', async () => {
+    const { db, econ } = await setup();
+    await econ.ingest(tv([{ id: 'r1', country: 'FR', indicator: 'Current Account', ticker: 'ECONOMICS:FRCA', category: 'trd', actual: -1.2, date: NOW - 30 * DAY }]), undefined, NOW);
+    await econ.ingest(tv([{ id: 'r2', country: 'FR', indicator: 'Current Account', ticker: null, category: 'trd', date: NOW + 25 * DAY }]), undefined, NOW);
+    expect(await keys(db)).toEqual(['ECONOMICS:FRCA']);
+    expect(await db.get('SELECT [key] FROM econ_releases WHERE id = ?', ['r2'])).toEqual({ key: 'ECONOMICS:FRCA' });
+    // Two coded indicators of that name in Japan: which one is unknown, so the event keeps its own key.
+    await econ.ingest(
+      tv([
+        { country: 'JP', indicator: 'Machinery Orders', ticker: 'ECONOMICS:JPMO1', actual: 1, date: NOW - 30 * DAY },
+        { country: 'JP', indicator: 'Machinery Orders', ticker: 'ECONOMICS:JPMO2', actual: 2, date: NOW - 30 * DAY },
+      ]),
+      undefined,
+      NOW,
+    );
+    await econ.ingest(tv([{ country: 'JP', indicator: 'Machinery Orders', ticker: null, date: NOW + DAY }]), undefined, NOW);
+    expect(await keys(db)).toContain('JP:machinery orders');
+  });
+
+  it('leaves alone a key still used by an event of the same answer, and one that would join two indicators', async () => {
+    const { db, econ } = await setup();
+    await leftover(db, 'GB:retail price index mom', 'Retail Price Index MoM', 'old', NOW - 30 * DAY, 0.2);
+    await econ.ingest(
+      tv([
+        // Two coded indicators claim the same title: ambiguous.
+        { country: 'GB', title: 'Retail Price Index MoM', indicator: 'RPI MM*', ticker: 'ECONOMICS:GBRPIMM', actual: 0.3, date: NOW - DAY },
+        { country: 'GB', title: 'Retail Price Index MoM', indicator: 'RPI MM (2)*', ticker: 'ECONOMICS:GBRPIMM2', actual: 0.3, date: NOW - DAY },
+        // Its short name is the title of an indicator in the same answer: that one is live.
+        { country: 'GB', title: 'House Price Index', indicator: 'House Price Index', ticker: null, actual: 1, date: NOW - DAY },
+        { country: 'GB', title: 'Halifax House Price Index', indicator: 'House Price Index', ticker: 'ECONOMICS:GBHPI', actual: 1, date: NOW - DAY },
+      ]),
+      undefined,
+      NOW,
+    );
+    expect(await keys(db)).toEqual(['ECONOMICS:GBHPI', 'ECONOMICS:GBRPIMM', 'ECONOMICS:GBRPIMM2', 'GB:house price index', 'GB:retail price index mom']);
+  });
+
+  it('published without its value: the same institution’s other values of that moment came', async () => {
+    const { econ } = await setup();
+    const at = NOW - 3_600_000;
+    await econ.ingest(
+      tv([
+        { country: 'US', indicator: 'Producer Price Index', ticker: 'ECONOMICS:USPPI', actual: 159.78, date: NOW - 30 * DAY },
+        { country: 'US', indicator: 'Producer Price Index', ticker: 'ECONOMICS:USPPI', actual: null, date: at },
+        { country: 'US', indicator: 'PPI MoM', ticker: 'ECONOMICS:USPPIMM', actual: 0.3, date: at },
+        // USDA at the same moment, its own release without a value: another institution's values say nothing.
+        { country: 'US', indicator: 'Corn Export Sales', ticker: 'ECONOMICS:USCORN', source: 'USDA', actual: 10, date: NOW - 7 * DAY },
+        { country: 'US', indicator: 'Corn Export Sales', ticker: 'ECONOMICS:USCORN', source: 'USDA', actual: null, date: NOW - 2 * 3_600_000 },
+      ]),
+      undefined,
+      NOW,
+    );
+    const us = (await econ.view(NOW)).countries[0]!.indicators;
+    expect(us.find((i) => i.key === 'ECONOMICS:USPPI')?.next).toEqual({ ts: at, forecast: null, overdue: true, released: true });
+    expect(us.find((i) => i.key === 'ECONOMICS:USCORN')?.next).toEqual({ ts: NOW - 2 * 3_600_000, forecast: null, overdue: true });
+  });
+
+  it('reads the last 60 days of each country again once, after its history, retrying a failed one', async () => {
+    const { db, econ } = await setup();
+    const { writeJobData } = await import('../jobs/scheduler.ts');
+    // A server that read every history before the renames were handled.
+    await writeJobData(db, ECON_JOB, { done: [...ECON_SOURCE_COUNTRIES] });
+    const asked: string[] = [];
+    let failJP = true;
+    const fetcher = async (from: number, to: number, countries: readonly string[]) => {
+      asked.push(`${countries.join(',')}:${Math.round((to - from) / DAY)}`);
+      if (countries[0] === 'JP' && failJP) throw new Error('HTTP 503');
+      return tv([{ country: countries[0] as string, indicator: 'Inflation Rate', actual: 2, date: from + DAY }]);
+    };
+    expect(await econ.backfill(fetcher, undefined, NOW, 0)).toEqual([]);
+    expect(asked).toEqual(ECON_SOURCE_COUNTRIES.map((c) => `${c}:${REKEY_DAYS - 7}`));
+    failJP = false;
+    asked.length = 0;
+    await econ.backfill(fetcher, undefined, NOW, 0);
+    expect(asked).toEqual([`JP:${REKEY_DAYS - 7}`]);
+    asked.length = 0;
+    await econ.backfill(fetcher, undefined, NOW, 0);
+    expect(asked).toEqual([]);
+    expect((await readJobData<{ rekeyed: string[] }>(db, ECON_JOB, { rekeyed: [] })).rekeyed).toHaveLength(ECON_SOURCE_COUNTRIES.length);
+  });
+});
+
+describe('a renamed indicator joined with its Romanian name (FD-CALACTUAL §4)', () => {
+  it('a ticker and a new short name: the former row joins it, and the title (its former name) keeps the Romanian name', async () => {
+    const { db, econ } = await setup();
+    // Stored before the rename, under its former name (known to the page), with a release.
+    await db.run('INSERT INTO econ_indicators([key], country, name, category, importance, updated_at) VALUES (?, ?, ?, ?, ?, ?)', ['US:u6 unemployment rate', 'US', 'U6 Unemployment Rate', 'lbr', 0, 1]);
+    await db.run('INSERT INTO econ_releases(id, [key], ts, period, actual, fetched_at) VALUES (?, ?, ?, ?, ?, ?)', ['sep', 'US:u6 unemployment rate', NOW - 35 * DAY, 'Sep', 7.6, 1]);
+    // Now: a ticker and a short name the page does not know; the title is still the former name.
+    await econ.ingest(tv([{ id: 'oct', country: 'US', title: 'U6 Unemployment Rate', indicator: 'U6 Underemployment', ticker: 'ECONOMICS:USU6UR', category: 'lbr', actual: 7.9, date: NOW - 5 * DAY }]), undefined, NOW);
+    const [i] = (await econ.view(NOW)).countries[0]!.indicators;
+    expect(i).toMatchObject({ key: 'ECONOMICS:USU6UR', name: 'Rata șomajului U6 (extinsă)', original: 'U6 Underemployment', polarity: -1 });
+    expect(i?.history.map((h) => h[1])).toEqual([7.6, 7.9]);
   });
 });

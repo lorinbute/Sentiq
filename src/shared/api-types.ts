@@ -27,6 +27,7 @@ export type { MarketContext, FearGreed, GlobalMarket } from '../server/market/co
 export type { ScanResult, ScanRow } from '../server/scanner/scanner.ts';
 export type { AccountView, Portfolio, BalanceRow, PositionRow, OrderRow, FillRow, TradeStats } from '../server/exchange/accounts.ts';
 export type { StatsPeriod } from '../server/exchange/trade-stats.ts';
+export type { HistoryMarket, TradeHistory, TradeHistoryRow } from '../server/exchange/trade-history.ts';
 export type { SourceRow } from '../server/news/sources.ts';
 export type { JobStatus } from '../server/jobs/scheduler.ts';
 export type { ModelStatus } from '../server/sentiment/local.ts';
@@ -77,15 +78,18 @@ export interface Health {
   now: number;
   jobs: import('../server/jobs/scheduler.ts').JobStatus[];
   sources: HealthSource[];
-  /** `aiUsers`: users whose own AI scores the news too (FD-AIKEYS); `?`: a server from before it. */
-  sentiment: { engine: string; model: import('../server/sentiment/local.ts').ModelStatus; pending: number; aiUsers?: number };
+  /**
+   * `aiUsers`: users whose own AI scores the news too (FD-AIKEYS); `aiActive`: of them, those using Sentiq now (only
+   * theirs work, FD-KEYIDLE); `?`: a server from before it.
+   */
+  sentiment: { engine: string; model: import('../server/sentiment/local.ts').ModelStatus; pending: number; aiUsers?: number; aiActive?: number };
   calendar: { ff: number | null; tv: number | null; earn: number | null; ffBlockedUntil: number | null };
   /** FD-AZURE §5: Azure SQL; the size is null when the database user may not read it. */
   db: { sizeBytes: number | null; maxSizeBytes?: number | null; server?: string; database?: string; edition?: string | null; objective?: string | null; news: number };
   /** TD-AZURE §6: the instance running the background jobs. */
   jobsLeader?: import('../server/jobs/scheduler.ts').JobsLeader;
-  /** FD-TDKEYS: each user's own key; how many have one (`hasKey`… from a server before it). */
-  twelveData: { users?: number; hasKey?: boolean };
+  /** FD-TDKEYS: each user's own key; how many have one (`hasKey`… from a server before it); `active`: FD-KEYIDLE. */
+  twelveData: { users?: number; hasKey?: boolean; active?: number };
 }
 
 // ── FD-AIKEYS ─────────────────────────────────────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 // FD-ORDEREDIT: the changes' form (the page and the server check it alike) and how each platform changes an order.
 import { describe, expect, it } from 'vitest';
-import { etoroProtectionOf, modifyTicketSchema, orderEditFields, orderEditMode, reverseTicketSchema, subKey, type EditableOrderLike } from './trading.ts';
+import { etoroProtectionOf, modifyTicketSchema, orderEditFields, orderEditMode, orderTicketSchema, reverseTicketSchema, subKey, ticketRules, type EditableOrderLike } from './trading.ts';
 
 const KEY = '0f3c2a1e-5b6d-4c7e-8f90-a1b2c3d4e5f6';
 const base = { accountId: 1, idemKey: KEY, market: 'futures', symbol: 'BTC/USDT:USDT' };
@@ -65,5 +65,18 @@ describe('a position turned the other way (FD-REVERSE)', () => {
     expect(reverseTicketSchema.safeParse({ accountId: 1, idemKey: KEY, symbol: 'BTC/USDT:USDT', side: 'long', amount: 1 }).success).toBe(false);
     expect([subKey(KEY, 1), subKey(KEY, 2)]).toEqual(['0f3c2a1e-5b6d-4c7e-8f90-a1b2c3d4e5f7', '0f3c2a1e-5b6d-4c7e-8f90-a1b2c3d4e5f8']);
     expect(subKey('0f3c2a1e-5b6d-4c7e-8f90-a1b2c3d4e5ff', 1)).toBe('0f3c2a1e-5b6d-4c7e-8f90-a1b2c3d4e500');
+  });
+});
+
+describe('leverage, margin and reduce-only off futures (FIX-PAPERLEV)', () => {
+  it('the form takes them on every market; a platform\'s account refuses them off futures (a Paper Trading profile does not)', () => {
+    const spot = { accountId: 1, idemKey: KEY, market: 'spot', symbol: 'BTC/USDT', side: 'sell', kind: 'market', amount: 1, leverage: 5, marginMode: 'cross', reduceOnly: true };
+    const t = orderTicketSchema.parse(spot);
+    expect(t).toMatchObject({ leverage: 5, marginMode: 'cross', reduceOnly: true });
+    expect(ticketRules(t)).toBe('Marja și reduce-only sunt doar pentru futures.');
+    expect(ticketRules({ market: 'spot', leverage: 5 })).toBe('Levierul nu se aplică pe spot.');
+    // eToro's shares take a leverage; futures everything.
+    expect(ticketRules({ market: 'stock', leverage: 2 })).toBeNull();
+    expect(ticketRules({ market: 'futures', leverage: 5, marginMode: 'cross', reduceOnly: true })).toBeNull();
   });
 });

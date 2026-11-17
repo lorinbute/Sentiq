@@ -42,6 +42,8 @@ const MARKETS_TTL_MS = 24 * 3_600_000;
 const MARKETS_RETRY_MS = 5 * 60_000;
 const CACHE_MAX = 50;
 const INCREMENTAL_MAX_AGE_MS = 3_600_000;
+/** A pair's last trade price is read again after this (as the 1-minute candles, FIX-2ZPRICE). */
+const LAST_PRICE_TTL_MS = 10_000;
 
 interface CacheEntry {
   candles: Candle[];
@@ -86,6 +88,7 @@ export class MarketData {
   private readonly marketsLoading = new Map<string, Promise<void>>();
   private readonly cache = new Map<string, CacheEntry>();
   private readonly inflight = new Map<string, Promise<CandlesResult>>();
+  private readonly lastPrices = new Map<string, { price: number | null; at: number }>();
   private readonly proxy: string | undefined;
   private readonly now: () => number;
   private readonly retryDelaysMs: readonly number[];
@@ -183,6 +186,29 @@ export class MarketData {
       throw new MarketError('UNKNOWN_SYMBOL', `${symbol} nu este listat pe ${id}${suggestions.length ? `; încearcă ${suggestions.join(', ')}` : ''}`, suggestions);
     }
     return { ex, market };
+  }
+
+  /**
+   * FIX-2ZPRICE: the pair's last trade price (the exchange's ticker), for a pair without a candle in the last minutes (a
+   * thin one: KuCoin gives no candle for a minute without trades); null when the ticker has none.
+   */
+  async lastPrice(id: string, symbol: string): Promise<number | null> {
+    const key = `${id}|${symbol}`;
+    const hit = this.lastPrices.get(key);
+    if (hit && this.now() - hit.at < LAST_PRICE_TTL_MS) return hit.price;
+    const { ex, market } = await this.resolve(id, symbol);
+    let t: { last?: number | null; close?: number | null };
+    try {
+      t = await withRetry(() => ex.fetchTicker(market.symbol), { delaysMs: this.retryDelaysMs });
+    } catch (err) {
+      throw new MarketError('EXCHANGE_ERROR', `${ex.id}: ${exchangeMessage(err)}`);
+    }
+    const p = t.last ?? t.close ?? null;
+    const price = p !== null && Number.isFinite(p) && p > 0 ? p : null;
+    this.lastPrices.delete(key);
+    this.lastPrices.set(key, { price, at: this.now() });
+    while (this.lastPrices.size > CACHE_MAX) this.lastPrices.delete(this.lastPrices.keys().next().value as string);
+    return price;
   }
 
   async candles(id: string, symbol: string, tf: Timeframe, count: number): Promise<CandlesResult> {

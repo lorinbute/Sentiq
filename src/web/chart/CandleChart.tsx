@@ -17,7 +17,9 @@ import {
   type IChartApi,
   type IPriceLine,
   type ITextWatermarkPluginApi,
+  type ITimeScaleApi,
   type ISeriesApi,
+  type Logical,
   type MouseEventParams,
   type PriceScaleOptions,
   type Time,
@@ -41,7 +43,7 @@ import { candleColors, CLEAR } from './candle-colors.ts';
 import { endTouchCross } from './touch-cross.ts';
 import type { HLine } from '../../shared/hlines.ts';
 import { isMac } from '../components/CommandPalette.tsx';
-import { loadView, saveView } from './view-store.ts';
+import { bandOf, defaultSpacing, keepShift, loadBand, loadRoom, loadZoom, roomMoved, roomOf, saveBand, saveRoom, saveZoom, zoomOf, type Band, type RoomMark } from './view-store.ts';
 import { THEME_EVENT, themeColors } from '../theme.ts';
 import { DEFAULT_CHART_STYLE, type ChartLineStyle, type ChartStyle } from '../../shared/chart-style.ts';
 import { useMediaQuery } from '../media.ts';
@@ -162,7 +164,7 @@ interface Props {
   displayPrecision?: number;
   tz: string;
   priceLines: PriceLineSpec[];
-  /** What is shown (exchange|pair|timeframe): a new key restores that key's remembered view, or the default one. */
+  /** What is shown (exchange|pair|timeframe): a new key opens on the view remembered for every chart (FD-CHARTOPEN). */
   viewKey: string;
   /** The LMA (null when hidden: no pane, normal candle colours). */
   lma: LmaResult | null;
@@ -219,6 +221,10 @@ interface Props {
   watermark?: readonly string[];
   /** Bumped to put the view back to its default (the last candles, the price scale fitting itself). */
   resetView?: number;
+  /** Sentiq.iOS FD-V3-S19: the candle (its open time) to show in the middle, at the zoom of now; a new `tick` asks again. */
+  focusTime?: { time: number; tick: number } | null;
+  /** FD-CHARTROOM, FD-CHARTOPEN: the chart's settings are open, `look` being their preview. */
+  previewing?: boolean;
   /** The chart's settings (the ⚙ under the price scale, and the context menu's "Setări…"). */
   onSettings?: () => void;
   /** The context menu (a right click on the chart), at the pointer, with the price there. */
@@ -242,6 +248,10 @@ const OVERLAY_MSG_MIN = 240;
 
 /** The "go to the latest candle" button (FD-GOLATEST), px. */
 const LATEST_SIZE = 32;
+/** Its scroll, ms: as long as the library's `scrollToRealTime`. */
+const LATEST_SCROLL_MS = 400;
+/** The default view's bars from the last candle to the right edge (its range ends 20 bars after the last one, `n + 20`). */
+const DEFAULT_ROOM_BARS = 21;
 
 /**
  * FD-CHARTTOUCH: a finger's move that is a drag, px (Manhattan for the library's touch events, vertical for Sentiq's
@@ -257,6 +267,17 @@ interface Boxes {
 }
 
 const toTime = (ms: number) => Math.floor(ms / 1000) as UTCTimestamp;
+
+/** Points an indicator draws after the last candle (Ichimoku): `scrollToPosition` counts from them, not from the candle. */
+function aheadOf(ts: ITimeScaleApi<Time>, last: UTCTimestamp | null): number {
+  const range = ts.getVisibleLogicalRange();
+  const li = last !== null ? ts.timeToIndex(last, true) : null;
+  return range && li !== null ? Math.max(0, range.to - ts.scrollPosition() - li) : 0;
+}
+
+/** FD-CHARTSETTINGS: the room above and below the candles while the price scale fits itself ("A" on). */
+const marginsOf = (look: ChartStyle): Band => ({ top: look.canvas.margins.top / 100, bottom: look.canvas.margins.bottom / 100 });
+
 const LINE_STYLE: Record<LineStyleName, LineStyle> = { Solid: LineStyle.Solid, Dashed: LineStyle.Dashed, Dotted: LineStyle.Dotted };
 
 /** The script's three hline() calls with their Style-tab settings (shared with the settings form's preview). */
@@ -540,6 +561,8 @@ export function CandleChart({
   look = DEFAULT_CHART_STYLE,
   watermark,
   resetView = 0,
+  focusTime = null,
+  previewing = false,
   onSettings,
   onContextMenu,
 }: Props) {
@@ -583,11 +606,27 @@ export function CandleChart({
   const paneScale = useRef<PaneScale | null>(null);
   /** The key whose data is on screen (its view is the one being remembered). */
   const lastKey = useRef<string>('');
-  const prevLength = useRef(0);
   /** Bumped when the view is set by code (a remembered one, the default): an older correction must not undo it. */
   const viewEpoch = useRef(0);
   /** Time of the last candle on screen: the remembered view is measured from it. */
   const shownLast = useRef<UTCTimestamp | null>(null);
+  /** FD-CHARTROOM: the room on screen when the view was last remembered (a room is kept only once the view moved). */
+  const flushed = useRef<RoomMark | null>(null);
+  /** The "go to the latest candle" scroll's next frame. */
+  const latestRaf = useRef(0);
+  /**
+   * FD-CHARTOPEN: a key whose remembered view is set with its data, before the library's next frame, and kept until that
+   * frame is drawn: the view on screen meanwhile is not one the user chose.
+   */
+  const opening = useRef<{ key: string } | null>(null);
+  const openRaf = useRef(0);
+  /**
+   * FD-CHARTOPEN: where this chart's candles sit (null: the scale fits itself, "A" on), and the price range of the fixed
+   * scale when that band was set or remembered (null until the library has drawn it).
+   */
+  const vert = useRef<{ band: Band | null; range: { from: number; to: number } | null }>({ band: null, range: null });
+  /** The frame after a band is drawn, when the scale is fixed there. */
+  const bandRaf = useRef(0);
   const layoutKey = paneOrder.join('|');
   const orderRef = useRef<readonly string[]>(paneOrder);
   orderRef.current = paneOrder;
@@ -613,27 +652,44 @@ export function CandleChart({
   const [layoutTick, setLayoutTick] = useState(0);
   const showLma = lma !== null;
 
-  /** Remembers the current zoom / position of the key on screen. */
+  /** Remembers the zoom (FD-CHARTOPEN) and the room after the last candle (FD-CHARTROOM), for every chart opened next. */
   const flushView = () => {
     if (saveTimer.current !== null) {
       clearTimeout(saveTimer.current);
       saveTimer.current = null;
     }
     const chart = chartRef.current;
-    if (!chart || !lastKey.current) return;
+    // Not drawn yet (FD-CHARTOPEN): nothing on it was chosen.
+    if (!chart || !lastKey.current || opening.current) return;
     const ts = chart.timeScale();
     // Bars between the last candle and the right edge; not the time scale's own last point, which an indicator drawing
     // ahead of the candles (Ichimoku) moves.
     const r = ts.getVisibleLogicalRange();
     const li = shownLast.current !== null ? ts.timeToIndex(shownLast.current, true) : null;
-    saveView(lastKey.current, { barSpacing: ts.options().barSpacing, scroll: r && li !== null ? r.to - li : ts.scrollPosition() });
+    const barSpacing = ts.options().barSpacing;
+    const offset = ts.scrollPosition();
+    const fromCandle = r && li !== null ? r.to - li : null;
+    // The zoom, also while looking back in history; not one the library cut at its maximum (a narrow window).
+    const zoom = zoomOf(barSpacing, ts.width());
+    if (zoom !== null) saveZoom(zoom);
+    // FD-CHARTROOM: the room after the last candle, once the view moved.
+    if (fromCandle === null) {
+      flushed.current = null;
+      return;
+    }
+    const was = flushed.current;
+    flushed.current = { key: lastKey.current, px: fromCandle * barSpacing };
+    if (!roomMoved(was, flushed.current)) return;
+    const room = roomOf({ fromCandle, barSpacing, offset, width: ts.width() });
+    if (room !== null) saveRoom(room);
   };
   const flushViewRef = useRef(flushView);
   flushViewRef.current = flushView;
   /** Whether the latest candle is past the right edge (its centre outside the view). */
   const checkBehind = () => {
     const chart = chartRef.current;
-    if (!chart || shownLast.current === null) return setBehind(false);
+    // FD-CHARTOPEN: a chart opens on its last candle; the view before that frame is not the one shown.
+    if (!chart || shownLast.current === null || opening.current) return setBehind(false);
     const ts = chart.timeScale();
     const r = ts.getVisibleLogicalRange();
     const li = ts.timeToIndex(shownLast.current, true);
@@ -642,8 +698,9 @@ export function CandleChart({
   const checkBehindRef = useRef(checkBehind);
   checkBehindRef.current = checkBehind;
 
-  // Create the chart once.
-  useEffect(() => {
+  // Create the chart once. FD-CHARTOPEN: before the page is painted, so that its data and view (set by the effects of
+  // the render this one asks for, at once) are drawn on the first frame: no empty chart shows meanwhile.
+  useLayoutEffect(() => {
     const el = host.current;
     if (!el) return;
     // The colours come from the theme's tokens (--color-ink / --color-muted / --color-line), FD-THEME, and the chart's
@@ -666,6 +723,8 @@ export function CandleChart({
       timeScale: { ...frame.timeScale, rightOffset: lookRef.current.canvas.margins.right, timeVisible: true, secondsVisible: false, shiftVisibleRangeOnNewBar: false },
     });
     paneScale.current = paneScaleOf(chart.options().rightPriceScale);
+    // The settings' margins, until a chart opens with its own (FD-CHARTOPEN); the look's effect leaves them alone.
+    chart.priceScale('right').applyOptions({ scaleMargins: marginsOf(lookRef.current) });
     // The theme switched: recolour the frame in place (the zoom stays).
     const onTheme = () => {
       chart.applyOptions(frameOptions(lookRef.current));
@@ -743,6 +802,8 @@ export function CandleChart({
       el.removeEventListener('touchend', onUp);
       chart.timeScale().unsubscribeVisibleLogicalRangeChange(onRange);
       if (rangeTimer.current !== null) clearTimeout(rangeTimer.current);
+      cancelAnimationFrame(openRaf.current);
+      cancelAnimationFrame(bandRaf.current);
       flushViewRef.current();
       checkFactors();
       // Their table overlays, observers and frames go before the chart does.
@@ -876,6 +937,8 @@ export function CandleChart({
       },
     });
     seriesRef.current?.candle.applyOptions({ priceFormat: { type: 'price', precision: digits, minMove: 1 / 10 ** digits } });
+    // FD-CHARTOPEN: a fixed scale's range read again with the new price step (its rounding in log): not prices moved.
+    if (vert.current.range) vert.current = { ...vert.current, range: chart.priceScale('right').getVisibleRange() };
   }, [chartApi, tz, digits]);
 
   // Data + overlays.
@@ -884,10 +947,12 @@ export function CandleChart({
     const chart = chartApi;
     if (!s || !chart) return;
     const ts = chart.timeScale();
-    const before = ts.getVisibleLogicalRange();
-    const prevLen = prevLength.current;
-    // Like TradingView: when the last bar is on screen, new bars keep the view glued to the right edge.
-    const followRight = before !== null && prevLen > 0 && before.to >= prevLen - 1;
+    // FD-CHARTKEEP: where the last candle is before the new data, when its centre is not past the right edge. As in
+    // TradingView, new bars then keep it there and push the history left. The library alone keeps the bars already drawn
+    // where they are, and the server sends the same number of candles each time (the oldest one leaves): new bars would
+    // fill the room up to the edge.
+    const xBefore = shownLast.current !== null ? ts.timeToCoordinate(shownLast.current) : null;
+    const keepLast = xBefore !== null && xBefore <= ts.width();
     // Another pair or timeframe: the view being left is remembered while its candles are still on screen.
     const switching = lastKey.current !== viewKey;
     if (switching) flushViewRef.current();
@@ -897,7 +962,6 @@ export function CandleChart({
     // FD-BARCOLORBODY: LMA's colour fills the body only; the border and the wick keep the settings' colours.
     const k = lookRef.current.candles;
     s.candle.setData(candles.map((c, i) => ({ time: toTime(c.t), open: c.o, high: c.h, low: c.l, close: c.c, ...candleColors(k, candles, i, barColors?.[i]) })));
-    prevLength.current = candles.length;
     shownLast.current = candles.length ? toTime((candles.at(-1) as Candle).t) : null;
     const r = result;
     if (r) {
@@ -939,50 +1003,14 @@ export function CandleChart({
       );
     }
     if (switching) {
-      // FD-CHARTTV §4: another symbol or timeframe starts fitted ("A" on).
-      chart.priceScale('right').setAutoScale(true);
-      setAuto(true);
-      // Show the new key's remembered view (or the last 180 bars).
+      // FD-CHARTOPEN: the view remembered for every chart goes on with these data, before the library draws them (the
+      // opening effect, declared after the indicators'); the old view's » button goes with it.
       lastKey.current = viewKey;
-      const saved = loadView(viewKey);
-      const n = candles.length;
-      const applyView = () => {
-        viewEpoch.current++;
-        if (saved) {
-          ts.applyOptions({ barSpacing: saved.barSpacing });
-          // scrollToPosition counts from the time scale's last point; points an indicator still draws ahead of the
-          // candles (the pair left) are taken off.
-          const range = ts.getVisibleLogicalRange();
-          const li = shownLast.current !== null ? ts.timeToIndex(shownLast.current, true) : null;
-          const ahead = range && li !== null ? Math.max(0, range.to - ts.scrollPosition() - li) : 0;
-          ts.scrollToPosition(saved.scroll - ahead, false);
-        } else {
-          ts.setVisibleLogicalRange({ from: Math.max(0, n - 180), to: n + 20 });
-        }
-      };
-      // The library applies its own options (rightOffset, the bar spacing) on its next frame, over a view set now, and
-      // ignores a view before it has a size: the view is set after that frame, once the chart has its width.
-      const later = () => {
-        if (chartRef.current !== chart || lastKey.current !== viewKey) return;
-        if (ts.width() > 0) {
-          applyView();
-          return;
-        }
-        const once = () => {
-          ts.unsubscribeSizeChange(once);
-          if (chartRef.current === chart && lastKey.current === viewKey) requestAnimationFrame(applyView);
-        };
-        ts.subscribeSizeChange(once);
-      };
-      viewEpoch.current++;
-      requestAnimationFrame(later);
-      // The new key's view comes a frame later (its range change checks again): no button from the old view meanwhile.
+      opening.current = { key: viewKey };
       setBehind(false);
-    } else {
-      if (followRight && before && candles.length > prevLen) {
-        const added = candles.length - prevLen;
-        ts.setVisibleLogicalRange({ from: before.from + added, to: before.to + added });
-      }
+    } else if (!opening.current) {
+      const shift = keepLast && shownLast.current !== null ? keepShift(xBefore, ts.timeToCoordinate(shownLast.current), ts.options().barSpacing) : null;
+      if (shift !== null) ts.scrollToPosition(ts.scrollPosition() + shift, false);
       // New candles without a scroll: whether the latest one is still in view.
       checkBehindRef.current();
     }
@@ -1047,7 +1075,8 @@ export function CandleChart({
       r.clear();
       renderers.current.delete(uid);
     }
-    if (!viewBefore || lastTime === null || lastBefore === null) return;
+    // FD-CHARTOPEN: a view still to be drawn is set again after this (the opening effect), with these points counted.
+    if (!viewBefore || lastTime === null || lastBefore === null || opening.current) return;
     const keepView = () => {
       if (viewEpoch.current !== epoch) return;
       const now = ts.getVisibleLogicalRange();
@@ -1072,7 +1101,68 @@ export function CandleChart({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed by emaKey
   }, [chartApi, emaKey]);
 
-  // FD-CHARTSETTINGS: the settings applied in place (the zoom stays): the frame, the margins, the candles, the watermark.
+  /** FD-CHARTOPEN: the price scale fitting itself with the settings' margins ("A" on). */
+  const fitItself = (chart: IChartApi) => {
+    cancelAnimationFrame(bandRaf.current);
+    chart.priceScale('right').applyOptions({ autoScale: true, scaleMargins: marginsOf(lookRef.current) });
+    setAuto(true);
+    vert.current = { band: null, range: null };
+  };
+  /**
+   * "A", a double click on the price scale, "Resetează vizualizarea", the top / bottom margins changed: fitting itself, on
+   * every chart from now on (the band is forgotten).
+   */
+  const fitPrices = () => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    fitItself(chart);
+    saveBand(null);
+  };
+  /**
+   * FD-CHARTOPEN: the candles in a band of the price pane, fitted there by the library on its next frame (with all that
+   * "A" fits), then the scale fixed as drawn ("A" off), as on the chart the band was taken on. The band's margins stay on
+   * the fixed scale, where they only map its range (nothing moves); the settings' come back with "A".
+   */
+  const placeBand = (chart: IChartApi, band: Band) => {
+    const ps = chart.priceScale('right');
+    ps.applyOptions({ autoScale: true, scaleMargins: band });
+    setAuto(false);
+    vert.current = { band, range: null };
+    cancelAnimationFrame(bandRaf.current);
+    // Asked after the library's frame (the options above asked for it): it runs once the band is drawn.
+    bandRaf.current = requestAnimationFrame(() => {
+      if (chartRef.current !== chart || vert.current.band !== band || !ps.options().autoScale) return;
+      const range = ps.getVisibleRange();
+      // Not drawn (a pane without height): fitting itself, the band kept for the charts opened next.
+      if (!range) return fitItself(chart);
+      ps.setAutoScale(false);
+      vert.current = { band, range };
+    });
+  };
+  /**
+   * FD-CHARTOPEN: the view every chart opens with (the zoom, the room after the last candle, the band), set before the
+   * library draws the new data: it applies the spacing, then the position, on its next frame, after taking its width (the
+   * price scale's new labels included). The spacing is not read back; the room in px holds whatever that width.
+   */
+  const openView = (chart: IChartApi, o: { key: string }) => {
+    const ts = chart.timeScale();
+    viewEpoch.current++;
+    const barSpacing = loadZoom() ?? defaultSpacing(ts.width(), candlesRef.current.length);
+    const room = loadRoom();
+    ts.applyOptions({ barSpacing });
+    // scrollToPosition counts from the time scale's last point: the points an indicator draws ahead of the candles are
+    // taken off.
+    ts.scrollToPosition((room !== null ? room / barSpacing : DEFAULT_ROOM_BARS) - aheadOf(ts, shownLast.current), false);
+    const band = loadBand();
+    if (band) placeBand(chart, band);
+    else fitItself(chart);
+    cancelAnimationFrame(openRaf.current);
+    openRaf.current = requestAnimationFrame(() => {
+      if (opening.current === o) opening.current = null;
+    });
+  };
+
+  // FD-CHARTSETTINGS: the settings applied in place (the zoom stays): the frame, the candles, the watermark.
   const lookKey = JSON.stringify(look);
   const watermarkKey = (watermark ?? []).join('|');
   useEffect(() => {
@@ -1080,8 +1170,6 @@ export function CandleChart({
     const s = seriesRef.current;
     if (!chart || !s) return;
     chart.applyOptions(frameOptions(look));
-    // The price pane's own scale: its empty space above and below the candles.
-    chart.priceScale('right', 0).applyOptions({ scaleMargins: { top: look.canvas.margins.top / 100, bottom: look.canvas.margins.bottom / 100 } });
     s.candle.applyOptions(candleOptions(look));
     const pane = chart.panes()[0];
     const wm = look.canvas.watermark;
@@ -1100,28 +1188,102 @@ export function CandleChart({
   // The right margin, only when it changes (it moves the view to the latest candle with that much room after it).
   const rightMargin = look.canvas.margins.right;
   const rightApplied = useRef(rightMargin);
+  /**
+   * FD-CHARTROOM, FD-CHARTOPEN: the margins, the room and the band when the settings opened; a margin previewed then put
+   * back restores what it moved.
+   */
+  const openedWith = useRef<{ margin: number; room: number | null; moved: boolean; vMargins: string; band: Band | null; vMoved: boolean } | null>(null);
   useEffect(() => {
     if (!chartApi || rightApplied.current === rightMargin) return;
     rightApplied.current = rightMargin;
+    if (openedWith.current) openedWith.current.moved = true;
     chartApi.timeScale().applyOptions({ rightOffset: rightMargin });
   }, [chartApi, rightMargin]);
+  // FD-CHARTOPEN: the top / bottom margins, only when they change: the prices fit with them ("A" on), on every chart.
+  const vMargins = `${look.canvas.margins.top}|${look.canvas.margins.bottom}`;
+  const vApplied = useRef(vMargins);
+  useEffect(() => {
+    if (!chartApi || vApplied.current === vMargins) return;
+    vApplied.current = vMargins;
+    if (openedWith.current) openedWith.current.vMoved = true;
+    fitPrices();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fitPrices reads refs only
+  }, [chartApi, vMargins]);
+  // After the margins' own effects (declared first): their moves to the old margins come before what is put back.
+  useEffect(() => {
+    if (previewing) {
+      openedWith.current = { margin: rightMargin, room: loadRoom(), moved: false, vMargins, band: vert.current.band, vMoved: false };
+      return;
+    }
+    const was = openedWith.current;
+    openedWith.current = null;
+    const chart = chartRef.current;
+    if (!chart || !was) return;
+    if (was.moved && was.room !== null && rightMargin === was.margin) {
+      viewEpoch.current++;
+      saveRoom(was.room);
+      const ts = chart.timeScale();
+      ts.scrollToPosition(was.room / ts.options().barSpacing - aheadOf(ts, shownLast.current), false);
+    }
+    if (was.vMoved && was.band !== null && vMargins === was.vMargins) {
+      saveBand(was.band);
+      placeBand(chart, was.band);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only on opening and closing; the margins read then
+  }, [previewing]);
   // The trade boxes on the chart's background.
   useEffect(() => {
     seriesRef.current?.labels.setBackground(bg);
   }, [chartApi, bg]);
   // FD-CHARTSETTINGS: "Resetează vizualizarea": the last 180 candles with room on the right, the price scale fitting
-  // itself again (the remembered view becomes this one).
-  // Only a new request: a chart made again later (another symbol) opens on its remembered view, not on a reset.
+  // itself again (the remembered view becomes this one: its zoom and room every chart's, no band; FD-CHARTROOM,
+  // FD-CHARTOPEN). Only a new request: a chart made again later (another symbol) opens on the remembered view.
   const resetDone = useRef(resetView);
   useEffect(() => {
     const chart = chartApi;
     if (!chart || resetView === resetDone.current) return;
     resetDone.current = resetView;
+    viewEpoch.current++;
     const n = candlesRef.current.length;
     chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 180), to: n + 20 });
-    chart.priceScale('right').setAutoScale(true);
-    setAuto(true);
+    fitPrices();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fitPrices reads refs only
   }, [chartApi, resetView]);
+
+  // Sentiq.iOS FD-V3-S19: a signal tapped in the app's list: its candle in the middle, the zoom kept. A time the loaded
+  // candles do not have (older than them) moves nothing.
+  const focusDone = useRef(0);
+  useEffect(() => {
+    const chart = chartApi;
+    if (!chart || !focusTime || focusTime.tick === focusDone.current) return;
+    focusDone.current = focusTime.tick;
+    const i = candlesRef.current.findIndex((c) => c.t === focusTime.time);
+    if (i < 0) return;
+    const ts = chart.timeScale();
+    const r = ts.getVisibleLogicalRange();
+    const half = r ? Math.max(10, (r.to - r.from) / 2) : 90;
+    viewEpoch.current++;
+    ts.setVisibleLogicalRange({ from: i - half, to: i + half });
+  }, [chartApi, focusTime]);
+
+  // FD-CHARTOPEN: a chart opened (another symbol or timeframe, the page again) shows the remembered view from its first
+  // frame: set here, after every effect that changes what is drawn (declared after them), in the same task as the data,
+  // before the library's next frame. Again after each render until that frame: indicators drawn meanwhile change the
+  // points ahead of the candles (Ichimoku).
+  useEffect(() => {
+    const o = opening.current;
+    const chart = chartApi;
+    if (!o || !chart || candlesRef.current.length === 0) return;
+    const ts = chart.timeScale();
+    if (ts.width() > 0) return openView(chart, o);
+    // Without a width (hidden) the library takes no view: set once it has one.
+    const once = () => {
+      ts.unsubscribeSizeChange(once);
+      if (chartRef.current === chart && opening.current === o) openView(chart, o);
+    };
+    ts.subscribeSizeChange(once);
+    return () => ts.unsubscribeSizeChange(once);
+  });
 
   // Positions / orders as price lines; FD-ORDEREDIT: the draggable ones kept by id (a drag moves them in place), the
   // one selected by a tap (or being dragged) thicker.
@@ -1185,26 +1347,82 @@ export function CandleChart({
 
   // FD-CHARTTV §4: "L" — the price scale logarithmic or normal.
   useEffect(() => {
-    chartApi?.priceScale('right').applyOptions({ mode: logScale ? PriceScaleMode.Logarithmic : PriceScaleMode.Normal });
+    const ps = chartApi?.priceScale('right');
+    if (!ps) return;
+    ps.applyOptions({ mode: logScale ? PriceScaleMode.Logarithmic : PriceScaleMode.Normal });
+    // FD-CHARTOPEN: a fixed scale's range read again in the new mode (rounded to the price step in log): not prices moved.
+    if (vert.current.range) vert.current = { ...vert.current, range: ps.getVisibleRange() };
   }, [chartApi, logScale]);
-  // "A" follows the scale: dragging the price scale (or a double click on it) changes it inside the library.
+  /** Where the candles on screen sit: their highest high and lowest low, as the library maps them now. */
+  const measureBand = (chart: IChartApi): Band | null => {
+    const s = seriesRef.current;
+    const ts = chart.timeScale();
+    const r = ts.getVisibleLogicalRange();
+    const cs = candlesRef.current;
+    const height = chart.panes()[0]?.getHeight() ?? 0;
+    if (!s || !r || height <= 0) return null;
+    // The bars seen: their middle (the wick) on the plot. The library also fits one cut by an edge, whose wick is not
+    // seen: taken in, the candles on screen would sit inside the band, and fill it on the next chart.
+    const width = ts.width();
+    let high = -Infinity;
+    let low = Infinity;
+    for (let i = Math.max(0, Math.floor(r.from)); i <= Math.min(cs.length - 1, Math.ceil(r.to)); i++) {
+      const x = ts.logicalToCoordinate(i as Logical);
+      if (x === null || x < 0 || x > width - 1) continue;
+      high = Math.max(high, (cs[i] as Candle).h);
+      low = Math.min(low, (cs[i] as Candle).l);
+    }
+    if (!(low <= high)) return null;
+    const yHigh = s.candle.priceToCoordinate(high);
+    const yLow = s.candle.priceToCoordinate(low);
+    return yHigh === null || yLow === null ? null : bandOf({ high: yHigh, low: yLow, height });
+  };
+  /**
+   * "A" follows the scale: dragging the price scale (or a double click on it) changes it inside the library.
+   * FD-CHARTOPEN: prices the user moved ("A" off) give the band every chart opens with; fitting itself again (a double
+   * click on the scale) forgets it, with the settings' margins back.
+   */
+  const settleScale = () => {
+    const chart = chartRef.current;
+    if (!chart || opening.current) return;
+    const ps = chart.priceScale('right');
+    const v = vert.current;
+    if (ps.options().autoScale) {
+      // A band just placed, not fixed yet, fits itself until its frame is drawn.
+      if (v.band === null) setAuto(true);
+      else if (v.range !== null) fitPrices();
+      return;
+    }
+    setAuto(false);
+    // Only prices moved count: not a scroll in time, nor the band this chart opened with (fitted with all that "A"
+    // fits, a band taken again from it would shrink at every chart).
+    const range = ps.getVisibleRange();
+    const was = v.range;
+    if (!range || (was && Math.abs(range.from - was.from) <= 1e-9 * Math.abs(was.from) && Math.abs(range.to - was.to) <= 1e-9 * Math.abs(was.to))) return;
+    const band = measureBand(chart);
+    vert.current = { band: band ?? v.band, range };
+    if (band) saveBand(band);
+  };
+  const settleRef = useRef(settleScale);
+  settleRef.current = settleScale;
   useEffect(() => {
     const el = host.current;
     if (!chartApi || !el) return;
-    const read = () => requestAnimationFrame(() => setAuto(chartApi.priceScale('right').options().autoScale));
+    const read = () => requestAnimationFrame(() => settleRef.current());
+    // The library takes a double click (a double tap) on its own elements first: the margins go back in this same task,
+    // before its frame draws them.
+    const now = () => settleRef.current();
     el.addEventListener('pointerup', read);
-    el.addEventListener('dblclick', read);
+    el.addEventListener('dblclick', now);
+    el.addEventListener('touchend', now);
     el.addEventListener('wheel', read, { passive: true });
     return () => {
       el.removeEventListener('pointerup', read);
-      el.removeEventListener('dblclick', read);
+      el.removeEventListener('dblclick', now);
+      el.removeEventListener('touchend', now);
       el.removeEventListener('wheel', read);
     };
   }, [chartApi]);
-  const fitPrices = () => {
-    chartApi?.priceScale('right').setAutoScale(true);
-    setAuto(true);
-  };
 
   // FD-CHARTTOUCH: a pinch as Safari delivers it. The library drops a pinch once the first finger has moved at all (any
   // touchmove) before the second lands, and Safari sends even 1 px moves: the page then got the gesture and zoomed. A
@@ -1677,6 +1895,30 @@ export function CandleChart({
   const shown = (v: ChartStyle['canvas']['navigation']) => (v === 'hover' ? hovered || coarse : v === 'always');
   const showLatest = behind && main !== undefined && boxes.plotWidth > 0 && shown(look.canvas.navigation);
   const latestTop = main ? Math.max(main.top + 4, main.top + main.height - LATEST_SIZE - 10) : 0;
+  // FD-CHARTROOM: back to the last candle with the remembered room (without one, the right margin). Scrolled here, not by
+  // the library, whose animation stops a frame short of its end: the room would shrink at each click.
+  const goLatest = () => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    const ts = chart.timeScale();
+    const room = loadRoom();
+    const from = ts.scrollPosition();
+    const to = room !== null ? room / ts.options().barSpacing - aheadOf(ts, shownLast.current) : ts.options().rightOffset;
+    const start = performance.now();
+    const epoch = ++viewEpoch.current;
+    let set = from;
+    cancelAnimationFrame(latestRaf.current);
+    const step = (now: number) => {
+      // Moved by anything else meanwhile (a drag, the library's limit, a view set by code: another chart, a reset): the
+      // scroll stops there.
+      if (chartRef.current !== chart || viewEpoch.current !== epoch || Math.abs(ts.scrollPosition() - set) > 1e-6) return;
+      const p = Math.min(1, Math.max(0, (now - start) / LATEST_SCROLL_MS));
+      set = from + (to - from) * p;
+      ts.scrollToPosition(set, false);
+      if (p < 1) latestRaf.current = requestAnimationFrame(step);
+    };
+    latestRaf.current = requestAnimationFrame(step);
+  };
   const st = look.status;
   // The time axis' row, under the panes: the ⚙ sits there, under the price scale (as in TradingView).
   const panesBottom = Math.max(0, ...Object.values(boxes.panes).map((b) => b.top + b.height));
@@ -1723,7 +1965,7 @@ export function CandleChart({
       {showLatest && (
         <button
           type="button"
-          onClick={() => chartApi?.timeScale().scrollToRealTime()}
+          onClick={goLatest}
           aria-label="Mergi la ultima lumânare"
           title="Mergi la ultima lumânare"
           className="absolute z-10 grid place-items-center rounded-lg border border-line bg-panel text-muted shadow-md transition-colors hover:border-accent hover:bg-hover hover:text-accent"

@@ -6,6 +6,8 @@ export interface Weighs {
   impact: number;
   sourceWeight: number;
   spec: number;
+  /** FIX-SENTWEIGHT: the theme's factor (absent from an answer served before it). */
+  theme?: number;
   flags: string[];
   decay: number;
   clusterN: number;
@@ -14,6 +16,7 @@ export interface Weighs {
 }
 
 const FLAG: Record<string, string> = { sponsored: 'sponsorizat', speculative: 'speculativ', recap: 'rezumat' };
+const THEME: Record<string, string> = { energy: 'energie', ai: 'AI' };
 
 /** "+0,10 puncte", "−0,04 puncte", "0,00 puncte". */
 export function fmtPoints(effect: number): string {
@@ -52,6 +55,8 @@ export function weighLine(w: Weighs, count: number, source: string, publishedAt:
     const why = w.flags.map((f) => FLAG[f]).filter(Boolean).join(', ');
     parts.push(`factor ${fmtNum(w.spec, 1)}${why ? ` (${why})` : ''}`);
   }
+  // FIX-SENTWEIGHT: energy and AI weigh more.
+  if ((w.theme ?? 1) > 1) parts.push(`tema ${w.flags.map((f) => THEME[f]).filter(Boolean).join(' și ')} × ${fmtNum(w.theme as number, 1)}`);
   // How much it moved the index says the effect line; here only what the cap did to its weight.
   const capped = w.cap < 1 ? ` Sursa ei e tăiată de plafon, deci fiecare știre a ei cântărește cu ${fmtNum((1 - w.cap) * 100, 0)}% mai puțin.` : '';
   return `${head}: ${parts.join(', ')}.${capped}`;

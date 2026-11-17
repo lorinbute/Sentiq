@@ -4,12 +4,13 @@ import { createHash } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { indexById, indexId, LISTED_SYMBOL_RE } from '../../shared/indices.ts';
-import { dayKey, isDayKey, isTimeframe, type Timeframe } from '../../shared/time.ts';
+import { DAY_MS, dayKey, isDayKey, isTimeframe, type Timeframe } from '../../shared/time.ts';
 import type { AppContext } from '../context.ts';
 import { readContext } from '../market/context.ts';
 import { coinLogo } from '../market/logos.ts';
 import { STATS_PERIODS } from '../exchange/trade-stats.ts';
-import { CreditBudget, defaultStockAliases, STOCK_SYMBOL_RE, TwelveDataClient } from '../market/stocks.ts';
+import { mergeHistory, OPEN_BEFORE_MS, withJournal, type TradeHistory } from '../exchange/trade-history.ts';
+import { CreditBudget, defaultStockAliases, STOCK_SYMBOL_RE, TD_PLAN_JOB, TwelveDataClient } from '../market/stocks.ts';
 import { reclassifySource } from '../news/ingest.ts';
 import { encodeCategories, sourceCategories } from '../news/categorize.ts';
 import { READ_AS_LABEL, resolveSource, type ReadAs } from '../news/page-feed.ts';
@@ -24,14 +25,17 @@ import { formatIssues, TWELVEDATA_KEY_INVALID, TWELVEDATA_KEY_RE, ValidationErro
 import { AI_PROVIDERS } from '../../shared/ai.ts';
 import { modifyTicketSchema, orderTicketSchema, reverseTicketSchema } from '../../shared/trading.ts';
 import { COOLDOWN_MS, minutes } from '../auth/throttle.ts';
+import { hashToken } from '../auth/sessions.ts';
+import { PRESENCE_TAB_RE } from '../../shared/presence.ts';
 import { CHALLENGE_TTL_MS, WEBAUTHN_COOKIE } from '../auth/passkeys.ts';
 import { TradingError } from '../exchange/trading/types.ts';
-import { me } from './auth.ts';
+import { me, sessionToken } from './auth.ts';
 import { relyingParty } from './auth-routes.ts';
 import { readCookie, setCookie } from './cookies.ts';
 import { ConflictError, NotFoundError } from './errors.ts';
 import { MAX_LISTS, MAX_WATCHED, type UnionChange } from '../watchlists/service.ts';
 import { describeAiError } from '../ai/types.ts';
+import { MAX_ACCOUNTS_PER_USER, type AccountView } from '../exchange/accounts.ts';
 
 const idParam = z.object({ id: z.coerce.number().int().positive() });
 const coinRe = /^[A-Z0-9]{1,15}$/;
@@ -70,9 +74,26 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   // ---------------- health ----------------
   app.get('/api/ping', async () => ({ ok: true }));
 
+  // FD-KEYIDLE: a tab in use beats (`here`), a hidden, closed or unused one leaves; the keys work only with a beat.
+  app.post('/api/presence', async (req) => {
+    const p = parse(z.object({ tab: z.string().regex(PRESENCE_TAB_RE), here: z.boolean() }), req.body);
+    const session = hashToken(sessionToken(req) ?? '');
+    if (!p.here) {
+      await ctx.presence.leave(session, p.tab);
+      return { ok: true };
+    }
+    // Back after a while: their AI's news, their shares' signals and their plan at once, not at the jobs' next turn.
+    if (await ctx.presence.beat(session, p.tab)) {
+      ctx.scheduler.nudge('sentiment.ai', 1000);
+      ctx.scheduler.nudge('scanner', 2000);
+      ctx.scheduler.nudge(TD_PLAN_JOB, 3000);
+    }
+    return { ok: true };
+  });
+
   app.get('/api/health', async () => {
     // Independent reads at once: each one is a trip to the database (TD-AZURE §12).
-    const [jobs, jobsLeader, sources, pending, aiUsers, calendar, ff, info, news, tdUsers] = await Promise.all([
+    const [jobs, jobsLeader, sources, pending, aiUsers, calendar, ff, info, news, tdUsers, here] = await Promise.all([
       ctx.scheduler.status(),
       ctx.scheduler.currentLeader(),
       db.all<SourceRow>(`SELECT ${SOURCE_COLUMNS} FROM sources ORDER BY category, name, id`),
@@ -83,6 +104,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
       db.info(),
       db.get<{ n: number }>('SELECT count(*) AS n FROM news'),
       ctx.settings.usersWithKey('twelvedata'),
+      ctx.presence.activeUsers(),
     ]);
     return {
       now: Date.now(),
@@ -103,11 +125,12 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         itemCount: s.item_count,
       })),
       // FD-AIKEYS: the common score is the local model's; some users have their own AI score the news too.
-      sentiment: { engine: ctx.sentiment.engine().id, model: ctx.nli.status(), pending, aiUsers: aiUsers.length },
+      // FD-KEYIDLE: of them, those using Sentiq now (only their keys work).
+      sentiment: { engine: ctx.sentiment.engine().id, model: ctx.nli.status(), pending, aiUsers: aiUsers.length, aiActive: aiUsers.filter((id) => here.has(id)).length },
       calendar: { ...calendar, ffBlockedUntil: ff.blockedUntil || null },
       db: { ...info, news: news?.n ?? 0 },
       // FD-TDKEYS: each user's own key; how many have one (their credits are theirs to see).
-      twelveData: { users: tdUsers.length },
+      twelveData: { users: tdUsers.length, active: tdUsers.filter((id) => here.has(id)).length },
     };
   });
 
@@ -781,6 +804,33 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     return added;
   });
 
+  // FD-PAPER §2: a Paper Trading profile: made (no key), its name and commission, a reset with a new budget.
+  app.post('/api/accounts/paper', async (req) => {
+    const userId = me(req).id;
+    const id = await ctx.paper.create(userId, req.body, MAX_ACCOUNTS_PER_USER);
+    return (await ctx.accounts.view(id)) as AccountView;
+  });
+
+  const ownPaper = async (req: FastifyRequest, id: number) => {
+    await ownAccount(req, id);
+    if (!(await ctx.accounts.isPaper(id))) throw new NotFoundError('Profilul Paper Trading nu există');
+  };
+
+  app.put('/api/accounts/:id/paper', async (req) => {
+    const { id } = parse(idParam, req.params);
+    await ownPaper(req, id);
+    await ctx.paper.settings(id, req.body);
+    return (await ctx.accounts.view(id)) as AccountView;
+  });
+
+  app.post('/api/accounts/:id/paper/reset', async (req) => {
+    const { id } = parse(idParam, req.params);
+    await ownPaper(req, id);
+    const endedBots = await ctx.paper.reset(id, req.body);
+    ctx.accounts.invalidate(id);
+    return { account: (await ctx.accounts.view(id)) as AccountView, endedBots };
+  });
+
   app.delete('/api/accounts/:id', async (req) => {
     const { id } = parse(idParam, req.params);
     await ownAccount(req, id);
@@ -809,6 +859,30 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     const q = parse(z.object({ period: z.enum(STATS_PERIODS).default('30d'), force: z.enum(['0', '1']).optional() }), req.query);
     await ownAccount(req, id);
     return ctx.accounts.tradeStats(id, q.period, (await mine(req)).timezone, q.force === '1');
+  });
+
+  // FD-TRADES: the account's trades of the period (and the bots' open ones), each once: the bots' with their levels,
+  // the platform's not made by a bot. The bots' reach a day before the period (their close hides the platform's).
+  app.get('/api/portfolio/:id/history', async (req): Promise<TradeHistory> => {
+    const { id } = parse(idParam, req.params);
+    const q = parse(z.object({ period: z.enum(STATS_PERIODS).default('30d'), force: z.enum(['0', '1']).optional() }), req.query);
+    await ownAccount(req, id);
+    const h = await ctx.accounts.tradeHistory(id, q.period, (await mine(req)).timezone, q.force === '1');
+    const bots = await ctx.bots.accountTrades(me(req).id, id, h.exchange, h.from - DAY_MS);
+    // FIX-TRADESOLD: what the platform's history lacks (leverage, SL / TP), from the orders sent from Sentiq.
+    const opened = h.rows.reduce((m, r) => Math.min(m, r.openedAt ?? Infinity), Infinity);
+    const sent = Number.isFinite(opened)
+      ? await ctx.trading.sentFor(me(req).id, id, opened - OPEN_BEFORE_MS).catch((err: unknown) => {
+          ctx.log.warn(`trade history ${id}: the journal could not be read: ${(err as Error).message}`);
+          return [];
+        })
+      : [];
+    const own = withJournal(h.rows, sent, h.exchange, h.broker);
+    // Now, not when the platform's rows were read: a bot's trade closed since is in.
+    const to = Date.now();
+    const { rows, truncated } = mergeHistory(bots, own, h.from, to, to, h.broker);
+    const { exchange: _exchange, broker: _broker, ...rest } = h;
+    return { ...rest, to, rows, truncated };
   });
 
   app.put('/api/portfolio/:id/cost-basis/:asset', async (req) => {

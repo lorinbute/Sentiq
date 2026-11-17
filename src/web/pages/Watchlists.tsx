@@ -435,9 +435,14 @@ export default function WatchlistsPage() {
               <span className="text-[12px] text-faint">Toate listele împreună sunt simbolurile urmărite în Azi, în bandă, în scanner, în știri și în calendar (cel mult 50 diferite).</span>
             </header>
             <AddSymbol have={new Set(order)} onAdd={add} />
-            {/* Always here, whatever is ticked (FD-WATCHLISTS §2): ticking only turns its buttons on, nothing moves. */}
-            <div className="flex flex-wrap items-center gap-2 rounded-[10px] border border-line bg-panel-2 px-3 py-2 text-[13px]" role="toolbar" aria-label="Simbolurile selectate">
-              <span className={clsx('min-w-[7.5rem]', chosen.length ? 'font-medium' : 'text-faint')}>
+            {/* Always here, whatever is ticked (FD-WATCHLISTS §2): ticking only turns its buttons on, nothing moves.
+                FD-MOBILESYM §2: on a phone a grid of fixed sizes: the count, then the two lists, then the two buttons. */}
+            <div
+              className="flex flex-wrap items-center gap-2 rounded-[10px] border border-line bg-panel-2 px-3 py-2 text-[13px] max-sm:grid max-sm:grid-cols-2 max-sm:items-stretch"
+              role="toolbar"
+              aria-label="Simbolurile selectate"
+            >
+              <span className={clsx('min-w-[7.5rem] max-sm:col-span-2', chosen.length ? 'font-medium' : 'text-faint')}>
                 {chosen.length === 0 ? 'Niciunul selectat' : chosen.length === 1 ? '1 selectat' : `${chosen.length} selectate`}
               </span>
               {(['copy', 'move'] as const).map((verb) => (
@@ -451,7 +456,7 @@ export default function WatchlistsPage() {
                     const to = Number(e.target.value);
                     if (to) bulk(verb, to);
                   }}
-                  className="h-8 w-auto py-0 text-[13px]"
+                  className="h-8 w-auto py-0 text-[13px] max-sm:h-10 max-sm:w-full"
                 >
                   <option value="">{verb === 'copy' ? 'Copiază în…' : 'Mută în…'}</option>
                   {others.map((l) => (
@@ -461,10 +466,10 @@ export default function WatchlistsPage() {
                   ))}
                 </select>
               ))}
-              <button className="btn btn-danger h-8" onClick={removeChosen} disabled={chosen.length === 0}>
+              <button className="btn btn-danger h-8 max-sm:h-10" onClick={removeChosen} disabled={chosen.length === 0}>
                 <Trash2 size={14} aria-hidden /> Șterge
               </button>
-              <button className="btn h-8" onClick={() => setSel(EMPTY_SELECTION)} disabled={chosen.length === 0}>
+              <button className="btn h-8 max-sm:h-10" onClick={() => setSel(EMPTY_SELECTION)} disabled={chosen.length === 0}>
                 Anulează selecția
               </button>
             </div>

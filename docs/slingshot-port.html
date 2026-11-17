@@ -1,0 +1,86 @@
+<!doctype html><html lang="ro"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Portul Slingshot System 3.4 în Sentiq</title><style>body{font:15px/1.55 -apple-system,system-ui,sans-serif;max-width:1000px;margin:32px auto;padding:0 16px;color:#222;background:#fff}
+code{font-size:13px;background:#f3f1ec;padding:1px 4px;border-radius:3px}
+pre{background:#f3f1ec;padding:10px 12px;border-radius:6px;overflow:auto}pre code{background:none;padding:0}
+table{border-collapse:collapse;margin:10px 0}th,td{border:1px solid #ddd;padding:4px 8px;text-align:left;vertical-align:top}th{background:#f6f5f2}
+blockquote{margin:12px 0;padding:2px 14px;border-left:3px solid #ddd;color:#555}
+h1{font-size:26px}h2{font-size:21px;margin-top:28px}h3{font-size:17px;margin-top:22px}a{color:#2b5bd7}
+@media (prefers-color-scheme:dark){body{background:#111;color:#e8e8e8}code,pre{background:#2a2a2a}th{background:#1c1c1c}th,td{border-color:#333}blockquote{border-color:#333;color:#aaa}a{color:#8ab4ff}}</style></head><body>
+<h1 id="portul-slingshot-system-34-în-sentiq">Portul Slingshot System 3.4 în Sentiq</h1>
+<blockquote>
+<p>Sentiq se numea Kryptoniq când a fost portat indicatorul (12 oct 2026). Al doilea indicator al graficelor, [DI] Logarithmic Moving Average, e portat la fel, linie cu linie: TD-CHARTUX §2 și TD §9.4 (<code>src/shared/indicator/lma.ts</code>).</p>
+</blockquote>
+<p>Sursa: <code>Sling Shot System/sling-shot-system-3.4.pine</code>. Istoricul versiunilor:</p>
+<ul>
+<li><strong>v3.4</strong>: v3.3 + semnalele SHORT (exact regulile LONG-ului, inversate; fiecare parte își urmărește singură TP/SL) și comutatoarele Long / Short; vezi FD-SLINGSHOT34 / TD-SLINGSHOT34.</li>
+<li><strong>v3.3</strong>: <code>sling-shot-system.pine</code>, păstrat neschimbat; v3.2 „Market Structure Levels” + urmărirea TP/SL reparată (FD-SS33 / TD-SS33).</li>
+</ul>
+<p>Implicit (doar Long), 3.4 dă exact rezultatele lui 3.3: verificat pe 192 de serii reale și în teste, cu fixture-ul <code>__fixtures__/btc-usdt.v3.3.json</code>.
+Implementare: <code>src/shared/indicator/slingshot.ts</code> (logica) + <code>src/shared/indicator/pine.ts</code> (funcțiile <code>ta.*</code>).</p>
+<h2 id="cum-a-fost-portat">Cum a fost portat</h2>
+<ul>
+<li><strong>Linie cu linie</strong>, în aceeași ordine a instrucțiunilor ca în Pine (mașinile de stări LONG și SHORT depind de ordine, iar ordinea creării etichetelor contează pentru limita de 500).</li>
+<li><strong>SHORT</strong> = LONG oglindit, cu variabile proprii (<code>bear*</code>, <code>activeShort*</code>, <code>waitingShortTP</code>, <code>shortDisplay*</code>). Rezultatul e exact cel al LONG-ului pe prețurile negate (graficul întors): verificat pe 192 de serii reale și, în teste, pe datele BTC. În fișierul Pine, codul SHORT e codul LONG trecut prin tabelul de inversare, linie cu linie; singura diferență e blocul mort <code>currentCycleLabel</code> (punctul 2 de mai jos), care la SHORT lipsește.</li>
+<li>Variabilele <code>var</code> sunt stare persistentă; restul se recalculează la fiecare bară.</li>
+<li><code>na</code> = <code>NaN</code>; toate testele de <code>na</code> sunt explicite, ca în Pine.</li>
+<li>Funcțiile <code>ta.ema</code>, <code>ta.rma</code>, <code>ta.rsi</code>, <code>ta.stoch</code>, <code>ta.sma</code>, <code>ta.atr</code>, <code>ta.highest/lowest(+bars)</code>, <code>ta.pivothigh/pivotlow</code>, <code>ta.valuewhen</code> reproduc semantica TradingView (detalii în <a href="research.html">research.html</a> §5). Sunt verificate cu teste față de implementări de referință pe 2000 de lumânări BTC reale.</li>
+<li><code>request.security(..., lookahead_off)</code> pentru Market Structure pe un timeframe superior: pe istoric se vede bara HTF închisă la închiderea barei de chart; pe bara în formare, bara HTF în formare.</li>
+<li><code>max_labels_count = 500</code> este emulat (etichetele cele mai vechi dispar primele).</li>
+</ul>
+<h2 id="diferențe-intenționate-față-de-tradingview">Diferențe intenționate față de TradingView</h2>
+<p>Numele („[DE] Slingshot System 3.4” / „[DE] Slingshot 3.4”) și prețurile din etichetele nivelurilor și din tabel (precizia pieței; în Pine <code>format.mintick</code>) sunt aceleași din 26 oct 2026 (FIX-PINESYNC).</p>
+<table>
+<thead>
+<tr>
+<th>Ce</th>
+<th>De ce</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Dacă lumânările HTF nu se pot încărca, Market Structure se ascunde (cu avertisment)</td>
+<td>nu inventăm valori</td>
+</tr>
+<tr>
+<td>Semnalele/alertele de pe lumânarea în formare sunt marcate „neconfirmat”</td>
+<td>în TradingView se pot schimba până la închiderea barei</td>
+</tr>
+<tr>
+<td>Alertele identice pe bare consecutive sunt grupate în listă („× N bare”)</td>
+<td>doar afișare; logica de alertare e neschimbată</td>
+</tr>
+<tr>
+<td>Primele semnale din istoric pot diferi</td>
+<td>TradingView pornește calculul de la altă bară; semnalele recente coincid la aceleași date</td>
+</tr>
+<tr>
+<td>Mărimea triunghiurilor și a X-ului: „Small” e calibrat pe TradingView (~24 px), celelalte mărimi sunt aproximate</td>
+<td>TradingView nu publică dimensiunile în pixeli ale etichetelor (FD-SS34LIVE)</td>
+</tr>
+</tbody></table>
+<h2 id="particularități-ale-scriptului-pine">Particularități ale scriptului Pine</h2>
+<p>Găsite în timpul portării (12 oct 2026).</p>
+<ol>
+<li><del><strong>Urmărirea TP/SL a unui semnal putea fi pierdută.</strong></del> <strong>Reparată în 3.3</strong> (în Pine și în port). În 3.2, dacă după un LONG confirmat (care încă aștepta TP/SL) se forma un nou „deal” și apoi trendul se întorcea sau minimul V1 era încălcat, nivelurile semnalului deveneau <code>na</code> deși semnalul rămânea „urmărit”: tabelul TP/SL arăta <code>NaN</code>, iar alertele „ATR Stop Loss Hit” / „Take Profit Signal” nu mai apăreau. Pe 75.000 de lumânări reale: 154 de cazuri, 47 de alerte de stop loss pierdute. Reparația nu schimbă semnalele LONG, culorile lor sau rezultatele din istoric. Detalii: <a href="functional-design.html">functional-design.html</a> FD-SS33, <a href="technical-design.html">technical-design.html</a> TD-SS33.</li>
+<li><strong><code>currentCycleLabel</code> nu este niciodată setat</strong>, deci blocul „SUCCESS: Remove current signal from danger list” din logica de Take Profit nu rulează niciodată (cod mort, inofensiv; păstrat).</li>
+<li><strong>Condiția finală <code>if waitingLongTP and low &lt; (activeLongSignalLow - storedStopLossAtr) and hideAtrOnStop</code></strong> nu poate fi niciodată adevărată: blocul de Stop Loss de mai sus pune deja <code>waitingLongTP := false</code> în exact aceeași situație (inofensiv; păstrat).</li>
+<li><strong>„ATR Take Profit Hit”</strong> se declanșează la fiecare bară cu maximul peste țintă cât timp semnalul e urmărit (comportamentul standard al <code>alertcondition</code>). La fel „Short ATR Take Profit Hit”, cu minimul sub țintă.</li>
+<li><strong>Părțile sunt independente (3.4).</strong> LONG-ul și SHORT-ul își urmăresc fiecare TP/SL-ul, își desenează liniile și își dau alertele, ca și cum cealaltă parte n-ar exista. Tabelul TP/SL are rândurile LONG, apoi pe cele SHORT.</li>
+<li><strong>Garda „ascunde la SL”</strong> din afișarea ATR e cod mort și în 3.3 (SL-ul oprește deja urmărirea pe aceeași bară); în 3.4 e oglindită pentru short, tot fără efect.</li>
+<li><strong>Aspectul etichetelor (3.4, FD-SS34LIVE).</strong><ul>
+<li>Un semnal eșuat (stop loss) e un triunghi în Long / Short Failed Signal (culoarea și mărimea părții, FD-STYLEUNIFY).</li>
+<li>Unul invalidat (înlocuit sau oprit de întoarcerea trendului) e un X (<code>label.style_xcross</code>) în Long / Short Invalidated Signal.</li>
+<li>Semnalul în formare are Long / Short Forming Signal; fiecare schimbare de stare pune și mărimea stării (<code>label.set_size</code>), ca în Sentiq (<code>markerState</code> / <code>markerLook</code>).</li>
+<li>Cât timp un semnal nou de aceeași parte e în formare, cel activ apare invalidat. Revine valid dacă cel nou dispare neconfirmat.</li>
+<li>În port, <code>SlingshotMarker.color</code> este <code>&#39;signal&#39; | &#39;failed&#39; | &#39;invalid&#39;</code>. Verde / roșu din 3.3 se citesc ca <code>&#39;signal&#39;</code> / (<code>&#39;failed&#39;</code> sau <code>&#39;invalid&#39;</code>).</li>
+<li><strong>Eticheta STOP LOSS</strong> (FD-SSSL) se pune pe bara unde istoricul marchează eșecul (marcajele <code>stopLoss</code> / <code>shortStopLoss</code>).</li>
+</ul>
+</li>
+<li><strong>TP/SL afișate (3.4, FD-SSLIVEBOX):</strong> întâi semnalul în formare, apoi cel urmărit. În 3.3 era invers. Urmărirea și alertele nu se schimbă.</li>
+</ol>
+<h2 id="când-actualizezi-indicatorul-în-tradingview">Când actualizezi indicatorul în TradingView</h2>
+<ol>
+<li>Fă diff între versiunea veche și cea nouă a fișierului <code>.pine</code>.</li>
+<li>Aplică aceleași schimbări în <code>slingshot.ts</code> (păstrând ordinea instrucțiunilor) și noile input-uri în <code>params.ts</code> (cu aceleași valori implicite).</li>
+<li>Actualizează <code>SLINGSHOT_VERSION</code> (titlurile din aplicație îl folosesc).</li>
+<li>Adaugă un test de scenariu pentru comportamentul nou în <code>slingshot.test.ts</code> și rulează <code>npm test</code>.</li>
+</ol>
+</body></html>

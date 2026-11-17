@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type RefObject } from 'react';
 import { useLocation } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { SettingsView } from '../shared/settings.ts';
@@ -170,4 +170,19 @@ export function useNextHighImpact(now: number) {
     enabled: currencies !== undefined,
   });
   return q.data?.events.find((e) => !e.allDay && e.ts > now - 2 * 60_000) ?? null;
+}
+
+/**
+ * FD-MOBILESYM: in a row that scrolls sideways (`row-fill` on a phone), the chosen option (`aria-pressed="true"`) is
+ * brought into view whenever `key` changes, sideways only (scrollIntoView could move the page too).
+ */
+export function useRevealInRow(ref: RefObject<HTMLElement | null>, key: unknown): void {
+  useEffect(() => {
+    const row = ref.current;
+    const on = row?.querySelector<HTMLElement>('[aria-pressed="true"]');
+    if (!row || !on || row.scrollWidth <= row.clientWidth) return;
+    const left = on.getBoundingClientRect().left - row.getBoundingClientRect().left + row.scrollLeft;
+    if (left < row.scrollLeft) row.scrollLeft = left;
+    else if (left + on.offsetWidth > row.scrollLeft + row.clientWidth) row.scrollLeft = left + on.offsetWidth - row.clientWidth;
+  }, [ref, key]);
 }

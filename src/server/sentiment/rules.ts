@@ -17,12 +17,25 @@ const DOWN = String.raw`(?:plung(?:e|es|ed)|plummet(?:s|ed)?|tumbl(?:e|es|ed)|cr
 const RISK = String.raw`(?:stocks?|equit(?:y|ies)|s&p(?: 500)?|nasdaq|dow(?: jones)?|wall street|markets?|shares|futures|risk assets|crypto(?:currenc(?:y|ies))?|bitcoin|btc|ether(?:eum)?|eth|altcoins?|solana|xrp|tokens?|coins?)`;
 const COINS = String.raw`(?:btc|bitcoins?|eth|ether(?:eum)?|sol(?:ana)?|xrp|tokens?|coins?|crypto)`;
 const VENUES = String.raw`(?:exchanges?|coinbase|binance|kraken|bitstamp|okx|bybit|bitfinex|gemini|kucoin)`;
+/**
+ * FIX-SENTWEIGHT: energy's price: its goods (oil … gas), or the prices / costs / bills of fuel, power and energy. Not the
+ * shares of its companies ("oil stocks rise", "oil majors"): those are the market's rules.
+ */
+const E_GOODS = String.raw`(?:crude(?: oil)?|heating oil|(?<!\b(?:palm|olive|vegetable|cooking|edible|soybean|sunflower) )oil|brent|wti|gasoline|petrol|diesel|jet fuel|natural gas|lng|(?<!\b(?:eth|ethereum|network|transaction|gwei) )gas(?= prices?\b))(?!\s+(?:stocks?|shares|majors?|compan(?:y|ies)|firms?|producers?|drillers?|giants?|explorers?|services|traders?|tankers?|workers?|funds?|etfs?|executives?|fields?|output|production|exports?|imports?|supply|supplies|demand|deals?|stockpiles?|inventor(?:y|ies)))`;
+const E_PRICED = String.raw`(?:fuel|electricity|power|energy|utility|heating)`;
+const E_NOUN = String.raw`(?:prices?|costs?|bills?|tariffs?)`;
+const E_SUBJ = String.raw`(?:${E_GOODS}(?: (?:prices?|futures|costs?))?|${E_PRICED} ${E_NOUN})`;
+const E_SPIKE = String.raw`(?:spik(?:e|es|ed|ing)|surg(?:e|es|ed|ing)|soar(?:s|ed|ing)?|jump(?:s|ed|ing)?|skyrocket(?:s|ed|ing)?|rocket(?:s|ed)?)`;
+const E_UP = String.raw`(?:ris(?:e|es|ing)|rose|climb(?:s|ed|ing)?|rall(?:y|ies|ied|ying)|gain(?:s|ed)?|rebound(?:s|ed)?|advanc(?:e|es|ed)|increas(?:e|es|ed)|higher|(?:is |are )?up \d[\d.,]*%|hits? [^.]{0,15}?\bhighs?|(?:\d+|multi|two|three|four|six)-?(?:year|month|week) highs?|record highs?|tops? \$\d)`;
+const E_PLUNGE = String.raw`(?:plung(?:e|es|ed|ing)|plummet(?:s|ed|ing)?|tumbl(?:e|es|ed|ing)|slump(?:s|ed|ing)?|crash(?:es|ed|ing)?|sink(?:s|ing)?|sank)`;
+const E_DOWN = String.raw`(?:fall(?:s|ing)?|fell|drop(?:s|ped|ping)?|dip(?:s|ped|ping)?|slid(?:e|es|ing)?|slip(?:s|ped|ping)?|declin(?:e|es|ed|ing)|eas(?:e|es|ed|ing)|retreat(?:s|ed|ing)?|lower|cheaper|(?:is |are )?down \d[\d.,]*%|hits? [^.]{0,15}?\blows?|(?:\d+|multi|two|three|four|six)-?(?:year|month|week) lows?|below \$\d)`;
 
 export const RULES: Rule[] = [
   // ---- neutral / informational (score 0 dampens the model) ----
   r('educational', String.raw`^(?:what is|what are|how to|how do|why do|a beginner|explainer|guide to)\b|\bexplained\b|\bbeginner'?s guide\b`, 0),
   r('sentencing', String.raw`\b(?:sentenced|prison term|jailed|convicted)\b`, 0),
-  r('fees-low', String.raw`\b(?:fees?|gas)\b[^.]{0,30}?\b(?:fall|falls|drop|drops|declin\w*|lows?)\b`, 0),
+  // A network's gas, not the pump's (FIX-SENTWEIGHT: "Gas prices fall" is energy getting cheaper).
+  r('fees-low', String.raw`\b(?:fees?|(?:eth|ethereum|network|transaction|gwei|l2|layer[- ]?2) gas)\b[^.]{0,30}?\b(?:fall|falls|drop|drops|declin\w*|lows?)\b`, 0),
   r('jobless-down', String.raw`\bjobless claims\b[^.]{0,25}?\b(?:fall|falls|fell|drop|drops|declin\w*|eas\w*)\b`, 0.1),
   r('jobless-up', String.raw`\bjobless claims\b[^.]{0,25}?\b(?:rise|rises|rose|jump\w*|climb\w*|surg\w*)\b`, -0.3),
   r('flat', String.raw`\b(?:holds? steady|steady|flat|little changed|unchanged|range-?bound|consolidat\w*|sideways|treads? water|muted|mixed)\b`, 0),
@@ -39,6 +52,13 @@ export const RULES: Rule[] = [
   r('dollar-up', String.raw`\b(?:dollar|dxy|greenback)\b[^.]{0,25}?\b(?:rall\w*|surg\w*|jump\w*|strengthen\w*|climb\w*|ris(?:e|es|ing)|rose|soar\w*|hits? [^.]{0,15}?\bhigh)\b`, -0.5),
   r('yen-up', String.raw`\byen\b[^.]{0,15}?\b(?:surg\w*|jump\w*|soar\w*|strengthen\w*|rall\w*)\b|\bcarry trade\b[^.]{0,20}?\bunwind`, -0.4),
 
+  // ---- energy prices (FIX-SENTWEIGHT): dearer energy is bad for the market, cheaper good ----
+  r('energy-forecast', String.raw`\b(?:sees?|eyes?|predicts?|forecasts?|expects?|targets?|projects?)\b[^.]{0,20}?\b${E_GOODS}\b[^.]{0,25}?\$\d`, 0),
+  r('energy-spike', String.raw`\b${E_SUBJ}\b[^.]{0,20}?\b${E_SPIKE}\b|\b(?:${E_GOODS}|${E_PRICED}) (?:price )?(?:spikes?|surges?|shocks?|crisis)\b`, -0.7),
+  r('energy-plunge', String.raw`\b${E_SUBJ}\b[^.]{0,20}?\b${E_PLUNGE}\b`, 0.7),
+  r('energy-up', String.raw`\b${E_SUBJ}\b[^.]{0,20}?\b${E_UP}|\b(?:higher|rising|elevated|soaring|surging|record|high) (?:${E_GOODS}|${E_PRICED}) ${E_NOUN}\b`, -0.6),
+  r('energy-down', String.raw`\b${E_SUBJ}\b[^.]{0,20}?\b${E_DOWN}|\b(?:lower|falling|cheaper) (?:${E_GOODS}|${E_PRICED}) ${E_NOUN}\b`, 0.6),
+
   // ---- inflation / growth / labour ----
   r('inflation-cool', String.raw`\b(?:inflation|cpi|pce|ppi|prices)\b[^.]{0,30}?\b(?:cool\w*|eas\w*|slow\w*|fall\w*|fell|soft\w*|below (?:expectations|estimates|forecasts?))\b`, 0.7),
   r('inflation-hot', String.raw`\bhotter(?:-than-expected)?\b|\b(?:inflation|cpi|pce|ppi)\b[^.]{0,30}?\b(?:accelerat\w*|jump\w*|surg\w*|ris(?:e|es)|rose|heats? up|above (?:expectations|estimates|forecasts?)|sticky|hot)\b`, -0.7),
@@ -53,9 +73,6 @@ export const RULES: Rule[] = [
   // ---- safe havens / commodities ----
   r('safe-haven', String.raw`\bgold\b[^.]{0,30}?\b(?:record|all-time high|surg\w*|soar\w*|safe[- ]haven)\b|\bseek(?:s|ing)? safety\b|\bsafe[- ]havens?\b|\bflight to (?:safety|quality)\b`, -0.4),
   r('gold-up', String.raw`\bgold\b[^.]{0,20}?\b(?:ris(?:e|es|ing)|rose|climb\w*|rall\w*|jump\w*|gain\w*)\b`, -0.3),
-  r('oil-spike', String.raw`\boil\b[^.]{0,20}?\b(?:spik\w*|surg\w*|soar\w*|jump\w*)\b`, -0.5),
-  r('oil-up', String.raw`\boil\b[^.]{0,20}?\b(?:ris(?:e|es|ing)|rose|climb\w*|rall\w*|gain\w*)\b`, -0.3),
-  r('oil-down', String.raw`\boil\b[^.]{0,20}?\b(?:fall\w*|fell|drop\w*|slid\w*|tumbl\w*|slump\w*)\b`, 0.2),
   r('dominance-up', String.raw`\bdominance\b[^.]{0,15}?\b(?:climb\w*|ris(?:e|es)|rose|jump\w*|hits?)\b`, -0.3),
 
   // ---- flows / supply ----

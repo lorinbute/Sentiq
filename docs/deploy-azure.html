@@ -1,0 +1,200 @@
+<!doctype html><html lang="ro"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sentiq pe Azure App Service</title><style>body{font:15px/1.55 -apple-system,system-ui,sans-serif;max-width:1000px;margin:32px auto;padding:0 16px;color:#222;background:#fff}
+code{font-size:13px;background:#f3f1ec;padding:1px 4px;border-radius:3px}
+pre{background:#f3f1ec;padding:10px 12px;border-radius:6px;overflow:auto}pre code{background:none;padding:0}
+table{border-collapse:collapse;margin:10px 0}th,td{border:1px solid #ddd;padding:4px 8px;text-align:left;vertical-align:top}th{background:#f6f5f2}
+blockquote{margin:12px 0;padding:2px 14px;border-left:3px solid #ddd;color:#555}
+h1{font-size:26px}h2{font-size:21px;margin-top:28px}h3{font-size:17px;margin-top:22px}a{color:#2b5bd7}
+@media (prefers-color-scheme:dark){body{background:#111;color:#e8e8e8}code,pre{background:#2a2a2a}th{background:#1c1c1c}th,td{border-color:#333}blockquote{border-color:#333;color:#aaa}a{color:#8ab4ff}}</style></head><body>
+<h1 id="sentiq-pe-azure-app-service">Sentiq pe Azure App Service</h1>
+<p>Pașii pentru a publica Sentiq online (FD-AZURE, TD-AZURE §11). Baza de date e deja în Azure SQL (<code>serento-sql</code> / <code>sentiq</code>, utilizatorul <code>sentiq_app</code>); aici se adaugă serverul web. App Service pe Linux e administrat de Microsoft: patch-urile sistemului și ale Node.js le face Microsoft, iar consola se deschide doar din portal, cu login-ul Microsoft. Nu există port SSH deschis spre internet.</p>
+<h2 id="1-aplicația-web">1. Aplicația web</h2>
+<p>Portal → <strong>Create a resource → Web App</strong>:</p>
+<table>
+<thead>
+<tr>
+<th>Câmp</th>
+<th>Valoare</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Resource group</td>
+<td>unul nou, de exemplu <code>sentiq-rg</code></td>
+</tr>
+<tr>
+<td>Name</td>
+<td>de exemplu <code>sentiq-dusty</code> → adresa <code>https://sentiq-dusty.azurewebsites.net</code></td>
+</tr>
+<tr>
+<td>Publish</td>
+<td>Code</td>
+</tr>
+<tr>
+<td>Runtime stack</td>
+<td><strong>Node 24 LTS</strong></td>
+</tr>
+<tr>
+<td>Operating System</td>
+<td><strong>Linux</strong></td>
+</tr>
+<tr>
+<td>Region</td>
+<td>aceeași regiune ca serverul <code>serento-sql</code> (fiecare interogare face un drum până la bază)</td>
+</tr>
+<tr>
+<td>Pricing plan</td>
+<td><strong>Basic B2</strong> (3,5 GB; cam dublu față de B1, care costă ~$13 / lună). Pe B1 build-ul nu încape lângă aplicația pornită (§5)</td>
+</tr>
+<tr>
+<td>Deployment / GitHub Actions</td>
+<td>dezactivat (publicarea se face cu zip, §5)</td>
+</tr>
+<tr>
+<td>Application Insights</td>
+<td>opțional (oprit = fără cost în plus)</td>
+</tr>
+</tbody></table>
+<h2 id="2-setările-de-siguranță">2. Setările de siguranță</h2>
+<p>Aplicația → <strong>Settings → Configuration</strong>:</p>
+<ul>
+<li><em>General settings</em>:<ul>
+<li><strong>Startup Command</strong>: <code>node src/server/main.ts</code></li>
+<li><strong>Always On</strong>: On (joburile de fundal rulează fără pauze)</li>
+<li><strong>HTTP version</strong>: 2.0</li>
+<li><strong>Session affinity</strong>: Off</li>
+<li><strong>SCM Basic Auth Publishing Credentials</strong>: Off</li>
+<li><strong>FTP Basic Auth Publishing Credentials</strong>: Off</li>
+<li><strong>FTP state</strong>: Disabled</li>
+</ul>
+</li>
+<li><em>TLS/SSL</em> (sau <strong>Settings → Certificates / Custom domains</strong>): <strong>HTTPS Only</strong>: On; <strong>Minimum TLS</strong>: 1.2.</li>
+<li><strong>Scale out</strong>: o singură instanță (pe Basic e implicit). Cu mai multe, joburile tot rulează o singură dată (TD-AZURE §6), dar nu e nevoie de ele.</li>
+<li><strong>Monitoring → Health check</strong>: calea <code>/api/ping</code>.</li>
+</ul>
+<h2 id="3-variabilele-de-mediu">3. Variabilele de mediu</h2>
+<p><strong>Settings → Environment variables → App settings</strong> (aceleași nume ca în <code>data/database.env</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Nume</th>
+<th>Valoare</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>SENTIQ_DB_SERVER</code></td>
+<td><code>serento-sql.database.windows.net</code></td>
+</tr>
+<tr>
+<td><code>SENTIQ_DB_NAME</code></td>
+<td><code>sentiq</code></td>
+</tr>
+<tr>
+<td><code>SENTIQ_DB_USER</code></td>
+<td><code>sentiq_app</code></td>
+</tr>
+<tr>
+<td><code>SENTIQ_DB_PASSWORD</code></td>
+<td>parola lui <code>sentiq_app</code> (recomandat ca referință Key Vault, mai jos)</td>
+</tr>
+<tr>
+<td><code>SENTIQ_MASTER_KEY</code></td>
+<td>conținutul fișierului <code>data/master.key</code> de pe Mac (un rând base64). <strong>Aceeași cheie</strong>, altfel cheile de exchange salvate nu se mai pot citi.</td>
+</tr>
+<tr>
+<td><code>NODE_ENV</code></td>
+<td><code>production</code></td>
+</tr>
+<tr>
+<td><code>SCM_DO_BUILD_DURING_DEPLOYMENT</code></td>
+<td><code>true</code> (Azure face build-ul pe Linux, deci modulele native primesc binarele potrivite)</td>
+</tr>
+<tr>
+<td><code>CUSTOM_BUILD_COMMAND</code></td>
+<td><code>bash scripts/azure-build.sh</code>. Fără el, build-ul pică („vite: not found”): cu <code>NODE_ENV=production</code>, Azure nu instalează pachetele de build. Scriptul le instalează, face build-ul și apoi le scoate.</td>
+</tr>
+<tr>
+<td><code>SENTIQ_PUBLIC_URL</code></td>
+<td><code>https://domeniul-ales</code> (după §6; până atunci lipsește)</td>
+</tr>
+</tbody></table>
+<p>Secretele (<code>SENTIQ_DB_PASSWORD</code>, <code>SENTIQ_MASTER_KEY</code>) pot sta într-un <strong>Key Vault</strong>:</p>
+<ol>
+<li>Creezi un Key Vault cu RBAC.</li>
+<li>Pui secretele în el.</li>
+<li>Aplicației îi dai <em>Identity → System assigned: On</em> și rolul <em>Key Vault Secrets User</em> pe vault.</li>
+<li>Valoarea setării devine <code>@Microsoft.KeyVault(SecretUri=https://&lt;vault&gt;.vault.azure.net/secrets/&lt;nume&gt;/)</code>.</li>
+</ol>
+<p>Fără Key Vault, App Service păstrează setările criptate, dar oricine are acces la aplicație în portal le poate vedea.</p>
+<p>Nu e nevoie de <code>PORT</code> (îl dă Azure) și nici de <code>SENTIQ_DATA_DIR</code>: în Azure, Sentiq ține modelul de sentiment și jurnalele în <code>/home/data</code>, care rămâne între publicări.</p>
+<h2 id="4-accesul-la-baza-de-date">4. Accesul la baza de date</h2>
+<p>Serverul <code>serento-sql</code> → <strong>Security → Networking → Firewall rules</strong>: adaugi <strong>toate</strong> IP-urile din aplicație → <strong>Properties → Outbound IP addresses</strong>, câte o regulă pe IP. Aplicația iese spre bază prin oricare dintre ele: cu unul singur, conectarea merge doar uneori.</p>
+<p>Lista se poate vedea și din terminal: <code>az webapp show -g &lt;grup&gt; -n &lt;aplicație&gt; --query outboundIpAddresses -o tsv</code>.</p>
+<p>Varianta mai largă e „Allow Azure services and resources to access this server”, care deschide portul oricărui serviciu din Azure (parola rămâne obligatorie). Firewall-ul e la nivel de server, deci regulile se aplică și bazelor Serento.</p>
+<h2 id="5-publicarea-codului">5. Publicarea codului</h2>
+<p>De pe Mac, o dată:</p>
+<pre><code>brew install azure-cli
+az login
+</code></pre>
+<p>La fiecare publicare, din folderul proiectului:</p>
+<pre><code>rm -f ../sentiq.zip
+zip -r ../sentiq.zip . -x &#39;node_modules/*&#39; &#39;data/*&#39; &#39;dist/*&#39; &#39;.git/*&#39; &#39;*.app/*&#39; &#39;.npm-cache/*&#39; &#39;.claude/*&#39; &#39;*.DS_Store&#39;
+</code></pre>
+<p>Apoi arhiva se urcă după procedura de mai jos (aplicația oprită, deploy, pornire).</p>
+<p><code>rm -f</code> e necesar: fără el, <code>zip</code> adaugă la arhiva veche, iar fișierele șterse din proiect rămân în ea. Build-ul pe Azure durează câteva minute (<code>npm ci</code> + <code>vite build</code>).</p>
+<p><code>data/</code> nu se urcă niciodată (conexiunea și cheia master sunt în setările de la §3). Jurnalul pornirii: aplicația → <strong>Log stream</strong>.</p>
+<p><strong>Un build întrerupt oprește site-ul.</strong> Build-ul începe prin a șterge <code>oryx-manifest.toml</code> din <code>wwwroot</code>. Fișierul acesta spune la pornire să se dezarhiveze <code>node_modules.tar.zst</code>. Dacă Kudu repornește la jumătatea build-ului (o setare schimbată, Azure mută aplicația pe alt worker), deploy-ul rămâne „în lucru”, iar aplicația nu mai pornește la repornirea următoare (<code>exit code 1</code>, fără nimic în jurnalul Sentiq). Ce se face:</p>
+<ol>
+<li>Se verifică: <code>/api/deployments/latest</code> în Kudu arată <code>Running oryx build...</code> fără să avanseze, iar în Kudu nu rulează niciun <code>npm</code>.</li>
+<li>Se șterge lacătul rămas: <code>rm -rf /home/site/locks/deployment</code> (Kudu → consolă; altfel expiră singur după 40 de minute).</li>
+<li>Se publică din nou aceeași arhivă (<code>az webapp deploy … --async true</code>).
+(14 oct 2026: site-ul a fost căzut 12:11–12:27 și 14:16–14:24 UTC din cauza asta.)</li>
+</ol>
+<p><strong>De ce se întrerupe build-ul:</strong> pe B1 (1,75 GB) aplicația pornită (cu modelul de sentiment) și build-ul (<code>npm ci</code> + <code>vite</code>) nu încap împreună în memorie: Azure repornește instanța în mijlocul build-ului. Ambele deploy-uri care au reușit pe 14 oct au rulat cu aplicația deja oprită. <strong>Procedura de publicare (FD-DBHEAL §2):</strong> aplicația se oprește întâi, ca build-ul să aibă memorie și să nu ruleze două containere deodată:</p>
+<pre><code>az webapp stop --resource-group DE-SQL-RG --name sentiq
+az webapp deploy --resource-group DE-SQL-RG --name sentiq --src-path ../sentiq.zip --type zip --async true
+az webapp start --resource-group DE-SQL-RG --name sentiq
+</code></pre>
+<p>Comanda <code>az webapp deploy</code> nu se termină singură (așteaptă pornirea site-ului, care e oprit): <code>az webapp start</code> se dă când Kudu → <code>/api/deployments/latest</code> arată <code>status 4</code> și <code>complete true</code>. Prima publicare așa (14 oct 2026, 15:10–15:21 UTC) a mers fără întrerupere.</p>
+<p>O pauză planificată de câteva minute e mai bună decât o cădere la jumătatea build-ului.</p>
+<p><strong>Din 14 oct 2026 seara, planul e B2</strong> (3,5 GB; utilizatorul l-a schimbat; aplicația a repornit singură la 16:27 UTC, fără erori). Build-ul are loc lângă aplicația pornită, deci <strong>publicarea nu mai oprește aplicația</strong>:</p>
+<pre><code>az webapp deploy --resource-group DE-SQL-RG --name sentiq --src-path ../sentiq.zip --type zip --async true
+</code></pre>
+<ul>
+<li>Se urmărește Kudu → <code>/api/deployments/latest</code> până la <code>status 4</code> și <code>complete true</code>; la final aplicația repornește singură pe codul nou, iar comanda <code>az</code> se termină singură. Prima publicare pe B2 (14 oct 2026, deploy <code>d6965246</code>): build în 1,7 minute, <code>/api/ping</code> cu 200 pe toată durata, codul nou pornit la 17:01:34 UTC.</li>
+<li>Se verifică: „Sentiq running” în jurnalul Sentiq, <code>/api/ping</code> cu 200, niciun lacăt rămas în bază.</li>
+<li>Dacă un build tot se întrerupe (Kudu repornit, aplicația mutată pe alt worker): pașii de mai sus (lacătul din <code>/home/site/locks/deployment</code>), iar ca rezervă procedura cu <code>az webapp stop</code> / <code>start</code>.</li>
+</ul>
+<p><strong>16 oct 2026: s-a întâmplat și pe B2.</strong> Build-ul pornit la 22:08 UTC cu aplicația pornită a fost oprit de o repornire a Kudu (~22:11; joburile aplicației vechi dădeau timeout-uri chiar atunci). Manifestul fusese deja șters, deci aplicația nu a mai pornit (<code>Cannot find package &#39;mssql&#39;</code>), iar Azure a blocat-o după pornirile eșuate. Site-ul a fost căzut 22:11–22:27 UTC. Reparat cu procedura cu aplicația oprită: lacătul șters, aceeași arhivă publicată din nou, build în 3,5 minute, <code>az webapp start</code>. <strong>De acum, publicarea se face mereu cu aplicația oprită</strong> (<code>stop</code> → <code>deploy</code> → <code>start</code> după <code>status 4</code>): câteva minute de pauză planificată în loc de riscul unei căderi.</p>
+<p><strong>18 oct 2026: planul e din nou B1</strong> (<code>az appservice plan show</code> → <code>B1</code>). Publicarea <code>d7f4b886</code> s-a făcut cu aplicația oprită (build 17:46–17:50 UTC, neîntrerupt). Pauza a ținut până la 18:13 UTC, pentru că urmărirea stării a rămas fără răspuns: comenzile <code>az</code> de urmărire trebuie să poată ieși în rețea.</p>
+<p>Capcane la urmărire:</p>
+<ul>
+<li><code>az webapp deploy</code> poate spune și invers, „Site failed to start” (după ~14 minute de așteptare): s-a întâmplat pe 16 nov 2026 (deployment 5503e02c), cu site-ul deja pornit de <code>az webapp start</code> și sănătos (o singură pornire în jurnal, <code>/api/ping</code> 200, pachetul nou). Comanda nu vede o pornire dată separat. Se crede tot Kudu și ping-ul.</li>
+<li><code>az webapp deploy</code> poate spune „Deployment has completed successfully” deși build-ul încă rulează (endpoint-ul lui de stare a dat timeout). Se crede doar Kudu → <code>/api/deployments/latest</code> (<code>az rest --method get --uri &quot;https://&lt;scm&gt;/api/deployments/latest&quot; --resource https://management.azure.com/</code>).</li>
+<li>Kudu scrie <code>&quot;complete&quot;: true</code> cu literă mică.</li>
+<li>Kudu întoarce cheile în ordine alfabetică (<code>complete</code> înaintea lui <code>status</code>). O verificare de text care cere <code>status</code> înaintea lui <code>complete</code> nu vede sfârșitul build-ului. Pe 17 nov. 2026 (deploy 4a237507), build-ul s-a terminat la 11:36:21 UTC, dar <code>az webapp start</code> s-a dat abia la 11:42 din cauza asta. Se verifică fiecare câmp separat.</li>
+<li>Imediat după <code>az webapp stop</code>, Kudu poate răspunde 503 la încălzire, iar <code>az webapp deploy</code> se oprește cu „Deployment failed … HTTP_503” fără să urce nimic. Se așteaptă până când <code>/api/deployments/latest</code> răspunde din nou (arată tot deploy-ul vechi), apoi se dă aceeași comandă încă o dată (12 nov 2026: Kudu a revenit după ~1 minut).</li>
+<li>Urmărirea trebuie să semnaleze și când nu primește răspuns de mai multe ori la rând, nu doar <code>status 4</code>. Pe 12 nov 2026, o urmărire care a rămas pe „fără răspuns” n-a văzut sfârșitul build-ului, iar pornirea a întârziat ~8 minute.</li>
+<li>Shell-ul de pe Mac e zsh, care nu desparte în cuvinte o variabilă necitată (<code>set -- $linie</code> lasă totul în <code>$1</code>). Pe 13 nov 2026, o urmărire scrisă așa a văzut „4 True”, dar n-a recunoscut sfârșitul, iar pornirea a întârziat ~11 minute. Câmpurile se iau separat (de exemplu, câte un <code>python3 -c</code> sau <code>jq -r</code> pentru fiecare), iar condiția se verifică pe linia scrisă în jurnal înainte de a fi lăsată nesupravegheată.</li>
+<li>Cât rulează build-ul, <code>/api/deployments/latest</code> răspunde cu HTTP 202 și un JSON cu <code>status: 1</code> („Running oryx build…”); la final, 200 cu <code>status: 4</code>. Urmărirea trebuie să ruleze cu acces la rețea, adică în afara sandbox-ului Claude Code (o comandă Bash în fundal, nu un Monitor, care rulează în sandbox). Pe 12 nov 2026, urmărirea pe „fără răspuns” era chiar sandbox-ul care bloca cererea. Pe 13 nov 2026, cu urmărirea în afara sandbox-ului, pornirea s-a făcut la 9 secunde după build.</li>
+<li>Cât Azure e oprit, joburile le ia Mac-ul. Dacă publicarea schimbă schema bazei, Mac-ul se repornește imediat după ce Azure a pornit pe codul nou (<code>scripts/sentiq.sh restart</code>), altfel ține joburile cu codul vechi.</li>
+</ul>
+<h2 id="6-domeniul">6. Domeniul</h2>
+<ol>
+<li>Aplicația → <strong>Custom domains → Add custom domain</strong>.</li>
+<li>Pui recordurile cerute (CNAME + TXT) la furnizorul DNS.</li>
+<li>Alegi <strong>App Service Managed Certificate</strong> (gratuit) și legătura SNI.</li>
+<li>Setezi <code>SENTIQ_PUBLIC_URL=https://domeniul</code> (§3).</li>
+</ol>
+<p>Domeniul Sentiq: <strong><code>sentiq.money</code></strong> (legat de utilizator pe 14 oct 2026, cu certificat SNI), <code>SENTIQ_PUBLIC_URL=https://sentiq.money</code>.</p>
+<p>Legat de domeniu:</p>
+<ul>
+<li><strong>Passkey-urile sunt legate de domeniu</strong>: cele făcute pe <code>localhost</code> nu merg pe adresa nouă. Fiecare își adaugă unul nou în Securitate, după ce intră cu parola și 2FA.</li>
+<li>La pornire, aplicația scrie adresa publică în bază; Mac-ul o folosește pentru linkurile de activare (FD-ONLINE §2).</li>
+<li>Adresa <code>*.azurewebsites.net</code> merge și ea, dar un passkey făcut acolo nu merge pe domeniu. De aceea, passkey-urile se fac doar după ce domeniul e gata.</li>
+</ul>
+<h2 id="7-după-publicare">7. După publicare</h2>
+<ul>
+<li>Pe Mac, Sentiq poate rămâne pornit pe aceeași bază: joburile le rulează doar una dintre instanțe (Stare sistem → „Joburi de fundal”). Prima parolă de admin și <code>admin-reset</code> se fac în continuare de pe Mac (FD-AZURE §4).</li>
+<li>Connectorul MCP nu mai există (scos pe 14 oct 2026, FD-MCPREMOVE); setarea <code>SENTIQ_MCP</code> a fost ștearsă din App Service.</li>
+<li>Cost aproximativ: App Service B2 (cam dublu față de B1, care costă ~$13 / lună), plus baza (Basic ~$5, S0 ~$15).</li>
+</ul>
+</body></html>

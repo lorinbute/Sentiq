@@ -143,6 +143,11 @@ export class Scheduler {
     }
   }
 
+  /** FIX-DBSTUCK: the jobs running now (the log names them when the process was blocked). */
+  runningJobs(): string[] {
+    return [...this.jobs.entries()].filter(([, rt]) => rt.running !== null).map(([name]) => name);
+  }
+
   /** Who runs the jobs as this process last saw it (no database call). */
   leaderInfo(): JobsLeader {
     return { host: this.leader ? this.host : this.leaseHost, self: this.leader };

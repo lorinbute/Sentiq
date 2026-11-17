@@ -1,5 +1,5 @@
 // Port of "[DI] Logarithmic Moving Average" (Pine v6, © Dusty Investments) — TD-CHARTUX §2.
-// Bar-by-bar, with TradingView's semantics for na, ta.* and color.* (see docs/research.md §5 and PyneCore).
+// Bar-by-bar, with TradingView's semantics for na, ta.* and color.* (see docs/research.html §5 and PyneCore).
 import type { Candle } from './slingshot.ts';
 import { effectiveLmaParams, type LmaMaType, type LmaParams } from './lma-params.ts';
 import { Ema, isNa, Rma, RollingSum, Sma, Wma } from './pine.ts';

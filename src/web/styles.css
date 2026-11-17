@@ -472,6 +472,18 @@
   .shadow-drag {
     box-shadow: 0 8px 24px var(--color-shadow);
   }
+  /* FIX-FITWIDTH: a card's value at the largest size at which its grid's longest value (`--stat-chars`, set by the grid)
+     fits the card (a container); 0.6 em a Geist Mono character. From 640 px: 14–22 px. On a phone the currency wraps,
+     so the longest sum without it (`--stat-num-chars`) fits, 12–18 px, in a column of the grid (the container there):
+     half of it, less half the 10 px gap and the card's 16 px paddings and 1 px borders. */
+  .stat-fit {
+    font-size: clamp(12px, calc((50cqi - 39px) / (var(--stat-num-chars, 9) * 0.6)), 18px);
+  }
+  @media (min-width: 640px) {
+    .stat-fit {
+      font-size: clamp(14px, calc(100cqi / (var(--stat-chars, 12) * 0.6)), 22px);
+    }
+  }
   /* Numbers: prices, times, scores, countdowns. */
   .num {
     font-family: var(--font-mono);
@@ -498,5 +510,25 @@
     .chip-soft {
       @apply min-h-[36px];
     }
+  }
+}
+
+/*
+ * FD-MOBILESYM: a group of options on one row across the width (used as `max-sm:row-fill`): they share it equally
+ * when they fit; otherwise each keeps its own width and the row scrolls sideways, never wrapping to a second line.
+ */
+@utility row-fill {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+  & > * {
+    flex: 1 0 0%;
+    min-width: max-content;
+    justify-content: center;
+    white-space: nowrap;
   }
 }

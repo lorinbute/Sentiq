@@ -12,8 +12,17 @@ export const BOT_STATUSES = ['scheduled', 'running', 'paused', 'problem', 'endin
 export type BotStatus = (typeof BOT_STATUSES)[number];
 export type BotEndAction = 'close' | 'finish' | 'leave';
 export type BotSide = 'long' | 'short';
-export type BotTradeReason = 'tp' | 'sl' | 'tp_signal' | 'flip' | 'opposite' | 'grid' | 'end' | 'stop' | 'liquidation' | 'external' | 'loss_limit' | 'grid_stop';
+export type BotTradeReason = 'tp' | 'sl' | 'tp_signal' | 'flip' | 'opposite' | 'grid' | 'end' | 'stop' | 'liquidation' | 'external' | 'loss_limit' | 'grid_stop' | 'edit';
+/** FD-BOTEDIT §3: what becomes of the positions the new settings cannot keep (they finish with the old ones, or close now). */
+export type PositionsMode = 'finish' | 'close';
 export type BotEventKind = 'start' | 'signal' | 'skip' | 'enter' | 'exit' | 'order' | 'problem' | 'info' | 'end';
+/** FIX-BOTMARGIN: the margin of a futures bot's positions (Isolated unless Cross is chosen). */
+export const BOT_MARGIN_MODES = ['isolated', 'cross'] as const;
+export type BotMarginMode = (typeof BOT_MARGIN_MODES)[number];
+export const MARGIN_RO: Record<BotMarginMode, string> = { isolated: 'Isolated', cross: 'Cross' };
+export const MARGIN_HINT_RO: Record<BotMarginMode, string> = { isolated: 'Fiecare poziție își riscă doar marja ei.', cross: 'Pozițiile folosesc tot soldul futures al contului.' };
+/** FIX-PAPERLEV: on a Paper Trading profile Cross is the profile's money, on every market. */
+export const MARGIN_HINT_PAPER_RO: Record<BotMarginMode, string> = { isolated: MARGIN_HINT_RO.isolated, cross: 'Pozițiile folosesc toți banii profilului.' };
 
 /** Bots a user may have that have not ended (FD-BOT §3). */
 export const MAX_ACTIVE_BOTS = 10;
@@ -41,6 +50,7 @@ export const TRADE_REASON_RO: Record<BotTradeReason, string> = {
   external: 'din afară',
   loss_limit: 'pierderea maximă',
   grid_stop: 'oprește sub / peste',
+  edit: 'setări noi',
 };
 
 export const WEIGHT_KEYS = ['day', 'area', 'general', 'symbol', 'slingshot'] as const;
@@ -115,17 +125,36 @@ const upgradePremium = (v: unknown): unknown => {
     // Both ways at once: the thresholds win. A minimum that is not a number fails as the long's threshold.
     o = 'longMin' in rest ? rest : { ...rest, longMin: minScore, shortMax: typeof minScore === 'number' ? 100 - minScore : minScore };
   }
+  // FIX-BOTBUDGET: one maximum a trade. A fixed amount kept as its maximum (the lower of the two when both were set);
+  // a risk sizing its maximum, else its amount.
+  if ('sizing' in o || 'amount' in o || 'riskPct' in o) {
+    const { sizing, amount, riskPct: _riskPct, ...rest } = o;
+    const cap = typeof rest.maxPerTrade === 'number' ? rest.maxPerTrade : null;
+    const fixed = typeof amount === 'number' ? amount : null;
+    const maxPerTrade = sizing === 'risk' ? (cap ?? fixed) : fixed !== null && cap !== null ? Math.min(fixed, cap) : (fixed ?? cap);
+    o = { ...rest, maxPerTrade };
+  }
   return o;
 };
+
+/** FIX-BOTBUDGET: what a trade must bring at its take profit, after the commissions, for the bot to open it (USD). */
+export const MIN_TRADE_PROFIT = 10;
+
+/** The currencies counted as dollars: the minimum profit read in them as it is (in another, at its USDT price). */
+const USD_QUOTES = new Set(['USD', 'USDT', 'USDC', 'FDUSD', 'TUSD', 'BUSD', 'DAI', 'USDE', 'USDP', 'PYUSD', 'USD1', 'USDD']);
+export const isUsdQuote = (c: string): boolean => USD_QUOTES.has(c.toUpperCase());
 
 export const premiumSchema = z.preprocess(
   upgradePremium,
   z.object({
     direction: z.enum(['long', 'short', 'both']),
-    sizing: z.enum(['fixed', 'risk']),
-    amount: positive('Suma pe tranzacție'),
-    riskPct: number('Riscul', 0.1, 10),
-    maxPerTrade: positive('Suma maximă pe tranzacție').nullable(),
+    /**
+     * FIX-BOTSHORTS: at the close of the first bar with Slingshot's setup forming (its levels moved to the signal's at the
+     * confirmation), or only on the confirmed signal. Absent in the bots saved before it: the setup.
+     */
+    entry: z.enum(['setup', 'signal']).default('setup'),
+    /** FIX-BOTBUDGET: the most a trade takes from the bot's budget (its margin); the bot decides how much within it. */
+    maxPerTrade: positive('Suma maximă pe tranzacție'),
     /** FD-BOTPCT: the signal's stop loss and take profit, or "Risc / câștig": one's own, in percent from the entry. */
     levels: z.enum(['slingshot', 'percent']),
     slPct: number('Stop loss-ul', 0.1, 50),
@@ -155,6 +184,8 @@ export const premiumSchema = z.preprocess(
   .strict(),
 );
 export type PremiumConfig = z.infer<typeof premiumSchema>;
+/** FIX-BOTSHORTS: the entry, as the form and the summary say it. */
+export const ENTRY_RO: Record<PremiumConfig['entry'], string> = { setup: 'La setup', signal: 'La confirmare' };
 
 const common = {
   name: z.string().trim().min(1, 'Numele lipsește').max(60, 'Numele: cel mult 60 de caractere'),
@@ -168,6 +199,8 @@ const common = {
   tf: z.enum(TIMEFRAMES),
   maxAmount: positive('Suma maximă'),
   leverage: whole('Levierul', 1, 125),
+  /** FIX-BOTMARGIN: futures only; the settings saved before it (and the pages sending none) are Isolated. */
+  marginMode: z.enum(BOT_MARGIN_MODES).default('isolated'),
   /** null: now. */
   startsAt: z.number().int().nonnegative().nullable(),
   /** null: no end. */
@@ -175,21 +208,28 @@ const common = {
   endAction: z.enum(['close', 'finish', 'leave']),
   dailyLoss: positive('Pierderea maximă pe zi').nullable(),
   lossStop: positive('Pierderea la care se oprește').nullable(),
-  /** Per execution, in percent (simulated, or the estimate of the real one). */
+  /** Per execution, in percent: the estimate of the platform's (a Paper Trading profile's fills take its own). */
   fee: number('Comisionul', 0, 1),
 };
 
 /** The area of a market: a bot trades either coins or shares. */
 export const areaOf = (market: BotMarket): BotArea => (market === 'stock' ? 'stocks' : 'crypto');
 
-const SPOT_LONG = 'Pe spot nu se poate short: doar Long (short pe futures sau pe acțiuni).';
+/** FIX-PAPERLEV: on a real account's spot (a Paper Trading profile shorts and leverages everything). Said by the check. */
+export const SPOT_LONG = 'Pe spot nu se poate short: doar Long (short pe futures, pe acțiuni sau pe un profil Paper Trading).';
+export const LEVERAGE_FUTURES = 'Levierul se aplică doar pe futures (pe spot și pe acțiuni, doar pe un profil Paper Trading).';
+export const MARGIN_FUTURES = 'Marja se alege doar pe futures (pe spot și pe acțiuni, doar pe un profil Paper Trading).';
 
-/** The rules across fields (FD-BOT §3–§6), shared by the form and the server. */
+/** The side a bot's settings may open short on (FD-BOT §3–§6): a grid not only long, a short DCA, a Slingshot not only long. */
+export const wantsShort = (b: { strategy: BotStrategy; grid?: GridConfig; dca?: DcaConfig; premium?: PremiumConfig }): boolean =>
+  b.strategy === 'grid' ? b.grid?.direction !== 'long' : b.strategy === 'dca' ? b.dca?.direction === 'short' : b.premium?.direction !== 'long';
+
+/**
+ * The rules across fields (FD-BOT §3–§6), shared by the form and the server. FIX-PAPERLEV: the leverage, the margin and a
+ * short on spot depend on the account (a Paper Trading profile allows them everywhere): the server's check says them.
+ */
 function checkBot(b: BotInputBase & { grid?: GridConfig; dca?: DcaConfig; premium?: PremiumConfig }, ctx: z.RefinementCtx): void {
   const fail = (path: (string | number)[], message: string) => ctx.addIssue({ code: 'custom', path, message });
-  const futures = b.market === 'futures';
-  // Spot holds what it bought, nothing to sell short; shares may go short (in a simulation, at eToro: FD-BOT §10).
-  const spot = b.market === 'spot';
   const area = areaOf(b.market);
   const seen = new Set<string>();
   b.symbols.forEach((s, i) => {
@@ -199,14 +239,12 @@ function checkBot(b: BotInputBase & { grid?: GridConfig; dca?: DcaConfig; premiu
   });
   if (b.exec === 'real' && b.accountId === null) fail(['accountId'], 'Alege contul în care tranzacționează botul.');
   if (b.exec === 'paper' && b.accountId !== null) fail(['accountId'], 'Simularea nu folosește un cont.');
-  if (!futures && b.leverage !== 1) fail(['leverage'], 'Levierul se aplică doar pe futures.');
   if (b.startsAt !== null && b.endsAt !== null && b.endsAt <= b.startsAt) fail(['endsAt'], 'Sfârșitul trebuie să fie după început.');
   if (b.strategy !== 'premium' && b.symbols.length !== 1) fail(['symbols'], `Un bot ${STRATEGY_RO[b.strategy]} are un singur simbol.`);
   if (b.strategy === 'grid' && b.grid) {
     const g = b.grid;
     if (b.endAction === 'finish') fail(['endAction'], 'O grilă nu are tranzacții de terminat: alege „Închide pozițiile” sau „Lasă pozițiile deschise”.');
     if (g.lower >= g.upper) fail(['grid', 'upper'], 'Limita de sus trebuie să fie peste cea de jos.');
-    if (spot && g.direction !== 'long') fail(['grid', 'direction'], SPOT_LONG);
     if (g.stopBelow !== null && g.stopBelow >= g.lower) fail(['grid', 'stopBelow'], '„Oprește sub” trebuie să fie sub limita de jos.');
     if (g.stopAbove !== null && g.stopAbove <= g.upper) fail(['grid', 'stopAbove'], '„Oprește peste” trebuie să fie peste limita de sus.');
     if (g.lower < g.upper) {
@@ -216,7 +254,6 @@ function checkBot(b: BotInputBase & { grid?: GridConfig; dca?: DcaConfig; premiu
   }
   if (b.strategy === 'dca' && b.dca) {
     const d = b.dca;
-    if (spot && d.direction === 'short') fail(['dca', 'direction'], SPOT_LONG);
     const orders = dcaOrders(d);
     const last = orders.at(-1);
     if (d.stopLoss !== null && last && d.safetyOrders > 0 && d.stopLoss <= last.deviation) fail(['dca', 'stopLoss'], `Stop loss-ul (${fmtPctPlain(d.stopLoss)}) e mai aproape decât ultimul ordin de siguranță (${fmtPctPlain(last.deviation)}): ordinele de după el n-ar avea loc.`);
@@ -226,13 +263,9 @@ function checkBot(b: BotInputBase & { grid?: GridConfig; dca?: DcaConfig; premiu
   }
   if (b.strategy === 'premium' && b.premium) {
     const p = b.premium;
-    if (spot && p.direction !== 'long') fail(['premium', 'direction'], SPOT_LONG);
     const r = p.tpPct / p.slPct;
     if (p.levels === 'percent' && !(r >= 0.5 - 1e-9 && r <= 10 + 1e-9)) fail(['premium', 'tpPct'], `Raportul risc : câștig ${rrText(p.slPct, p.tpPct)} iese din limite: take profit-ul e între jumătate și de 10 ori distanța stop loss-ului (de la 2:1 la 1:10).`);
-    if (p.sizing === 'fixed' && p.amount > b.maxAmount * (1 + 1e-9)) fail(['premium', 'amount'], 'Suma pe tranzacție nu poate trece de suma maximă.');
-    if (p.maxPerTrade !== null && p.maxPerTrade > b.maxAmount * (1 + 1e-9)) fail(['premium', 'maxPerTrade'], 'Suma maximă pe tranzacție nu poate trece de suma maximă.');
     if (WEIGHT_KEYS.every((k) => p.weights[k] === 0)) fail(['premium', 'weights'], 'Cel puțin o pondere a scorului trebuie să fie peste zero.');
-    if (p.maxOpen > b.symbols.length) fail(['premium', 'maxOpen'], `Botul are ${b.symbols.length} ${b.symbols.length === 1 ? 'simbol' : 'simboluri'}: cel mult atâtea tranzacții deschise odată.`);
   }
 }
 
@@ -247,8 +280,11 @@ export const botInputSchema = z
   .superRefine(checkBot);
 export type BotInput = z.infer<typeof botInputSchema>;
 
-/** What may change on a bot that has started (FD-BOT §7); the server checks the strategy's own limits. */
-export const botEditSchema = z
+/**
+ * Before FD-BOTEDIT, what a started bot could change (FD-BOT §7). Still read: a page opened before the deploy sends it,
+ * and it applies over the bot's settings.
+ */
+export const botPatchSchema = z
   .object({
     name: common.name,
     endsAt: common.endsAt,
@@ -256,18 +292,57 @@ export const botEditSchema = z
     dailyLoss: common.dailyLoss,
     lossStop: common.lossStop,
     fee: common.fee,
-    /** DCA and Premium (a grid invests it all at the start). */
     maxAmount: common.maxAmount.optional(),
-    /** Premium: for the trades to come. */
     leverage: common.leverage.optional(),
     premium: premiumSchema.optional(),
-    /** Premium: the signals' timeframe (FD-BOTTF; the engine starts again from the bars that close after it). */
     tf: common.tf.optional(),
   })
   .strict();
+export type BotPatch = z.infer<typeof botPatchSchema>;
+
+/** FD-BOTEDIT: every setting of the form, and what becomes of the positions the new ones cannot keep (§3). */
+export const botEditSchema = z.object({ input: botInputSchema, positions: z.enum(['finish', 'close']).optional() }).strict();
 export type BotEdit = z.infer<typeof botEditSchema>;
 
+/** FD-BOTEDIT §2: the settings that apply at once, during a transition too (the rest waits for the open positions). */
+export const LIVE_KEYS = ['name', 'endsAt', 'endAction', 'dailyLoss', 'lossStop', 'fee'] as const;
+
+/** What the engine runs with during a transition: the settings of the open positions, with the live ones of the new. */
+export const liveOf = (basis: BotInput, next: BotInput): BotInput => {
+  const out: Record<string, unknown> = { ...basis };
+  for (const k of LIVE_KEYS) out[k] = next[k];
+  return out as BotInput;
+};
+
+const MARKET_RO: Record<BotMarket, string> = { spot: 'Spot', futures: 'Futures', stock: 'Acțiuni' };
+const GRID_REBUILD = ['lower', 'upper', 'grids', 'spacing', 'direction', 'trigger'] as const;
+
+/**
+ * FD-BOTEDIT §3: why the new settings cannot keep the open positions (in Romanian), or nothing when they apply at once:
+ * the execution, the account, the market; a DCA's or a grid's symbol; a grid made otherwise.
+ */
+export function transitionOf(basis: BotInput, next: BotInput): string[] {
+  const out: string[] = [];
+  if (basis.exec !== next.exec) out.push(`execuția: ${basis.exec === 'paper' ? 'Simulare → Real' : 'Real → Simulare'}`);
+  else if (basis.accountId !== next.accountId) out.push('contul');
+  if (basis.market !== next.market) out.push(`piața: ${MARKET_RO[basis.market]} → ${MARKET_RO[next.market]}`);
+  if (basis.strategy !== 'premium' && basis.symbols[0] !== next.symbols[0]) out.push(`simbolul: ${basis.symbols[0] ?? ''} → ${next.symbols[0] ?? ''}`);
+  // FIX-BOTMARGIN: a grid's positions all hold its margin; another one makes the grid again.
+  const margin = basis.market === 'futures' && next.market === 'futures' && basis.marginMode !== next.marginMode;
+  if (basis.strategy === 'grid' && next.strategy === 'grid' && (GRID_REBUILD.some((k) => basis.grid[k] !== next.grid[k]) || basis.maxAmount !== next.maxAmount || basis.leverage !== next.leverage || margin))
+    out.push('grila: limitele, grilele, spațierea, direcția, prețul de pornire, suma, levierul sau marja');
+  return out;
+}
+
 export const botStopSchema = z.object({ action: z.enum(['close', 'finish', 'leave']) }).strict();
+
+const levelValue = z.number().finite().positive();
+/** FIX-BOTDRAG: a bot's stop loss / take profit dragged on the chart, for one of its positions. POST /api/bots/:id/levels. */
+export const botLevelMoveSchema = z
+  .object({ symbol: z.string().min(1).max(40), side: z.enum(['long', 'short']), openedAt: z.number().int().nonnegative(), sl: levelValue.optional(), tp: levelValue.optional() })
+  .strict()
+  .refine((m) => m.sl !== undefined || m.tp !== undefined, { message: 'Niciun nivel de mutat.' });
+export type BotLevelMove = z.infer<typeof botLevelMoveSchema>;
 
 // ---------------- Plans (the form's summary and the engine) ----------------
 
@@ -434,7 +509,7 @@ export interface BotView {
   area: BotArea;
   symbols: string[];
   tf: Timeframe;
-  /** The account (real); null in a simulation, or when the account is gone. */
+  /** The account (FD-PAPER: a Paper Trading profile too); null for a simulation from before it, or when the account is gone. */
   account: BotAccountView | null;
   status: BotStatus;
   statusReason: string | null;
@@ -465,6 +540,27 @@ export interface BotPositionView {
   unrealized: number | null;
   leverage: number;
   margin: number;
+  openedAt: number;
+}
+
+/**
+ * FIX-BOTLEVELS: the stop loss / take profit a real bot keeps for a position it holds on an account (the bot closes the
+ * position itself there: they are no orders at the platform). GET /api/bots/levels.
+ */
+export interface BotLevel {
+  bot: { id: number; name: string };
+  accountId: number;
+  /** False while the bot has a problem: it sends nothing until "Reia", so the levels do not fire. */
+  active: boolean;
+  market: BotMarket;
+  /** The bot's symbol: "JUP/USDT" (spot and futures), "AAPL". */
+  symbol: string;
+  side: BotSide;
+  qty: number;
+  entry: number;
+  sl: number | null;
+  tp: number | null;
+  /** FIX-BOTDRAG: when the position opened (a grid: its first open interval); with the symbol and side, which one it is. */
   openedAt: number;
 }
 
@@ -511,6 +607,8 @@ export interface BotAiVerdict {
   confidence: number;
   reason: string;
   risks: string[];
+  /** FIX-BOTBUDGET: the amount the AI chose for the trade (its margin), within the bounds it was given. */
+  amount?: number;
 }
 
 export interface BotEventDetail {
@@ -522,6 +620,8 @@ export interface BotEventDetail {
   ai?: BotAiVerdict;
   qty?: number;
   leverage?: number;
+  /** FIX-BOTBUDGET: the amount an entry took from the budget (its margin). */
+  margin?: number;
   pnl?: number;
 }
 
@@ -566,9 +666,23 @@ export interface BotDetail extends BotView {
   /** The closed trades, newest first. */
   history: BotTradeRow[];
   events: BotEventRow[];
+  /** FD-BOTEDIT §3: new settings waiting for the positions made with the old ones. */
+  switching: { changes: string[]; mode: PositionsMode } | null;
 }
 
-/** The form's summary (POST /api/bots/check). */
+/** FD-BOTEDIT §3: the edit's transition, as the check tells it to the form. */
+export interface BotTransition {
+  /** What asks for it (`transitionOf`). */
+  changes: string[];
+  /** The open positions (a grid's full intervals). */
+  open: number;
+  /** What the form offers: none without positions (nor an order on its way); a grid only closes. */
+  modes: PositionsMode[];
+  /** The one the summary tells. */
+  mode: PositionsMode;
+}
+
+/** The form's summary (POST /api/bots/check, and POST /api/bots/:id/check at an edit). */
 export interface BotCheck {
   price: number | null;
   capital: number;
@@ -577,4 +691,6 @@ export interface BotCheck {
   summary: string[];
   grid: GridPlan | null;
   dca: DcaPricedOrder[] | null;
+  /** At an edit: null when the open positions keep going with the new settings. */
+  transition?: BotTransition | null;
 }

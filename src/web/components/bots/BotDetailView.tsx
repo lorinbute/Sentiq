@@ -45,6 +45,12 @@ export function BotDetailView({ bot, onEdit, onCopy, onDeleted }: { bot: BotDeta
           {bot.account ? ` · ${bot.account.label}` : bot.exec === 'real' ? ' · cont șters' : ''}
         </span>
       </div>
+      {/* FD-BOTEDIT §3: new settings waiting for the positions made with the old ones. */}
+      {bot.switching && !ended && (
+        <p className="rounded-[10px] border border-line bg-panel-2 px-3 py-2.5 text-[13px]">
+          Se aplică setările noi ({bot.switching.changes.join('; ')}): pozițiile deschise cu setările vechi {bot.switching.mode === 'close' ? 'se închid la piață' : 'se termină întâi'}, apoi botul merge cu cele noi.
+        </p>
+      )}
       {bot.statusReason && (
         <p className={clsx('rounded-[10px] border px-3 py-2.5 text-[13px]', bot.status === 'problem' ? 'border-bear/40 bg-bear/[0.07]' : 'border-line bg-panel-2')} role={bot.status === 'problem' ? 'alert' : undefined}>
           {bot.statusReason}

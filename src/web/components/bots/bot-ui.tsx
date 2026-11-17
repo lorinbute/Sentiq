@@ -1,15 +1,33 @@
 // The small pieces the bot windows share (FD-BOT §1, §7): a labelled field, a box to tick, the status and the tags.
-import type { ReactNode } from 'react';
+import { useId, type ReactNode } from 'react';
 import { clsx } from 'clsx';
 import { STATUS_RO, STRATEGY_RO, type BotStatus, type BotView } from '../../../shared/bot.ts';
 import { isDemoEnv } from '../../../shared/trading.ts';
 
-export function Field({ label, children, hint, className }: { label: ReactNode; children: ReactNode; hint?: ReactNode; className?: string }) {
+/**
+ * A field: its title, its control, a hint. One control: a `<label>` (a click on the title focuses it). `group`: several
+ * controls or buttons (a switch, the list of symbols), a titled group: in a label any click would press its first button
+ * (FIX-BOTLABEL).
+ */
+export function Field({ label, children, hint, className, group = false }: { label: ReactNode; children: ReactNode; hint?: ReactNode; className?: string; group?: boolean }) {
+  const id = useId();
+  const cls = clsx('flex min-w-0 flex-col gap-1 text-[13px]', className);
+  const hintEl = hint && <span className="text-[11.5px] text-faint">{hint}</span>;
+  if (group)
+    return (
+      <div role="group" aria-labelledby={id} className={cls}>
+        <span id={id} className="text-faint">
+          {label}
+        </span>
+        {children}
+        {hintEl}
+      </div>
+    );
   return (
-    <label className={clsx('flex min-w-0 flex-col gap-1 text-[13px]', className)}>
+    <label className={cls}>
       <span className="text-faint">{label}</span>
       {children}
-      {hint && <span className="text-[11.5px] text-faint">{hint}</span>}
+      {hintEl}
     </label>
   );
 }
@@ -67,17 +85,20 @@ export function StatusMark({ status }: { status: BotStatus }) {
   );
 }
 
-/** The strategy, and SIMULARE / REAL (DEMO on a demo account). */
+/** The strategy, and PAPER (a Paper Trading profile, FD-PAPER) / REAL (DEMO on a demo account); SIMULARE: a bot of before. */
 export function BotTags({ bot }: { bot: Pick<BotView, 'strategy' | 'exec' | 'account'> }) {
+  const paper = bot.account?.exchange === 'paper';
   return (
     <span className="inline-flex flex-wrap items-center gap-1.5">
       <span className="tag">{STRATEGY_RO[bot.strategy]}</span>
       {bot.exec === 'paper' ? (
         <span className="tag text-muted">SIMULARE</span>
+      ) : paper ? (
+        <span className="tag border-accent/50 text-accent">PAPER</span>
       ) : (
         <span className="tag border-bear/50 text-bear">REAL</span>
       )}
-      {bot.account && isDemoEnv(bot.account.env) && <span className="rounded-md bg-warn/15 px-1.5 py-0.5 text-[11px] font-semibold tracking-wide text-warn">DEMO</span>}
+      {bot.account && !paper && isDemoEnv(bot.account.env) && <span className="rounded-md bg-warn/15 px-1.5 py-0.5 text-[11px] font-semibold tracking-wide text-warn">DEMO</span>}
     </span>
   );
 }

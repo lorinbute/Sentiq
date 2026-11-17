@@ -4,6 +4,11 @@ import { accountSchemaFor, providerById, PROVIDERS } from './providers.ts';
 describe('providers (FD-SENTIQ §2)', () => {
   it('every provider can connect: fields, steps, a key page and a logo (FD-NOAPI: none without an API)', () => {
     for (const p of PROVIDERS) {
+      // FD-PAPER: a Paper Trading profile has nothing to connect (it is made with its own form).
+      if (p.paper) {
+        expect([p.fields.length, p.steps.length], p.id).toEqual([0, 0]);
+        continue;
+      }
       expect(p.fields.length, p.id).toBeGreaterThan(0);
       expect(p.steps.length, p.id).toBeGreaterThan(0);
       expect(p.keysUrl, p.id).toMatch(/^https:\/\//);

@@ -1,4 +1,4 @@
-// Pine Script v5 `ta.*` primitives with TradingView semantics (see docs/research.md §5).
+// Pine Script v5 `ta.*` primitives with TradingView semantics (see docs/research.html §5).
 // `na` is represented as NaN. Pine's na() also treats ±Infinity as na, hence `isNa`.
 
 export const isNa = (x: number): boolean => !Number.isFinite(x);

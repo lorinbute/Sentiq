@@ -1,6 +1,6 @@
 // The bot form's state (FD-BOT §1–§6): what it starts with from the chart, and the settings it makes (or the first thing
 // wrong with them, in the form's own words). Numbers are typed as text (a comma is a decimal point) and read here.
-import { botInputSchema, DEFAULT_WEIGHTS, defaultBotName, rrText, WEIGHT_RO, type BotEndAction, type BotInput, type BotMarket, type BotStrategy, type DcaConfig, type GridConfig, type PremiumConfig, type WeightKey } from '../../../shared/bot.ts';
+import { botInputSchema, DEFAULT_WEIGHTS, defaultBotName, rrText, WEIGHT_RO, type BotDetail, type BotEndAction, type BotInput, type BotMarginMode, type BotMarket, type BotStrategy, type DcaConfig, type GridConfig, type PremiumConfig, type WeightKey } from '../../../shared/bot.ts';
 import type { Timeframe } from '../../../shared/time.ts';
 
 /** Where the form starts: the chart's symbol, timeframe, price and the range of its last 100 candles. */
@@ -27,6 +27,8 @@ export interface BotForm {
   tf: Timeframe;
   maxAmount: string;
   leverage: string;
+  /** FIX-BOTMARGIN: futures only (Isolated unless Cross is chosen). */
+  marginMode: BotMarginMode;
   /** `null`: now; else a `datetime-local` value. */
   startsAt: string | null;
   endsAt: string | null;
@@ -42,9 +44,13 @@ export interface BotForm {
 /** Every strategy long (spot has nothing to sell short; Trading 212 and Alpaca go only long on shares, FD-BOT §10). */
 export const longPatch = (f: BotForm): Partial<BotForm> => ({ grid: { ...f.grid, direction: 'long' }, dca: { ...f.dca, direction: 'long' }, premium: { ...f.premium, direction: 'long' } });
 
-/** Another market: on spot, every strategy is long only. */
-export function marketPatch(f: BotForm, market: BotMarket): Partial<BotForm> {
-  return market === 'spot' ? { market, ...longPatch(f) } : { market };
+/**
+ * Another market: spot is long only on a real account (FIX-PAPERLEV: a Paper Trading profile shorts there too); futures
+ * start at 3× when the leverage was the 1× of spot.
+ */
+export function marketPatch(f: BotForm, market: BotMarket, paper = false): Partial<BotForm> {
+  const lev = market === 'futures' && f.leverage === '1' ? { leverage: '3' } : {};
+  return market === 'spot' && !paper ? { market, ...lev, ...longPatch(f) } : { market, ...lev };
 }
 
 /** A typed number: '' is none, a comma is a decimal point. */
@@ -87,10 +93,9 @@ const text = <T extends Record<string, unknown>>(o: T): Text<T> => {
 
 export const DEFAULT_PREMIUM: PremiumConfig = {
   direction: 'long',
-  sizing: 'fixed',
-  amount: 100,
-  riskPct: 1,
-  maxPerTrade: null,
+  entry: 'setup',
+  // FIX-BOTBUDGET: the most a trade takes from the budget; the bot shares the budget within it.
+  maxPerTrade: 250,
   levels: 'slingshot',
   slPct: 1,
   tpPct: 2,
@@ -125,13 +130,16 @@ export function initialForm(seed: BotSeed, strategy: BotStrategy): BotForm {
     strategy,
     name: defaultBotName(strategy, [seed.symbol]),
     nameTyped: false,
-    exec: 'paper',
+    // FD-PAPER §7: a bot always trades on an account (a Paper Trading profile for a simulation), chosen in the form.
+    exec: 'real',
     accountId: null,
     market,
     symbols: [seed.symbol],
     tf: seed.tf,
     maxAmount: numText(strategy === 'dca' ? Math.ceil(dcaCapital) : 1000),
-    leverage: '3',
+    // FIX-PAPERLEV: 1× on spot and shares (a Paper Trading profile shows it there); futures start at 3× (`marketPatch`).
+    leverage: '1',
+    marginMode: 'isolated',
     startsAt: null,
     endsAt: null,
     endAction: strategy === 'grid' ? 'close' : 'finish',
@@ -157,6 +165,7 @@ export function formOf(input: BotInput): BotForm {
     tf: input.tf,
     maxAmount: numText(input.maxAmount),
     leverage: String(input.leverage),
+    marginMode: input.marginMode,
     startsAt: null,
     endsAt: input.endsAt !== null ? localInput(input.endsAt) : null,
     endAction: input.endAction,
@@ -167,6 +176,17 @@ export function formOf(input: BotInput): BotForm {
     dca: text(input.strategy === 'dca' ? input.dca : DEFAULT_DCA),
     premium: text(input.strategy === 'premium' ? input.premium : DEFAULT_PREMIUM),
   };
+}
+
+/** FD-BOTEDIT: the form of a bot being edited: its settings, and the start of a bot that has not started yet. */
+export function editForm(bot: Pick<BotDetail, 'input' | 'status' | 'startsAt'>, now = Date.now()): BotForm {
+  const f = formOf(bot.input);
+  return bot.status === 'scheduled' && bot.startsAt > now ? { ...f, startsAt: localInput(bot.startsAt) } : f;
+}
+
+/** A symbol taken out (FIX-BOTBUDGET: „Tranzacții deschise odată” is a maximum, it stays as typed). */
+export function withoutSymbol(f: BotForm, sym: string): Partial<BotForm> {
+  return { symbols: f.symbols.filter((x) => x !== sym) };
 }
 
 const LABELS: Record<string, string> = {
@@ -208,8 +228,6 @@ const NUMBER_FIELDS: Record<string, string> = {
   takeProfit: 'Take profit',
   stopLoss: 'Stop loss',
   maxCycles: 'Ciclurile',
-  amount: 'Suma pe tranzacție',
-  riskPct: 'Riscul',
   maxPerTrade: 'Suma maximă pe tranzacție',
   slPct: 'Stop loss-ul',
   tpPct: 'Take profit-ul',
@@ -218,7 +236,7 @@ const NUMBER_FIELDS: Record<string, string> = {
   newsWindowMin: 'Minutele dinaintea știrilor economice importante',
   maxOpen: 'Tranzacțiile deschise odată',
 };
-const OPTIONAL = new Set(['stopBelow', 'stopAbove', 'trigger', 'stopLoss', 'maxCycles', 'maxPerTrade']);
+const OPTIONAL = new Set(['stopBelow', 'stopAbove', 'trigger', 'stopLoss', 'maxCycles']);
 
 function numbers<T extends Record<string, unknown>>(o: Text<T>, strategy: BotStrategy, errors: string[]): T {
   const out: Record<string, unknown> = {};
@@ -275,9 +293,9 @@ export function ratioOf(sl: string, tp: string): string {
  * The bot the form describes (`BotInput`), or the first problem with it. `now` turns a start in the past into "now".
  * The same rules as the server's (shared/bot.ts).
  */
-export function toInput(f: BotForm, now = Date.now()): { input: BotInput | null; error: string | null } {
+/** `margined`: leverage and margin apply (futures; FIX-PAPERLEV: every market on a Paper Trading profile). */
+export function toInput(f: BotForm, now = Date.now(), margined = f.market === 'futures'): { input: BotInput | null; error: string | null } {
   const errors: string[] = [];
-  const futures = f.market === 'futures';
   const at = (s: string | null) => (s === null || s === '' ? null : new Date(s).getTime());
   const startsAt = at(f.startsAt);
   const endsAt = at(f.endsAt);
@@ -290,8 +308,10 @@ export function toInput(f: BotForm, now = Date.now()): { input: BotInput | null;
     market: f.market,
     symbols: f.symbols.map((s) => s.trim().toUpperCase()).filter(Boolean),
     tf: f.tf,
-    maxAmount: field(LABELS.maxAmount as string, f.maxAmount, true, errors),
-    leverage: futures ? field(LABELS.leverage as string, f.leverage, true, errors) : 1,
+    // FIX-BOTBUDGET: a Slingshot bot's maximum amount is its budget.
+    maxAmount: field(f.strategy === 'premium' ? 'Bugetul botului' : (LABELS.maxAmount as string), f.maxAmount, true, errors),
+    leverage: margined ? field(LABELS.leverage as string, f.leverage, true, errors) : 1,
+    marginMode: margined ? f.marginMode : 'isolated',
     startsAt: startsAt !== null && startsAt > now ? startsAt : null,
     endsAt,
     endAction: f.endAction,

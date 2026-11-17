@@ -117,7 +117,9 @@ export function chartLineOf(l: AccountLine, o: { last: number | null; drafted: b
   const color = lineColor(l, o.palette);
   const { text, tone } = labelText(l, l.price, o.last, o.entryDraft);
   const qty = lineQty(l);
-  const style: PriceLineSpec['style'] = o.drafted || l.role === 'liquidation' ? 'dotted' : l.role === 'order' ? 'dashed' : 'solid';
+  // FIX-BOTLEVELS: a bot's level (no order at the platform) dashed, as an order's line.
+  const style: PriceLineSpec['style'] = o.drafted || l.role === 'liquidation' ? 'dotted' : l.role === 'order' || l.bot ? 'dashed' : 'solid';
+  const shown = l.bot ? `${text} · ${l.bot.tag}` : text;
   return {
     id: l.id,
     price: l.price,
@@ -131,7 +133,7 @@ export function chartLineOf(l: AccountLine, o: { last: number | null; drafted: b
     ...(l.basis && (l.role === 'sl' || l.role === 'tp' || l.role === 'order-sl' || l.role === 'order-tp') ? { zoneFrom: o.entryDraft ?? l.basis.entry } : {}),
     label: {
       qty: qty === null ? null : fmtNum(qty, 8),
-      text: o.several ? `${text} · ${l.account.label}` : text,
+      text: o.several ? `${shown} · ${l.account.label}` : shown,
       textColor: tone === 'up' ? o.palette.up : tone === 'down' ? o.palette.down : color,
       close: o.close,
       fill: l.role === 'entry',

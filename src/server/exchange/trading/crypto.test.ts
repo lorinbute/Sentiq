@@ -570,15 +570,79 @@ describe('what the real ccxt sends (FD-TRADING, ccxt 4.5)', () => {
     expect(fut.sent.findIndex((s) => s.url.includes('getPositionMode'))).toBeLessThan(fut.sent.indexOf(order!));
   });
 
-  it('KuCoin futures with TP / SL: the take-profit-and-stop-loss endpoint, the trigger prices on the order', async () => {
+  it('KuCoin futures with TP / SL (FIX-KUCOINTPSL): the take-profit-and-stop-loss endpoint, each price on the side it fires from', async () => {
     const perp = ccxtMarket({ id: 'XBTUSDTM', symbol: 'BTC/USDT:USDT', base: 'BTC', quote: 'USDT', swap: true, contractSize: 0.001, amount: 1, price: 0.1, min: 1 });
     const answer = (url: string) => (url.includes('getPositionMode') ? { code: '200000', data: { positionMode: 0 } } : url.includes('st-orders') ? { code: '200000', data: { orderId: 'kf-2' } } : { code: '200000', data: { price: '60000' } });
     const fut = realClient(ccxt.kucoinfutures as never, { apiKey: 'k1234567', secret: 's1234567', password: 'p1234567' }, [perp], answer, { uta: false });
     const spot = realClient(ccxt.kucoin as never, { apiKey: 'k1234567', secret: 's1234567', password: 'p1234567' }, [], answer, { uta: false });
     const t = new CcxtTrader('kucoin', { spot: spot.ex, futures: fut.ex }, silentLogger);
-    await t.place(await t.normalize(ticket({ market: 'futures', symbol: 'BTC/USDT:USDT', amount: 0.005, leverage: 2, stopLoss: 58_000, takeProfit: 64_000 })));
-    const order = fut.sent.find((s) => s.method === 'POST' && s.url.includes('st-orders'));
-    expect(order?.body).toMatchObject({ type: 'market', size: 5, leverage: 2, triggerStopDownPrice: '58000', triggerStopUpPrice: '64000' });
+    const send = async (o: Partial<OrderTicket>) => {
+      const p = await t.normalize(ticket({ market: 'futures', symbol: 'BTC/USDT:USDT', amount: 0.005, leverage: 2, ...o }));
+      expect(p.errors).toEqual([]);
+      await t.place(p);
+      return fut.sent.filter((x) => x.method === 'POST' && x.url.includes('st-orders')).at(-1)?.body;
+    };
+    // `triggerStopUpPrice` fires when the price rises to it, `triggerStopDownPrice` when it falls to it: a long's TP is
+    // up and its SL down.
+    expect(await send({ stopLoss: 58_000, takeProfit: 64_000 })).toMatchObject({ side: 'buy', type: 'market', size: 5, leverage: 2, triggerStopDownPrice: '58000', triggerStopUpPrice: '64000' });
+    // A short's SL is above the price (up), its TP below (down). Sent the other way, KuCoin took 3 Nov 2026's two shorts'
+    // SL as ">= TP" and closed them at once.
+    expect(await send({ side: 'sell', stopLoss: 64_000, takeProfit: 58_000 })).toMatchObject({ side: 'sell', triggerStopUpPrice: '64000', triggerStopDownPrice: '58000' });
+    const slOnly = await send({ side: 'sell', stopLoss: 64_000 });
+    expect(slOnly).toMatchObject({ side: 'sell', triggerStopUpPrice: '64000' });
+    expect(slOnly).not.toHaveProperty('triggerStopDownPrice');
+    const tpOnly = await send({ side: 'sell', takeProfit: 58_000 });
+    expect(tpOnly).toMatchObject({ side: 'sell', triggerStopDownPrice: '58000' });
+    expect(tpOnly).not.toHaveProperty('triggerStopUpPrice');
+    // A limit short waits with them, the same way round.
+    expect(await send({ side: 'sell', kind: 'limit', price: 60_500, stopLoss: 64_000, takeProfit: 58_000 })).toMatchObject({ type: 'limit', price: '60500', triggerStopUpPrice: '64000', triggerStopDownPrice: '58000' });
+  });
+
+  it('KuCoin classic futures (FIX-KUCOINTPSL): a stop entry takes no TP / SL (ccxt would drop them), refused before sending; the unified account is not', async () => {
+    const perp = ccxtMarket({ id: 'XBTUSDTM', symbol: 'BTC/USDT:USDT', base: 'BTC', quote: 'USDT', swap: true, contractSize: 0.001, amount: 1, price: 0.1, min: 1 });
+    const answer = (url: string) => (url.includes('getPositionMode') ? { code: '200000', data: { positionMode: 0 } } : { code: '200000', data: { price: '60000' } });
+    const fut = realClient(ccxt.kucoinfutures as never, { apiKey: 'k1234567', secret: 's1234567', password: 'p1234567' }, [perp], answer, { uta: false });
+    const spot = realClient(ccxt.kucoin as never, { apiKey: 'k1234567', secret: 's1234567', password: 'p1234567' }, [], answer, { uta: false });
+    const t = new CcxtTrader('kucoin', { spot: spot.ex, futures: fut.ex }, silentLogger);
+    const base = { market: 'futures' as const, symbol: 'BTC/USDT:USDT', amount: 0.005, leverage: 2 };
+    const stop = await t.normalize(ticket({ ...base, kind: 'stop', triggerPrice: 61_000, stopLoss: 58_000 }));
+    expect(stop.errors).toContain('La KuCoin, TP / SL nu se atașează unui ordin stop: pune-le pe poziție după ce se execută.');
+    const stopLimit = await t.normalize(ticket({ ...base, side: 'sell', kind: 'stop_limit', triggerPrice: 59_000, price: 58_900, takeProfit: 55_000 }));
+    expect(stopLimit.errors).toContain('La KuCoin, TP / SL nu se atașează unui ordin stop: pune-le pe poziție după ce se execută.');
+    // Without TP / SL a stop goes as before.
+    expect((await t.normalize(ticket({ ...base, kind: 'stop', triggerPrice: 61_000 }))).errors).toEqual([]);
+    expect(fut.sent.some((x) => x.method === 'POST')).toBe(false);
+    // The unified account names them by role: no such refusal there.
+    const uta = fakeClient('kucoin', [BTC_SPOT, BTC_PERP], { last: 60_000, uta: true });
+    (uta.ex as unknown as { isUTAEnabled: () => Promise<boolean> }).isUTAEnabled = async () => true;
+    const tu = new CcxtTrader('kucoin', { spot: uta.ex, futures: null }, silentLogger);
+    const onUta = await tu.normalize(ticket({ market: 'futures', symbol: 'BTC/USDT:USDT', amount: 0.01, marginMode: 'cross', kind: 'stop', triggerPrice: 61_000, stopLoss: 58_000 }));
+    expect(onUta.errors.join(' ')).not.toMatch(/nu se atașează unui ordin stop/);
+  });
+
+  it('KuCoin classic futures (FIX-KUCOINTPSL): a limit short replaced goes with its SL up and its TP down; TP / SL added to a stop order are refused', async () => {
+    const perp = ccxtMarket({ id: 'XBTUSDTM', symbol: 'BTC/USDT:USDT', base: 'BTC', quote: 'USDT', swap: true, contractSize: 0.001, amount: 1, price: 0.1, min: 1 });
+    const limit = { id: 'lo1', symbol: 'XBTUSDTM', type: 'limit', side: 'sell', price: '61000', size: 5, leverage: '2', marginMode: 'ISOLATED', reduceOnly: false, status: 'open', isActive: true, createdAt: 1_700_000_000_000, settleCurrency: 'USDT' };
+    const stop = { id: 'st1', symbol: 'XBTUSDTM', type: 'market', side: 'buy', size: 5, stop: 'up', stopPriceType: 'TP', stopPrice: '61000', leverage: '2', marginMode: 'ISOLATED', reduceOnly: false, status: 'open', isActive: true, createdAt: 1_700_000_000_000, settleCurrency: 'USDT' };
+    const answer = (url: string, method: string) => {
+      if (url.includes('getPositionMode')) return { code: '200000', data: { positionMode: 0 } };
+      if (method === 'DELETE') return { code: '200000', data: { cancelledOrderIds: ['lo1'] } };
+      if (url.includes('stopOrders')) return { code: '200000', data: { currentPage: 1, pageSize: 50, totalNum: 1, totalPage: 1, items: [stop] } };
+      if (url.includes('/api/v1/positions')) return { code: '200000', data: [] };
+      if (method === 'POST' && url.includes('st-orders')) return { code: '200000', data: { orderId: 'kf-new' } };
+      if (url.includes('/api/v1/orders')) return { code: '200000', data: { currentPage: 1, pageSize: 50, totalNum: 1, totalPage: 1, items: [limit] } };
+      return { code: '200000', data: { price: '60000', bestBidPrice: '59999', bestAskPrice: '60001', symbol: 'XBTUSDTM' } };
+    };
+    const fut = realClient(ccxt.kucoinfutures as never, { apiKey: 'k1234567', secret: 's1234567', password: 'p1234567' }, [perp], answer, { uta: false });
+    const spot = realClient(ccxt.kucoin as never, { apiKey: 'k1234567', secret: 's1234567', password: 'p1234567' }, [], answer, { uta: false });
+    const t = new CcxtTrader('kucoin', { spot: spot.ex, futures: fut.ex }, silentLogger);
+    const plan = await t.normalizeModify({ accountId: 1, idemKey: KEY, market: 'futures', symbol: 'BTC/USDT:USDT', changes: [{ what: 'order', orderId: 'lo1', trigger: false, price: 61_500, stopLoss: 63_000, takeProfit: 58_000 }] });
+    expect(plan.preview.errors).toEqual([]);
+    expect((await t.modify(plan)).status).toBe('done');
+    const placed = fut.sent.find((x) => x.method === 'POST' && x.url.includes('st-orders'));
+    expect(placed?.body).toMatchObject({ side: 'sell', type: 'limit', price: '61500', size: 5, triggerStopUpPrice: '63000', triggerStopDownPrice: '58000' });
+    const refused = await t.normalizeModify({ accountId: 1, idemKey: KEY, market: 'futures', symbol: 'BTC/USDT:USDT', changes: [{ what: 'order', orderId: 'st1', trigger: true, stopLoss: 58_000 }] });
+    expect(refused.preview.errors).toContain('La KuCoin, TP / SL nu se atașează unui ordin stop: pune-le pe poziție după ce se execută.');
   });
 
   it('KuCoin futures in hedge mode (FD-KUCOINHEDGE): each order names its position, the TP / SL one too', async () => {
@@ -606,7 +670,8 @@ describe('what the real ccxt sends (FD-TRADING, ccxt 4.5)', () => {
       ['buy', true, 'SHORT'],
       ['sell', false, 'SHORT'],
     ]);
-    expect(orders[4]).toMatchObject({ triggerStopUpPrice: '55000', triggerStopDownPrice: '62000', leverage: 2, marginMode: 'ISOLATED' });
+    // FIX-KUCOINTPSL: the short's SL (above) fires on the way up, its TP (below) on the way down.
+    expect(orders[4]).toMatchObject({ triggerStopUpPrice: '62000', triggerStopDownPrice: '55000', leverage: 2, marginMode: 'ISOLATED' });
     expect(fut.sent.filter((x) => x.url.includes('getPositionMode'))).toHaveLength(1);
   });
 
@@ -805,5 +870,152 @@ describe('what the real ccxt sends (FD-TRADING, ccxt 4.5)', () => {
     await t.place(p);
     const order = c.sent.find((s) => s.method === 'POST' && s.url.includes('/orders'));
     expect(order?.body).toMatchObject({ product_id: 'BTC-USD', side: 'BUY', order_configuration: { stop_limit_stop_limit_gtc: { base_size: '0.002', limit_price: '61100', stop_price: '61000', stop_direction: 'STOP_DIRECTION_STOP_UP' } } });
+  });
+});
+
+describe("KuCoin classic futures: the margin mode is the pair's (FIX-KUCOINMARGIN)", () => {
+  const perp = ccxtMarket({ id: 'XBTUSDTM', symbol: 'BTC/USDT:USDT', base: 'BTC', quote: 'USDT', swap: true, contractSize: 0.001, amount: 1, price: 0.1, min: 1 });
+  const KEYS = { apiKey: 'k1234567', secret: 's1234567', password: 'p1234567' };
+  const MISMATCH = "The order's margin mode does not match the selected one. Please switch and try again.";
+  const waiting = { id: 'lo1', symbol: 'XBTUSDTM', type: 'limit', side: 'buy', price: '50000', size: 5, leverage: '5', marginMode: 'CROSS', reduceOnly: false, status: 'open', isActive: true, createdAt: 1_700_000_000_000, settleCurrency: 'USDT' };
+  /**
+   * KuCoin (classic) with the pair on `pair` (null: not readable), maybe a cross position or an open order on it; the
+   * switch refused when `refuse`, an order refused with 330005 when `mismatch`. Every request is kept; a refusal goes
+   * through ccxt's own KuCoin error handling (the simulated network skips it), so it throws what ccxt would.
+   */
+  function kucoin(o: { pair: 'CROSS' | 'ISOLATED' | null; position?: boolean; orders?: boolean; refuse?: boolean; mismatch?: boolean }) {
+    let errorsOf: Exchange | null = null;
+    const answer = (url: string, method: string) => {
+      const r = reply(url, method) as { code: string };
+      if (r.code !== '200000') (errorsOf as unknown as { handleErrors: (...a: unknown[]) => void }).handleErrors(400, 'Bad Request', url, method, {}, JSON.stringify(r), r, {}, '');
+      return r;
+    };
+    const reply = (url: string, method: string): object => {
+      if (url.includes('getPositionMode')) return { code: '200000', data: { positionMode: 0 } };
+      if (url.includes('getMarginMode')) return o.pair ? { code: '200000', data: { symbol: 'XBTUSDTM', marginMode: o.pair } } : { code: '400100', msg: 'Parameter Error' };
+      if (url.includes('changeMarginMode')) return o.refuse ? { code: '300000', msg: 'There are open positions or orders, the margin mode cannot be switched' } : { code: '200000', data: { symbol: 'XBTUSDTM', marginMode: 'ANY' } };
+      if (url.includes('changeCrossUserLeverage')) return { code: '200000', data: true };
+      if (url.includes('stopOrders')) return { code: '200000', data: { currentPage: 1, pageSize: 50, totalNum: 0, totalPage: 0, items: [] } };
+      if (url.includes('/api/v1/positions')) {
+        return { code: '200000', data: o.position ? [{ symbol: 'XBTUSDTM', currentQty: 10, avgEntryPrice: '59000', isOpen: true, crossMode: true, marginMode: 'CROSS', realLeverage: 5, markPrice: '60000', positionSide: 'BOTH', settleCurrency: 'USDT' }] : [] };
+      }
+      if (method === 'POST' && (url.includes('/api/v1/orders') || url.includes('st-orders'))) return o.mismatch ? { code: '330005', msg: MISMATCH } : { code: '200000', data: { orderId: 'kf-1' } };
+      if (url.includes('/api/v1/orders')) return { code: '200000', data: { currentPage: 1, pageSize: 50, totalNum: o.orders ? 1 : 0, totalPage: 1, items: o.orders ? [waiting] : [] } };
+      return { code: '200000', data: { price: '60000', bestBidPrice: '59999', bestAskPrice: '60001', symbol: 'XBTUSDTM' } };
+    };
+    const fut = realClient(ccxt.kucoinfutures as never, KEYS, [perp], answer, { uta: false });
+    errorsOf = fut.ex;
+    const spot = realClient(ccxt.kucoin as never, KEYS, [], answer, { uta: false });
+    const t = new CcxtTrader('kucoin', { spot: spot.ex, futures: fut.ex }, silentLogger);
+    const writes = () => fut.sent.filter((x) => x.method === 'POST');
+    const where = (part: string) => writes().findIndex((x) => x.url.includes(part));
+    return { t, fut, writes, where };
+  }
+  const order = (o: Partial<OrderTicket>) => ticket({ market: 'futures', symbol: 'BTC/USDT:USDT', amount: 0.005, leverage: 3, ...o });
+
+  it("7 Nov 2026's INJ order: the pair on cross, an isolated buy with TP / SL: said at the check, the pair switched, then the order", async () => {
+    const k = kucoin({ pair: 'CROSS' });
+    const p = await k.t.normalize(order({ marginMode: 'isolated', takeProfit: 64_000, stopLoss: 58_000 }));
+    expect(p.errors).toEqual([]);
+    expect(p.warnings).toContain('Pe KuCoin, BTC/USDT:USDT e pe marjă Cross: Sentiq o trece pe Isolated, cum ai ales, înainte de ordin.');
+    expect(k.writes()).toEqual([]);
+    expect(await k.t.place(p)).toMatchObject({ orderId: 'kf-1' });
+    expect(k.writes()[k.where('changeMarginMode')]?.body).toEqual({ symbol: 'XBTUSDTM', marginMode: 'ISOLATED' });
+    expect(k.where('changeMarginMode')).toBeLessThan(k.where('st-orders'));
+    expect(k.writes()[k.where('st-orders')]?.body).toMatchObject({ side: 'buy', size: 5, leverage: 3, marginMode: 'ISOLATED', triggerStopUpPrice: '64000', triggerStopDownPrice: '58000' });
+    expect(k.where('changeCrossUserLeverage')).toBe(-1);
+    expect(k.writes()).toHaveLength(2);
+  });
+
+  it('the pair on isolated, a cross order: the pair switched, the cross leverage set on it, then the order', async () => {
+    const k = kucoin({ pair: 'ISOLATED' });
+    const p = await k.t.normalize(order({ marginMode: 'cross', leverage: 5 }));
+    expect(p.warnings).toContain('Pe KuCoin, BTC/USDT:USDT e pe marjă Isolated: Sentiq o trece pe Cross, cum ai ales, înainte de ordin.');
+    await k.t.place(p);
+    expect(k.writes().map((x) => new URL(x.url).pathname)).toEqual(['/api/v2/position/changeMarginMode', '/api/v2/changeCrossUserLeverage', '/api/v1/orders']);
+    expect(k.writes()[0]?.body).toEqual({ symbol: 'XBTUSDTM', marginMode: 'CROSS' });
+    expect(k.writes()[1]?.body).toMatchObject({ symbol: 'XBTUSDTM', leverage: '5' });
+    expect(k.writes()[2]?.body).toMatchObject({ marginMode: 'CROSS' });
+  });
+
+  it('the pair already on the margin chosen: nothing said, nothing switched', async () => {
+    const k = kucoin({ pair: 'ISOLATED' });
+    const p = await k.t.normalize(order({ marginMode: 'isolated' }));
+    expect(p.warnings.join(' ')).not.toMatch(/marjă/);
+    await k.t.place(p);
+    expect(k.where('changeMarginMode')).toBe(-1);
+    expect(k.writes()[k.where('/api/v1/orders')]?.body).toMatchObject({ marginMode: 'ISOLATED', leverage: 3 });
+  });
+
+  it('the pair on the other margin with a position or open orders: refused at the check, nothing sent', async () => {
+    const held = kucoin({ pair: 'CROSS', position: true });
+    const p1 = await held.t.normalize(order({ marginMode: 'isolated' }));
+    expect(p1.errors).toContain('Pe KuCoin, BTC/USDT:USDT e pe marjă Cross și are o poziție deschisă; KuCoin schimbă marja unei perechi doar fără poziție și fără ordine. Alege „Cross”, sau închide poziția întâi.');
+    expect(held.writes()).toEqual([]);
+    const waitingOrder = kucoin({ pair: 'CROSS', orders: true });
+    const p2 = await waitingOrder.t.normalize(order({ marginMode: 'isolated' }));
+    expect(p2.errors).toContain('Pe KuCoin, BTC/USDT:USDT e pe marjă Cross și are ordine deschise; KuCoin schimbă marja unei perechi doar fără poziție și fără ordine. Alege „Cross”, sau anulează ordinele întâi.');
+    expect(waitingOrder.writes()).toEqual([]);
+    // Adding to the cross position in cross: nothing to say.
+    expect((await held.t.normalize(order({ marginMode: 'cross' }))).errors).toEqual([]);
+  });
+
+  it('the switch refused by KuCoin when sending: no order, and the message says what to do', async () => {
+    const k = kucoin({ pair: 'CROSS', refuse: true });
+    const p = await k.t.normalize(order({ marginMode: 'isolated' }));
+    expect(p.errors).toEqual([]);
+    const err = await k.t.place(p).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TradingError);
+    expect(err).toMatchObject({ code: 'REJECTED' });
+    expect((err as Error).message).toMatch(/^KuCoin n-a trecut BTC\/USDT:USDT de pe marja Cross pe Isolated \(kucoinfutures .*cannot be switched.*\)\. Ordinul n-a fost trimis\. Alege „Cross”, sau închide poziția și anulează ordinele de pe pereche\.$/);
+    expect(k.writes().map((x) => new URL(x.url).pathname)).toEqual(['/api/v2/position/changeMarginMode']);
+  });
+
+  it("an order naming no margin (a bot's) or closing follows the pair, never switching it", async () => {
+    const bot = kucoin({ pair: 'CROSS' });
+    const p = await bot.t.normalize(order({ leverage: 2 }));
+    expect(p.errors).toEqual([]);
+    expect(p.warnings.join(' ')).not.toMatch(/marjă/);
+    await bot.t.place(p);
+    expect(bot.writes().map((x) => new URL(x.url).pathname)).toEqual(['/api/v2/changeCrossUserLeverage', '/api/v1/orders']);
+    expect(bot.writes()[1]?.body).toMatchObject({ marginMode: 'CROSS' });
+    const close = kucoin({ pair: 'CROSS', position: true });
+    await close.t.place(await close.t.normalize(order({ side: 'sell', reduceOnly: true, leverage: undefined })));
+    expect(close.writes().map((x) => new URL(x.url).pathname)).toEqual(['/api/v1/orders']);
+    expect(close.writes()[0]?.body).toMatchObject({ side: 'sell', reduceOnly: true, marginMode: 'CROSS' });
+    // "Închide" names the position's margin as ccxt read it (from a flag its notes call always false): the pair's wins.
+    const named = kucoin({ pair: 'CROSS', position: true });
+    await named.t.place(await named.t.normalize(order({ side: 'sell', reduceOnly: true, leverage: undefined, marginMode: 'isolated' })));
+    expect(named.writes().map((x) => new URL(x.url).pathname)).toEqual(['/api/v1/orders']);
+    expect(named.writes()[0]?.body).toMatchObject({ reduceOnly: true, marginMode: 'CROSS' });
+  });
+
+  it('the margin unreadable: the order goes with the one chosen, as before; a 330005 is explained', async () => {
+    const k = kucoin({ pair: null, mismatch: true });
+    const p = await k.t.normalize(order({ marginMode: 'isolated' }));
+    expect(p.errors).toEqual([]);
+    expect(p.warnings.join(' ')).not.toMatch(/marjă/);
+    await expect(k.t.place(p)).rejects.toMatchObject({
+      code: 'REJECTED',
+      message: 'KuCoin a refuzat ordinul: perechea e pe cealaltă marjă (cross / isolated) în contul KuCoin. Nu s-a executat nimic. Trimite-l din nou; dacă se repetă, alege marja pe care e perechea în KuCoin.',
+    });
+    expect(k.writes().map((x) => new URL(x.url).pathname)).toEqual(['/api/v1/orders']);
+    expect(k.writes()[0]?.body).toMatchObject({ marginMode: 'ISOLATED' });
+  });
+
+  it("the unified account (UTA) has no pair margin to read or switch", async () => {
+    const uta = fakeClient('kucoin', [BTC_SPOT, BTC_PERP], { last: 60_000, uta: true });
+    let read = 0;
+    (uta.ex as unknown as { fetchMarginMode: () => Promise<unknown> }).fetchMarginMode = async () => {
+      read++;
+      return { info: { marginMode: 'ISOLATED' } };
+    };
+    const t = new CcxtTrader('kucoin', { spot: uta.ex, futures: null }, silentLogger);
+    const p = await t.normalize(ticket({ market: 'futures', symbol: 'BTC/USDT:USDT', amount: 0.01, marginMode: 'cross', leverage: 2 }));
+    expect(p.errors).toEqual([]);
+    await t.place(p);
+    expect(read).toBe(0);
+    expect(uta.calls.some((x) => x.fn === 'setMarginMode')).toBe(false);
+    expect(createArgs(uta.calls)[5]).toMatchObject({ marginMode: 'cross' });
   });
 });

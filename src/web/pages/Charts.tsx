@@ -6,6 +6,7 @@ import { clsx } from 'clsx';
 import type { ZodType } from 'zod';
 import { ArrowDownUp, ArrowRightLeft, Bell, Bot, ListChecks, Maximize2, Minimize2, PanelRightClose, PanelRightOpen, RotateCcw, Settings as Cog, SlidersHorizontal, Trash2, X } from 'lucide-react';
 import type { AccountView, CandlesResult, Portfolio, StockQuoteRow } from '../../shared/api-types.ts';
+import type { BotLevel } from '../../shared/bot.ts';
 import { DEFAULT_SLINGSHOT_PARAMS, SIGNAL_SIZE_NAMES, SLINGSHOT_SHORT_TITLE, SLINGSHOT_TITLE, SLINGSHOT_VERSION, slingshotParamsSchema, type SlingshotParams } from '../../shared/indicator/params.ts';
 import {
   DEFAULT_LMA_PARAMS,
@@ -26,7 +27,7 @@ import type { ModifyStepPlan } from '../../shared/trading.ts';
 import { CHART_SYMBOL_RE, type Settings, type SettingsView } from '../../shared/settings.ts';
 import { STUDY_MAX, type FavoriteId, type Study, type StudyId, type StudyMemoryEntry } from '../../shared/studies.ts';
 import { DEFAULT_CHART_STYLE, type ChartLineStyle, type ChartStyle } from '../../shared/chart-style.ts';
-import { api, errorMessage, qs } from '../api.ts';
+import { api, ApiError, errorMessage, qs } from '../api.ts';
 import { CandleChart, DEFAULT_PANE_FACTOR, type PriceLineSpec, type StudyDraw } from '../chart/CandleChart.tsx';
 import { lmaHlines, lmaScriptLineColors } from '../chart/lma-lines.ts';
 import { modalOpen, useFullscreen } from '../chart/fullscreen.ts';
@@ -36,15 +37,17 @@ import { ListDrawer, Watchlist } from '../components/Watchlist.tsx';
 import { OfflineBanner } from '../components/OfflineBanner.tsx';
 import { useMediaQuery } from '../media.ts';
 import { PNL_COLORS, PNL_COLORS_LIGHT, tradeLinesOf } from '../chart/pnl.ts';
-import { anchorOf, draftGroups, draftTicket, isDraggable, lineActionOf, lineCloses, liveDrafts, sentLevels, withDrafts, withSent, type AccountLine, type Drafts, type SentLevel } from '../chart/trade-drafts.ts';
+import { botLinesOf, onChart, withoutDuplicates } from '../chart/bot-lines.ts';
+import { anchorOf, botDraftOf, draftGroups, draftTicket, isDraggable, lineActionOf, lineCloses, liveDrafts, sentLevels, withDrafts, withSent, type AccountLine, type Drafts, type SentLevel } from '../chart/trade-drafts.ts';
 import { chartLineOf, labelText, lineColor, TRADE_COLORS, TRADE_COLORS_LIGHT } from '../chart/trade-labels.ts';
 import { LineActionDialog, type LineAction } from '../components/LineActionDialog.tsx';
 import { entryBasisOf, stepImpact } from '../components/modify-seeds.ts';
-import { BOX, TradeDraftBar } from '../components/TradeDraftBar.tsx';
+import { BotDraftBar, BOX, TradeDraftBar } from '../components/TradeDraftBar.tsx';
 import { canReverse, ReverseDialog } from '../components/ReverseDialog.tsx';
 import { useTheme } from '../theme.ts';
 import { saveSettingsPatch, type SettingsPatch } from '../chart/prefs.ts';
 import { premiumState } from '../chart/premium.ts';
+import { boxStyle, LMA_GROUPS, lmaLocked, PINE_STYLE, premiumCheck, premiumHostField, rowsOf, SLINGSHOT_GROUPS, type FieldDef, type GroupDef } from '../chart/premium-form.ts';
 import { countRo, fmtAgo, fmtDateTime, fmtPct, fmtPrice } from '../format.ts';
 import { chartPrecision, chartTimeZone, prevDayCloses } from '../chart/chart-look.ts';
 import { ChartMenu, type ChartMenuItem } from '../components/ChartMenu.tsx';
@@ -53,21 +56,22 @@ import { ChartStatusLine, statusLineOn } from '../components/ChartStatusLine.tsx
 import { isMac } from '../components/CommandPalette.tsx';
 import { chartPathOf, nearestTimeframe, rememberedPath } from '../chart/paths.ts';
 import { INDEX_DELAY_NOTE, INDEX_TIMEFRAMES, INDICES, indexById, indexId, plainSymbol } from '../../shared/indices.ts';
-import { useMarketSource, useSettings, useStocksInfo, useTz, useWatchlist } from '../hooks.ts';
+import { useMarketSource, useRevealInRow, useSettings, useStocksInfo, useTz, useWatchlist } from '../hooks.ts';
 import { ErrorNote, Loading, Panel, Toast, Warning, type ToastMessage } from '../components/ui.tsx';
 import { OrderTicket, useTradingCaps, type TicketSeed } from '../components/OrderTicket.tsx';
 import { BotsDialog } from '../components/bots/BotsDialog.tsx';
 import { portfolioInterval } from '../portfolio-settle.ts';
+import { useInUse } from '../presence.ts';
 import type { BotSeed } from '../components/bots/bot-form.ts';
 import { IndicatorPicker, PremiumBadge, type PremiumItem, type PremiumKey } from '../components/IndicatorPicker.tsx';
 import { StudySettings } from '../components/StudySettings.tsx';
-import { LEGEND_INPUTS, LEGEND_TITLE, LEGEND_VALUES, LegendButtons, LegendRow, StudyLegendRow } from '../components/StudyLegend.tsx';
-import { studyMeta } from '../indicators/catalog-meta.ts';
+import { LEGEND_INPUTS, LEGEND_TITLE, LEGEND_VALUES, LegendButtons, LegendCollapse, LegendRow, StudyLegendRow } from '../components/StudyLegend.tsx';
+import { STUDY_CATEGORIES, STUDY_META, studyMeta } from '../indicators/catalog-meta.ts';
 import { legendParams, sanitizeInputs, type ChartInfo } from '../indicators/compute.ts';
 import { useStudyRuntime, type StudyRuntime } from '../indicators/runtime.ts';
 import { legendNumbers, styledEntry } from '../indicators/style.ts';
 import { linkStyle } from '../indicators/color-links.ts';
-import { useStudies } from '../indicators/useStudies.ts';
+import { chartOf, useStudies } from '../indicators/useStudies.ts';
 import { fromMemory, memoryOf, rememberStudy } from '../indicators/memory.ts';
 import { ColorPicker } from '../components/ColorPicker.tsx';
 import { InfoTip } from '../components/InfoTip.tsx';
@@ -75,43 +79,13 @@ import { AlertIcon, CoinLogo, OutcomeIcon } from '../components/icons.tsx';
 import { useScrollLock } from '../scroll-lock.ts';
 import { useVisibleArea } from '../visible-area.ts';
 import { HLineSettings } from '../components/HLineSettings.tsx';
+import { sendToHost, useEmbedCommands, useEmbedded, useHostReport } from '../embed.ts';
+import { HostSetters, useHostForm, type HostField, type HostForm } from '../host-form.ts';
 import { HLINE_DEFAULT_STYLE, HLINE_MAX, hlineVisibleOn, styleOf, type HLine, type HLineStyle } from '../../shared/hlines.ts';
+import { ALERT_RO, collapseAlerts, EXCHANGE_NAME, MARKET_RO, OUTCOME_RO, reasonRo } from '../chart/signal-text.ts';
+import { PREMIUM_ITEMS } from '../chart/premium.ts';
 
-const ALERT_RO: Record<string, string> = {
-  longSignal: 'Long Signal',
-  takeProfitSignal: 'Take Profit Signal',
-  atrTakeProfit: 'ATR Take Profit Hit',
-  atrStopLoss: 'ATR Stop Loss Hit',
-  msBullish: 'Bullish Market Structure',
-  msBearish: 'Bearish Market Structure',
-  shortSignal: 'Short Signal',
-  shortTakeProfitSignal: 'Short Take Profit Signal',
-  shortAtrTakeProfit: 'Short ATR Take Profit Hit',
-  shortAtrStopLoss: 'Short ATR Stop Loss Hit',
-};
-const OUTCOME_RO: Record<string, string> = { active: 'Activ', tp: 'TP atins', sl: 'SL atins', invalidated: 'Invalidat' };
-const EXCHANGE_NAME: Record<string, string> = { kucoin: 'KuCoin', binance: 'Binance', bybit: 'Bybit', okx: 'OKX', bitget: 'Bitget', twelvedata: 'Twelve Data', nasdaq: 'Nasdaq', cboe: 'Cboe', cnbc: 'CNBC' };
-const MARKET_RO: Record<string, string> = { open: 'bursa e deschisă', pre: 'pre-market', after: 'after-hours', closed: 'bursa e închisă' };
-const REASON_RO: Record<string, string> = {
-  takeProfitSignal: 'maximul depășit',
-  atrTakeProfit: 'ținta ATR',
-  stopLoss: 'stop loss',
-  superseded: 'înlocuit de un semnal nou',
-  trendFlip: 'trendul s-a întors',
-};
-/** Why a signal closed; a SHORT's take profit signal is a low broken (FD-SLINGSHOT34). */
-const reasonRo = (s: SlingshotSignal) => (s.side === 'short' && s.outcomeReason === 'takeProfitSignal' ? 'minimul depășit' : s.outcomeReason ? REASON_RO[s.outcomeReason] : '');
-
-/** Collapses consecutive repeats of the same alert (e.g. ATR TP on every bar above the target). */
-export function collapseAlerts(alerts: SlingshotAlert[]): (SlingshotAlert & { count: number })[] {
-  const out: (SlingshotAlert & { count: number })[] = [];
-  for (const a of alerts) {
-    const prev = out.at(-1);
-    if (prev && prev.type === a.type && a.bar - (prev.bar + prev.count - 1) === 1) prev.count++;
-    else out.push({ ...a, count: 1 });
-  }
-  return out;
-}
+export { collapseAlerts } from '../chart/signal-text.ts';
 
 /** The last non-null value seen (FD-CHARTSTEADY §1). */
 function useLatched(value: string | null): string | null {
@@ -136,240 +110,8 @@ function Holding({ ghost, dash, start = false }: { ghost: string | null; dash: s
   );
 }
 
-type FieldDef<P> = {
-  key: keyof P & string;
-  label: string;
-  /** The Pine tooltip, shown behind an (i). */
-  tip?: string;
-  /** Consecutive fields with the same value share a row (Pine `inline`). */
-  inline?: string;
-} & (
-  | { kind: 'int' | 'float'; step?: number; min?: number; max?: number }
-  /** `lockedWhen`: why the box cannot change now (it is then disabled), e.g. the last side left on. */
-  | { kind: 'bool'; lockedWhen?: (draft: P) => string | null }
-  | { kind: 'color' }
-  | { kind: 'text' }
-  | { kind: 'select'; options: { value: string; label: string }[] }
-  /**
-   * FD-STYLEUNIFY: an element's look on one row, the same everywhere: a box to tick (`toggle`), the line box (its `color`,
-   * else `swatch`, a colour that comes from elsewhere, explained by `note`; `scriptColor` when the saved colour is null:
-   * the script's own), its `width` and `style`, its `size`, and a level shown after it (`value`).
-   */
-  | {
-      kind: 'look';
-      toggle?: keyof P & string;
-      color?: keyof P & string;
-      scriptColor?: (draft: P) => string;
-      swatch?: (draft: P) => string;
-      note?: string;
-      width?: keyof P & string;
-      style?: keyof P & string;
-      size?: keyof P & string;
-      value?: (draft: P) => number;
-    }
-);
-
-/** The keys a field edits (an error on any of them names the field). */
-const fieldKeys = <P,>(f: FieldDef<P>): string[] => (f.kind === 'look' ? [f.key, f.toggle, f.color, f.width, f.style, f.size].filter((k): k is keyof P & string => Boolean(k)) : [f.key]);
-/** Pine's line style names <-> the line box's. */
-const PINE_STYLE: Record<ChartLineStyle, string> = { solid: 'Solid', dashed: 'Dashed', dotted: 'Dotted' };
-const boxStyle = (v: unknown): ChartLineStyle => (v === 'Dashed' ? 'dashed' : v === 'Dotted' ? 'dotted' : 'solid');
-interface GroupDef<P> {
-  title: string;
-  fields: FieldDef<P>[];
-}
-
-const ONE_SIDE_TIP = 'Cel puțin unul dintre Long Signals și Short Signals rămâne bifat.';
-/** FD-STYLEUNIFY: each state of a side's labels, with the Pine input's title and tooltip. */
-const signalLooks = (side: 'long' | 'short'): FieldDef<SlingshotParams>[] => {
-  const S = side === 'long' ? 'Long' : 'Short';
-  const row = (state: string, label: string, tip?: string): FieldDef<SlingshotParams> => ({
-    key: `${side}${state}Color` as keyof SlingshotParams & string,
-    label,
-    kind: 'look',
-    color: `${side}${state}Color` as keyof SlingshotParams & string,
-    size: `${side}${state}Size` as keyof SlingshotParams & string,
-    ...(tip ? { tip } : {}),
-  });
-  return [
-    row('Forming', `${S} Forming Signal`, `A ${S.toUpperCase()} still forming (before its confirmation).`),
-    row('', `${S} Signal`, `A valid ${S.toUpperCase()}: active, or ended with its take profit.`),
-    row('Failed', `${S} Failed Signal`, `A ${S.toUpperCase()} that hit its stop loss.`),
-    row('Invalid', `${S} Invalidated Signal`, `A ${S.toUpperCase()} replaced by a newer one (an X while the newer one is forming, for good once it is confirmed) or ended by a trend flip.`),
-    row('Tp', `${S} Take Profit`, `The TAKE PROFIT label of a ${S.toUpperCase()}.`),
-    row('Sl', `${S} Stop Loss`, `The STOP LOSS label on the bar where a ${S.toUpperCase()} failed.`),
-  ];
-};
-/** FD-STYLEUNIFY: a side's take profit / stop loss level: its line and its label's size. */
-const atrLook = (side: 'long' | 'short', level: 'Tp' | 'Sl'): FieldDef<SlingshotParams> => {
-  const color = `${side}${level === 'Tp' ? 'TP' : 'SL'}Color` as keyof SlingshotParams & string;
-  return {
-    key: color,
-    label: `${side === 'long' ? 'Long' : 'Short'} ATR ${level === 'Tp' ? 'Take Profit' : 'Stop Loss'}`,
-    kind: 'look',
-    color,
-    width: `${side}${level}LineWidth` as keyof SlingshotParams & string,
-    style: `${side}${level}LineStyle` as keyof SlingshotParams & string,
-    size: `${side}${level}LabelSize` as keyof SlingshotParams & string,
-  };
-};
-const CLOUD_NOTE = 'Culoarea vine din Cloud Uptrend Color / Cloud Downtrend Color, după trend.';
-const cloudSwatch = (d: SlingshotParams) => `linear-gradient(135deg, ${d.cloudUpColor} 50%, ${d.cloudDownColor} 50%)`;
-const SLINGSHOT_GROUPS: GroupDef<SlingshotParams>[] = [
-  {
-    // FD-SLINGSHOT34: the sides; the last one ticked cannot be unticked. FD-STYLEUNIFY: each state, each side.
-    title: 'Signals',
-    fields: [
-      { key: 'showLong', label: 'Long Signals', kind: 'bool', tip: ONE_SIDE_TIP, lockedWhen: (d) => (d.showShort ? null : ONE_SIDE_TIP) },
-      { key: 'showShort', label: 'Short Signals', kind: 'bool', tip: ONE_SIDE_TIP, lockedWhen: (d) => (d.showLong ? null : ONE_SIDE_TIP) },
-      ...signalLooks('long'),
-      ...signalLooks('short'),
-    ],
-  },
-  {
-    title: 'Indicator Settings',
-    fields: [
-      { key: 'lenFastEma', label: 'Fast EMA Period', kind: 'int' },
-      { key: 'lenSlowEma', label: 'Slow EMA Period', kind: 'int' },
-      { key: 'lenRsi', label: 'RSI Period for Stoch', kind: 'int' },
-      { key: 'lenStoch', label: 'Stochastic (K) Period', kind: 'int' },
-      { key: 'smoothK', label: 'K Line Smoothing', kind: 'int' },
-      { key: 'stochOversold', label: 'Stoch Oversold Level', kind: 'int' },
-      { key: 'stochOverbought', label: 'Stoch Overbought Level', kind: 'int' },
-      { key: 'touchTolPct', label: 'Cloud touch tolerance (%)', kind: 'float', step: 0.05 },
-      { key: 'kTol', label: 'K tolerance at 20/80', kind: 'float', step: 0.1 },
-    ],
-  },
-  {
-    title: 'ATR Settings',
-    fields: [
-      { key: 'atrLength', label: 'ATR Length', kind: 'int' },
-      { key: 'takeProfitMultiplier', label: 'Take Profit ATR Multiplier', kind: 'float', step: 0.1 },
-      { key: 'stopLossMultiplier', label: 'Stop Loss ATR Multiplier', kind: 'float', step: 0.1 },
-      { key: 'lookback', label: 'Lookback Period', kind: 'int' },
-      { key: 'atrLineLengthTP', label: 'ATR TP Line Length', kind: 'int' },
-      { key: 'atrLineLengthSL', label: 'ATR SL Line Length', kind: 'int' },
-      { key: 'showLabels', label: 'Show ATR Labels', kind: 'bool' },
-      { key: 'showLines', label: 'Show ATR Levels', kind: 'bool' },
-      { key: 'hideAtrOnTP', label: 'Hide ATR Levels and Labels on Take Profit Hit', kind: 'bool' },
-      { key: 'hideAtrOnStop', label: 'Hide ATR Levels and Labels on Stop Loss Hit', kind: 'bool' },
-      atrLook('long', 'Tp'),
-      atrLook('long', 'Sl'),
-      atrLook('short', 'Tp'),
-      atrLook('short', 'Sl'),
-    ],
-  },
-  {
-    // FD-SS34LIVE: the EMAs in the trend's colour, the cloud at half its opacity; FD-STYLEUNIFY: the EMAs' width and style
-    // (TradingView's Style tab).
-    title: 'Cloud',
-    fields: [
-      { key: 'cloudUpColor', label: 'Cloud Uptrend Color', kind: 'color', tip: 'The EMAs in an uptrend; the cloud gets it at half its opacity.' },
-      { key: 'cloudDownColor', label: 'Cloud Downtrend Color', kind: 'color', tip: 'The EMAs in a downtrend; the cloud gets it at half its opacity.' },
-      { key: 'slowEmaWidth', label: 'Slow EMA', kind: 'look', swatch: cloudSwatch, note: CLOUD_NOTE, width: 'slowEmaWidth', style: 'slowEmaStyle' },
-      { key: 'fastEmaWidth', label: 'Fast EMA', kind: 'look', swatch: cloudSwatch, note: CLOUD_NOTE, width: 'fastEmaWidth', style: 'fastEmaStyle' },
-    ],
-  },
-  {
-    title: 'Market Structure',
-    fields: [
-      { key: 'showMS', label: 'Show Market Structure Levels', kind: 'bool' },
-      { key: 'msTf', label: 'Market Structure Timeframe', kind: 'select', options: [{ value: '', label: 'Chart' }, ...TIMEFRAMES.map((t) => ({ value: t, label: t }))] },
-      { key: 'msSwing', label: 'Swing Strength (bars left/right)', kind: 'int' },
-      { key: 'msLineLength', label: 'MS Line Min Length (bars)', kind: 'int' },
-      { key: 'msRightExtend', label: 'MS Line Right Extension (bars)', kind: 'int' },
-      { key: 'msBreakOnClose', label: 'Confirm Break With Candle Close', kind: 'bool' },
-      { key: 'msBullText', label: 'Bullish Line Text', kind: 'text' },
-      { key: 'msBearText', label: 'Bearish Line Text', kind: 'text' },
-      // FD-STYLEUNIFY: each line its colour, width, style and text size
-      { key: 'msBullColor', label: 'Bullish MS Line', kind: 'look', color: 'msBullColor', width: 'msBullLineWidth', style: 'msBullLineStyle', size: 'msBullTextSize' },
-      { key: 'msBearColor', label: 'Bearish MS Line', kind: 'look', color: 'msBearColor', width: 'msBearLineWidth', style: 'msBearLineStyle', size: 'msBearTextSize' },
-    ],
-  },
-];
-
-// Names, groups, limits and tooltips from logarithmic-moving-average.pine; "Style" mirrors TradingView's Style tab.
-/** FD-STYLEUNIFY: a threshold line: its colour (the script's until one is chosen), width, style and level. */
-const lmaLine = (key: 'long' | 'short' | 'neutral', label: string): FieldDef<LmaParams> => ({
-  key: `${key}LineColor`,
-  label,
-  kind: 'look',
-  toggle: `show${key === 'long' ? 'Long' : key === 'short' ? 'Short' : 'Neutral'}Line`,
-  color: `${key}LineColor`,
-  scriptColor: (d) => lmaScriptLineColors(effectiveLmaParams(d))[key],
-  width: `${key}LineWidth`,
-  style: `${key}LineStyle`,
-  value: (d) => (lmaHlines(effectiveLmaParams(d)).find((x) => x.key === key) as ReturnType<typeof lmaHlines>[number]).price,
-});
-const lmaSwatch = (d: LmaParams) => `linear-gradient(135deg, ${d.bullishColor} 33%, ${d.neutralColor} 33% 66%, ${d.bearishColor} 66%)`;
-const LMA_GROUPS: GroupDef<LmaParams>[] = [
-  {
-    title: 'Strategy Presets',
-    fields: [{ key: 'preset', label: 'Strategy Preset', kind: 'select', options: LMA_PRESETS.map((v) => ({ value: v, label: v })), tip: LMA_TOOLTIPS.preset }],
-  },
-  {
-    title: 'LMA Core Settings',
-    fields: [
-      { key: 'period', label: 'LMA Period', kind: 'int', min: 50, max: 200, tip: LMA_TOOLTIPS.period },
-      { key: 'steepness', label: 'Log Steepness', kind: 'float', step: 0.1, min: 1.5, max: 5, tip: LMA_TOOLTIPS.steepness },
-      { key: 'maType', label: 'Smoothing MA Type', kind: 'select', options: LMA_MA_TYPES.map((v) => ({ value: v, label: v })), tip: LMA_TOOLTIPS.maType },
-      { key: 'smooth', label: 'Signal Smoothing', kind: 'int', min: 3, max: 25, tip: LMA_TOOLTIPS.smooth },
-      { key: 'momentumWeight', label: 'Momentum Confirmation Weight', kind: 'float', step: 0.1, min: 1, max: 2, tip: LMA_TOOLTIPS.momentumWeight },
-    ],
-  },
-  {
-    title: 'Trading Thresholds',
-    fields: [
-      { key: 'longThreshold', label: 'Long Entry Threshold', kind: 'float', step: 0.1, min: 0.1, max: 2, tip: LMA_TOOLTIPS.longThreshold },
-      { key: 'shortThreshold', label: 'Short Entry Threshold', kind: 'float', step: 0.1, min: -2, max: -0.1, tip: LMA_TOOLTIPS.shortThreshold },
-    ],
-  },
-  {
-    title: 'Visual Settings',
-    fields: [
-      { key: 'bullishColor', label: 'Bullish Color', kind: 'color', inline: 'colors' },
-      { key: 'bearishColor', label: 'Bearish Color', kind: 'color', inline: 'colors' },
-      { key: 'neutralColor', label: 'Neutral Color', kind: 'color', inline: 'colors' },
-      { key: 'colorBars', label: 'Color Price Bars', kind: 'bool', tip: LMA_TOOLTIPS.colorBars },
-    ],
-  },
-  {
-    title: 'Style',
-    fields: [
-      {
-        key: 'signalWidth',
-        label: 'LMA Signal',
-        kind: 'look',
-        toggle: 'showSignal',
-        swatch: lmaSwatch,
-        note: 'Culoarea vine din Bullish / Neutral / Bearish Color, după starea semnalului.',
-        width: 'signalWidth',
-        style: 'signalStyle',
-      },
-      { key: 'showFill', label: 'LMA Signal Fill', kind: 'bool' },
-      { key: 'showBarColors', label: 'LMA Signal Bar Colors', kind: 'bool' },
-      lmaLine('long', 'Long Threshold'),
-      lmaLine('short', 'Short Threshold'),
-      lmaLine('neutral', 'Neutral Line'),
-    ],
-  },
-];
-
-/** The fields a named LMA preset forces (shown locked, with the preset's values). */
-const lmaLocked = (d: LmaParams): Partial<LmaParams> | null => LMA_PRESET_VALUES[d.preset] ?? null;
-
-/** Groups consecutive fields that share an `inline` key into one row. */
-function rowsOf<F extends { inline?: string }>(fields: F[]): F[][] {
-  const rows: F[][] = [];
-  for (const f of fields) {
-    const last = rows.at(-1);
-    if (f.inline && last && last[0]?.inline === f.inline) last.push(f);
-    else rows.push([f]);
-  }
-  return rows;
-}
-
 function IndicatorForm<P extends Record<string, unknown>>({
+  title,
   settingsKey,
   params,
   defaults,
@@ -377,6 +119,8 @@ function IndicatorForm<P extends Record<string, unknown>>({
   schema,
   locked,
 }: {
+  /** Its name (the drawer's title; the app's sheet, FD-V3-S19). */
+  title: string;
   settingsKey: 'indicator' | 'lma';
   params: P;
   defaults: P;
@@ -394,7 +138,6 @@ function IndicatorForm<P extends Record<string, unknown>>({
   const save = useMutation({ mutationFn: (values: P) => saveSettingsPatch(qc, { [settingsKey]: values }, { optimistic: false }) });
   const set = (k: keyof P, v: unknown) => setDraft((d) => ({ ...d, [k]: v }));
   const forced = locked?.(draft) ?? null;
-  const allFields = groups.flatMap((g) => g.fields);
   // The (i) shows the Pine tooltip on hover and on a click or a tap (FIX-INFOTIP); the same text stays the control's
   // description (`title`), so the field's name stays just its label.
   const tipIcon = (tip?: string) =>
@@ -509,30 +252,49 @@ function IndicatorForm<P extends Record<string, unknown>>({
       </label>
     );
   };
+  /** „Salvează”: checked by the settings' schema, then saved (the drawer's button, the app's sheet). */
+  const submit = () => {
+    const r = premiumCheck(schema, draft, groups);
+    if (!r.ok) {
+      setInvalid(r.invalid);
+      return;
+    }
+    setInvalid(null);
+    save.mutate(r.data);
+  };
+
+  // Sentiq.iOS FD-V3-S19: the same fields, values and setters as the drawer's, described for the app's native sheet.
+  const embedded = useEmbedded();
+  const host = new HostSetters();
+  const hostField = (f: FieldDef<P>): HostField => premiumHostField(f, draft, forced, (k, fn) => host.add(`p:${k}`, (v) => setDraft((d) => fn(d, v))));
+  const hostForm: HostForm | null = embedded
+    ? {
+        target: settingsKey === 'indicator' ? 'slingshot' : 'lma',
+        title,
+        premium: true,
+        intro: 'Aceleași nume, limite și valori implicite ca în TradingView.',
+        groups: groups.map((g) => ({ title: g.title, fields: g.fields.map(hostField) })),
+        invalid,
+        error: save.isError ? errorMessage(save.error) : null,
+        saving: save.isPending,
+        saved: save.isSuccess && !save.isPending && !invalid,
+      }
+    : null;
+  useHostForm(embedded, hostForm, host, {
+    save: submit,
+    defaults: () => {
+      setInvalid(null);
+      setDraft(defaults);
+    },
+  });
+
   return (
     <form
       noValidate
       className="flex flex-1 flex-col overflow-y-auto overscroll-contain px-5 pt-4"
       onSubmit={(e) => {
         e.preventDefault();
-        const r = schema.safeParse(draft);
-        if (!r.success) {
-          // A rule across fields (e.g. one of Long / Short) says what is wrong in its own words.
-          const rule = r.error.issues.find((i) => i.code === 'custom');
-          if (rule) {
-            setInvalid(rule.message);
-            return;
-          }
-          const bad = [...new Set(r.error.issues.map((i) => String(i.path[0])))].map((k) => {
-            const f = allFields.find((x) => fieldKeys(x).includes(k));
-            const range = f && (f.kind === 'int' || f.kind === 'float') && f.min !== undefined && f.max !== undefined ? ` (${f.min} – ${f.max})` : '';
-            return `${f?.label ?? k}${range}`;
-          });
-          setInvalid(`Valori invalide: ${bad.join(', ')}.`);
-          return;
-        }
-        setInvalid(null);
-        save.mutate(r.data);
+        submit();
       }}
     >
       <p className="mb-4 text-[12.5px] text-faint">Aceleași nume, limite și valori implicite ca în TradingView.</p>
@@ -596,16 +358,7 @@ function newStudyUid(): string {
 }
 
 /** Slingshot and LMA, with the PREMIUM tag (FD-INDICATORS §1); a tab of their own, alphabetical with the rest elsewhere (FD-PICKERSORT). */
-const PREMIUM: PremiumItem[] = [
-  {
-    key: 'slingshot',
-    name: SLINGSHOT_TITLE,
-    shortName: 'Slingshot',
-    overlay: true,
-    description: 'Norul EMA 38 / 62, semnalele LONG și TAKE PROFIT, nivelurile TP / SL din ATR și Market Structure.',
-  },
-  { key: 'lma', name: LMA_TITLE, shortName: 'LMA', overlay: false, description: 'Linia de semnal, pragurile long / short și starea BULLISH / BEARISH / NEUTRAL, în panoul de jos.' },
-];
+const PREMIUM: PremiumItem[] = PREMIUM_ITEMS;
 
 function SettingsDrawer({
   target,
@@ -630,14 +383,17 @@ function SettingsDrawer({
   onClose: () => void;
 }) {
   const panel = useRef<HTMLElement>(null);
+  // Sentiq.iOS FD-V3-S19: in the app an indicator's settings are its native sheet: the panel stays hidden (its form keeps
+  // the draft and the rules); a horizontal line keeps the panel.
+  const native = useEmbedded() && !target.startsWith('hline:');
   // FD-SCROLLLOCK: the page behind the panel stays still (the chart beside it still zooms with the wheel).
-  useScrollLock();
+  useScrollLock(!native);
   // FD-MODALFIT: above the on-screen keyboard while it is up.
   const area = useVisibleArea();
   useEffect(() => {
     // Dialog behaviour: focus moves into the panel, Escape closes it, focus returns to the opener.
     const opener = document.activeElement as HTMLElement | null;
-    requestAnimationFrame(() => panel.current?.querySelector<HTMLElement>('input, select, button[role="tab"]')?.focus());
+    if (!native) requestAnimationFrame(() => panel.current?.querySelector<HTMLElement>('input, select, button[role="tab"]')?.focus());
     const onKey = (e: KeyboardEvent) => {
       // An Esc already used by something above the drawer (the ⌘K search) does not close it too.
       if (e.key === 'Escape' && !e.defaultPrevented) onClose();
@@ -647,7 +403,7 @@ function SettingsDrawer({
       window.removeEventListener('keydown', onKey);
       opener?.focus?.();
     };
-  }, [onClose]);
+  }, [onClose, native]);
   const study = target.startsWith('study:') ? studies.find((x) => x.uid === target.slice(6)) : undefined;
   const meta = study ? studyMeta(study.id) : undefined;
   const isLine = target.startsWith('hline:');
@@ -660,7 +416,7 @@ function SettingsDrawer({
       role="dialog"
       aria-modal="false"
       className="panel fixed top-0 right-0 bottom-0 z-40 flex w-[400px] max-w-full flex-col rounded-none border-y-0 border-r-0 max-[440px]:w-full"
-      style={area}
+      style={native ? { ...area, display: 'none' } : area}
       aria-label={`Setările ${title}`}
     >
       <header className="flex items-center justify-between gap-3 border-b border-line px-5 py-4">
@@ -689,20 +445,30 @@ function SettingsDrawer({
           <p className="px-5 py-4 text-[13.5px] text-faint">Linia nu mai e pe grafic.</p>
         )
       ) : target === 'slingshot' ? (
-        <IndicatorForm key="slingshot" settingsKey="indicator" params={slingshot} defaults={DEFAULT_SLINGSHOT_PARAMS} groups={SLINGSHOT_GROUPS} schema={slingshotParamsSchema} />
+        <IndicatorForm key="slingshot" title={title} settingsKey="indicator" params={slingshot} defaults={DEFAULT_SLINGSHOT_PARAMS} groups={SLINGSHOT_GROUPS} schema={slingshotParamsSchema} />
       ) : target === 'lma' ? (
-        <IndicatorForm key="lma" settingsKey="lma" params={lma} defaults={DEFAULT_LMA_PARAMS} groups={LMA_GROUPS} schema={lmaParamsSchema} locked={lmaLocked} />
+        <IndicatorForm key="lma" title={title} settingsKey="lma" params={lma} defaults={DEFAULT_LMA_PARAMS} groups={LMA_GROUPS} schema={lmaParamsSchema} locked={lmaLocked} />
       ) : !study || !meta ? (
-        <p className="px-5 py-4 text-[13.5px] text-faint">Indicatorul nu mai e pe grafic.</p>
+        <>
+          <p className="px-5 py-4 text-[13.5px] text-faint">Indicatorul nu mai e pe grafic.</p>
+          {native && <HostFormNote target={target} title={title} text="Indicatorul nu mai e pe grafic." />}
+        </>
       ) : !runtime ? (
         <div className="px-5">
           <Loading label="Se încarcă indicatorul…" />
+          {native && <HostFormNote target={target} title={title} text="Se încarcă indicatorul…" />}
         </div>
       ) : (
         <StudySettings key={study.uid} name={meta.name} mod={runtime.STUDY_MODULES[study.id]} runtime={runtime} study={study} result={resultOf(study.uid)} onSave={onSaveStudy} />
       )}
     </aside>
   );
+}
+
+/** Sentiq.iOS FD-V3-S19: an indicator's sheet in the app that has no form to show (the indicator removed, still loading). */
+function HostFormNote({ target, title, text }: { target: string; title: string; text: string }) {
+  useHostForm(true, { target, title, premium: false, empty: text, groups: [] }, new HostSetters(), { save: () => undefined, defaults: () => undefined });
+  return null;
 }
 
 /**
@@ -814,6 +580,15 @@ function useTradeLines(symbol: string, show: boolean, lastPrice: number | null, 
       refetchInterval: () => portfolioInterval(a.id, 60_000),
     })),
   });
+  // FIX-BOTLEVELS: the levels the real bots keep (no orders at the platform), read as often as the bots run. A server
+  // from before answers 4xx: asking again does not help, and the chart shows what it did.
+  const botLevels = useQuery({
+    queryKey: ['bot-levels'],
+    queryFn: () => api.get<BotLevel[]>('/api/bots/levels'),
+    enabled: show && relevant.length > 0,
+    refetchInterval: 60_000,
+    retry: (n, err) => !(err instanceof ApiError && err.status < 500) && n < 1,
+  });
   // The lines' colours follow the theme (FD-THEME §1).
   const theme = useTheme();
   return useMemo(() => {
@@ -834,9 +609,17 @@ function useTradeLines(symbol: string, show: boolean, lastPrice: number | null, 
       // FD-TRADEUI: the PnL now is in the entry's box (no line of its own).
       for (const l of r.lines) if (l.role !== 'pnl') lines.push({ ...l, account });
     }
+    // FIX-BOTLEVELS: each shown account's bot levels on this asset (a level that is an order there already is drawn once).
+    const levels = (botLevels.data ?? []).filter((l) => onChart(l, { base, quote, stock }) && relevant.some((a) => a.id === l.accountId));
+    const named = new Set(levels.map((l) => l.bot.id)).size > 1;
+    const botLines: AccountLine[] = [];
+    for (const account of relevant) {
+      for (const l of botLinesOf(levels, { base, quote, stock, accountId: account.id, account: several ? account.label : undefined }, colors, named)) botLines.push({ ...l, account });
+    }
+    lines.push(...withoutDuplicates(botLines, lines));
     return { lines, portfolios: byAccount };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `relevant` derives from accounts.data
-  }, [portfolios, accounts.data, symbol, show, lastPrice, stock, theme]);
+  }, [portfolios, accounts.data, botLevels.data, symbol, show, lastPrice, stock, theme]);
 }
 
 export default function ChartsPage() {
@@ -864,13 +647,15 @@ export default function ChartsPage() {
   return stock ? <ChartView stock symbol={stock} /> : <ChartView stock={false} symbol={`${params.base?.toUpperCase()}/${params.quote?.toUpperCase()}`} />;
 }
 
-const DEFAULT_CHART_PREFS: Settings['charts'] = { symbol: '', showPositions: true, showLma: true, showSlingshot: true, slingshotHidden: false, lmaHidden: false, lmaPane: 0.25, logScale: false, listId: null };
+const DEFAULT_CHART_PREFS: Settings['charts'] = { symbol: '', showPositions: true, showLma: true, showSlingshot: true, slingshotHidden: false, lmaHidden: false, legendCollapsed: false, lmaPane: 0.25, logScale: false, listId: null };
 
 /**
  * `symbol`: "BTC/USDT", the ticker ("AAPL") of a stock or the id ("^SPX") of an index. `stock`: a share or an index, both
  * served by the stock data; `index`: an index (FD-INDICES: 1d and 1w only, no positions).
  */
 function ChartView({ symbol, stock, index = false }: { symbol: string; stock: boolean; index?: boolean }) {
+  // FD-IOSCHART: inside the iOS app the page is only the chart; the app draws the bar, the list and the tables.
+  const embedded = useEmbedded();
   // The Twelve Data key is each user's own (FD-TDKEYS).
   const keyWhere = 'Setări → Ale mele → Date pentru acțiuni';
   const navigate = useNavigate();
@@ -911,6 +696,9 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
   const cryptoTfs: Timeframe[] | null = src.data?.timeframes ?? (src.isError ? [...TIMEFRAMES] : null);
   const tfs = stock ? stockTfs : cryptoTfs;
   const activeTf: Timeframe = tfs ? nearestTimeframe(savedTf, tfs) : savedTf;
+  // FD-MOBILESYM §1: the chosen timeframe in view in the phone's scrolling row.
+  const tfRow = useRef<HTMLDivElement>(null);
+  useRevealInRow(tfRow, activeTf);
   const p = s?.indicator ?? DEFAULT_SLINGSHOT_PARAMS;
   const lmaParams = useMemo(() => ({ ...DEFAULT_LMA_PARAMS, ...s?.lma }), [s?.lma]);
   const limit = src.data?.candles ?? s?.marketData?.candles ?? 1500;
@@ -928,6 +716,8 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
   }, []);
   const [picker, setPicker] = useState(false);
   const closePicker = useCallback(() => setPicker(false), []);
+  /** Sentiq.iOS FD-V3-S19: the candle the chart was asked to show (a signal tapped in the app's list). */
+  const [focusAt, setFocusAt] = useState<{ time: number; tick: number } | null>(null);
   const frame = useRef<HTMLDivElement>(null);
   // FD-WATCHDRAWER: on a phone (under 768 px, Tailwind's `md`) the symbol list is a panel sliding in from the right,
   // closed whenever the page opens and never remembered; wider, the side panel of FD-CHARTTV.
@@ -975,17 +765,19 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
   // Stocks: the server keeps candles a minute at least (Twelve Data's free plan has 8 requests a minute).
   // The coin's exchange named explicitly: the timeframes and the name shown are that exchange's.
   const source = stock ? { asset: index ? 'index' : 'stock' } : { exchange: exchange || undefined };
+  // FD-KEYIDLE: a share's candles may cost the user's Twelve Data credits: not refreshed while the tab is not in use.
+  const inUse = useInUse();
   const candles = useQuery({
     queryKey: ['candles', exchange, symbol, activeTf, limit],
     queryFn: () => api.get<CandlesResult>(`/api/market/candles${qs({ ...source, symbol, tf: activeTf, limit })}`),
-    refetchInterval: stock ? 60_000 : chartSec <= 900 ? 10_000 : 30_000,
+    refetchInterval: stock ? (inUse ? 60_000 : false) : chartSec <= 900 ? 10_000 : 30_000,
     enabled: settings.isSuccess && tfs !== null,
   });
   const htfLimit = htfCandleCount(limit, chartSec, msSec, p.msSwing);
   const htf = useQuery({
     queryKey: ['candles', exchange, symbol, p.msTf, htfLimit],
     queryFn: () => api.get<CandlesResult>(`/api/market/candles${qs({ ...source, symbol, tf: p.msTf, limit: htfLimit })}`),
-    refetchInterval: stock ? 5 * 60_000 : 60_000,
+    refetchInterval: stock ? (inUse ? 5 * 60_000 : false) : 60_000,
     // After the source is known: its timeframes decide whether the higher one exists at all.
     enabled: settings.isSuccess && needHtf && tfs !== null,
   });
@@ -1174,18 +966,21 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
     },
     [remember, saveStudies],
   );
+  // FD-CHARTOPEN: only the results calculated for the chart on screen (they come after its candles): the chart left's
+  // would be drawn on the first frame of the new one, and fitted by its price scale.
+  const shownChart = chartOf(chartInfo);
   const draws = useMemo((): StudyDraw[] => {
     if (!runtime) return [];
     const out: StudyDraw[] = [];
     for (const st of studies) {
       const state = studyStates.get(st.uid);
-      if (!st.visible || !state?.result) continue;
+      if (!st.visible || !state?.result || state.chart !== shownChart) continue;
       const mod = runtime.STUDY_MODULES[st.id];
       const styled = styledEntry(mod, st, state.inputs, state.result);
       out.push({ uid: st.uid, paneKey: mod.overlay ? null : st.uid, ...styled });
     }
     return out;
-  }, [runtime, studies, studyStates]);
+  }, [runtime, studies, studyStates, shownChart]);
 
   // Nobody holds an index: no position lines on its chart.
   const lastClose = candles.data?.candles.at(-1)?.c ?? null;
@@ -1255,7 +1050,9 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
       const l = lineById.get(id);
       if (!l) return '';
       const { text } = labelText(l, price, lastClose, l.role === 'order-sl' || l.role === 'order-tp' ? live[`${l.group}|line`] : undefined);
-      return severalAccounts ? `${text} · ${l.account.label}` : text;
+      // As its box (chartLineOf): a bot's level says whose it is.
+      const shown = l.bot ? `${text} · ${l.bot.tag}` : text;
+      return severalAccounts ? `${shown} · ${l.account.label}` : shown;
     },
     [lineById, live, lastClose, severalAccounts],
   );
@@ -1282,8 +1079,9 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
   const reversible = shownLines.filter((l) => l.role === 'entry' && l.position?.market === 'futures' && canReverse(l.account, l.position.symbol));
   const overlayGroups = [...new Set([...reversible.map((l) => l.group), ...draftGroups(tradeLines, live)])];
   const lineOverlays = overlayGroups.flatMap((group) => {
-    const anchor = anchorOf(group, shownLines);
+    const anchor = anchorOf(group, shownLines, live);
     const ticket = draftTicket(tradeLines, live, group);
+    const botDraft = botDraftOf(tradeLines, live, group);
     if (!anchor) return [];
     const account = anchor.account;
     const pos = anchor.role === 'entry' ? anchor.position : undefined;
@@ -1299,6 +1097,32 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
         <ArrowDownUp size={13} aria-hidden />
       </button>
     ) : null;
+    // FIX-BOTDRAG: a bot's levels go to the bot (no order at the platform).
+    if (botDraft) {
+      const discardBot = () =>
+        setDrafts((d) => {
+          const next = { ...d };
+          for (const l of tradeLines) if (l.group === group) delete next[l.id];
+          return next;
+        });
+      return [
+        {
+          key: group,
+          price: anchor.price,
+          node: (
+            <BotDraftBar
+              botId={botDraft.botId}
+              move={botDraft.move}
+              onDiscard={discardBot}
+              onSent={(message) => {
+                discardBot();
+                setTradeNote({ text: message, bad: false, at: Date.now() });
+              }}
+            />
+          ),
+        },
+      ];
+    }
     if (!ticket) return reverse ? [{ key: group, price: anchor.price, clamp: false, node: reverse }] : [];
     const order = tradeLines.find((l) => l.group === group && l.order)?.order;
     const quote = (order?.symbol.split('/')[1] ?? '').split(':')[0] || (stock ? 'USD' : 'USDT');
@@ -1465,9 +1289,10 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
 
   // FD-CHARTFAV §1: with Slingshot off or hidden nothing of it is drawn (the panels below still use `result`).
   // FD-SLINGSHOT34: the LONG's rows, then the SHORT's; the two sides are independent and may show together.
+  // FD-SSTABLE: „Show TP/SL Table” off hides only the table.
   const tpSlRows = result ? [result.atr, result.atrShort].filter((a) => a !== null) : [];
   const tpSl =
-    slingshotDrawn && tpSlRows.length > 0 ? (
+    slingshotDrawn && p.showTable && tpSlRows.length > 0 ? (
       // The indicator's own table, in its Pine colours: on a dark plate in both themes, or its neon would vanish on white
       // (FD-THEME §1).
       // On phones the side's suffix needs a tighter box, or "TAKE PROFIT (SHORT)" would wrap; it never gets wider than the
@@ -1602,12 +1427,15 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
   // have a pane of their own.
   const mainStudies = studies.filter((st) => studyMeta(st.id)?.overlay !== false || !st.visible);
   const legends: Record<string, (bar: number | null) => React.ReactNode> = {};
-  if (statusOn || prem.slingshot !== 'off' || prem.lma === 'hidden' || mainStudies.length) {
+  // FD-LEGENDCOLLAPSE: the rows under the status line fold away with the button under them; the chart is not touched.
+  const legendRows = prem.slingshot !== 'off' || prem.lma === 'hidden' || mainStudies.length > 0;
+  const legendCollapsed = legendRows && prefs.legendCollapsed;
+  if (statusOn || legendRows) {
     const slingshotHidden = prem.slingshot === 'hidden';
     legends.main = (bar) => (
       <div className="flex flex-col items-start gap-0.5 px-1.5 pt-1.5">
         {statusOn && statusLine(bar)}
-        {prem.slingshot !== 'off' && (
+        {!legendCollapsed && prem.slingshot !== 'off' && (
           <LegendRow dim={slingshotHidden}>
             <span className={clsx('font-medium text-muted', LEGEND_TITLE)}>{SLINGSHOT_SHORT_TITLE}</span>
             <span className={clsx('contents', LEGEND_INPUTS)}>
@@ -1624,7 +1452,7 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
             />
           </LegendRow>
         )}
-        {prem.lma === 'hidden' && (
+        {!legendCollapsed && prem.lma === 'hidden' && (
           <LegendRow dim>
             <span className={clsx('font-medium text-muted', LEGEND_TITLE)}>{LMA_SHORT_TITLE}</span>
             <span className={clsx('contents', LEGEND_INPUTS)}>
@@ -1633,23 +1461,109 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
             {lmaButtons(true)}
           </LegendRow>
         )}
-        {mainStudies.map((st) => studyLegend(st, bar))}
+        {!legendCollapsed && mainStudies.map((st) => studyLegend(st, bar))}
+        {legendRows && <LegendCollapse collapsed={legendCollapsed} onToggle={() => remember({ charts: { legendCollapsed: !legendCollapsed } })} />}
       </div>
     );
   }
   if (lma) legends.lma = lmaLegend;
   for (const st of paneStudies) legends[st.uid] = (bar) => <div className="px-1.5 pt-1.5">{studyLegend(st, bar)}</div>;
 
+  // FD-IOSCHART: what the app's bar and tables show, and the app's commands (its bar's buttons).
+  useHostReport(embedded, 'chart', {
+    symbol,
+    kind: index ? 'index' : stock ? 'stock' : 'crypto',
+    base: base ?? symbol,
+    quote: quote ?? null,
+    label: symbolLabel,
+    name: instrumentName,
+    price: priceText,
+    change: stock ? stockChangeText : changeText,
+    changeUp: stock ? (stockQuote?.changePct ?? null) !== null && (stockQuote?.changePct ?? 0) >= 0 : change24h !== null && change24h >= 0,
+    hasChange: stock ? stockQuote?.changePct != null : change24h !== null,
+    source: sourceText,
+    tf: activeTf,
+    savedTf,
+    tfs: TIMEFRAMES.map((t) => ({ tf: t, off: tfs !== null && !tfs.includes(t) })),
+    canTrade,
+    showPositions: prefs.showPositions,
+    loading: loadingCandles,
+  });
+  // The tables' rows written as the site's tables write them (SignalsTable, the alerts' list).
+  const forming = { long: result?.last?.liveSignal ?? false, short: result?.last?.liveShortSignal ?? false };
+  const shownOutcome = (x: SlingshotSignal) => (x.outcome === 'active' && forming[x.side] ? 'invalidated' : x.outcome);
+  useHostReport(embedded, 'signals', {
+    title: `Semnale Slingshot ${SLINGSHOT_VERSION} pe ${activeTf}`,
+    state: result ? 'ready' : candles.isError ? 'error' : 'loading',
+    shortColor: p.shortColor,
+    count: result?.signals.length ?? 0,
+    counts: (result?.signals ?? []).reduce<Record<string, number>>((acc, x) => ((acc[shownOutcome(x)] = (acc[shownOutcome(x)] ?? 0) + 1), acc), {}),
+    rows: [...(result?.signals ?? [])]
+      .reverse()
+      .slice(0, 100)
+      .map((x) => ({
+        id: `${x.side}-${x.bar}`,
+        side: x.side,
+        // Sentiq.iOS FD-V3-S19: the candle a tap on the row moves the chart to.
+        at: x.time,
+        time: fmtDateTime(x.time, chartTz),
+        provisional: x.provisional ?? false,
+        entry: fmtPrice(x.entry, precision),
+        sl: fmtPrice(x.sl, precision),
+        tp: fmtPrice(x.tp, precision),
+        outcome: shownOutcome(x),
+        outcomeText: OUTCOME_RO[shownOutcome(x)],
+        note: x.outcomeReason ? reasonRo(x) : shownOutcome(x) !== x.outcome ? 'semnal nou în formare' : '',
+        closed: x.closedTime ? fmtDateTime(x.closedTime, chartTz) : '',
+      })),
+    alerts: alerts.map((a) => ({ id: `${a.bar}-${a.type}`, type: a.type, label: ALERT_RO[a.type], count: a.count, provisional: a.provisional ?? false, time: fmtDateTime(a.time, chartTz) })),
+  });
+  useEmbedCommands(embedded, (c) => {
+    if (c.type === 'tf') {
+      if (c.tf !== activeTf && (TIMEFRAMES as readonly string[]).includes(c.tf)) remember({ market: { defaultTf: c.tf as Timeframe } });
+    } else if (c.type === 'picker') setPicker(true);
+    else if (c.type === 'look') setLookOpen(true);
+    else if (c.type === 'reset') resetView();
+    else if (c.type === 'menu') setMenuAt({ x: Math.round(window.innerWidth / 2), y: Math.round(window.innerHeight / 3) });
+    else if (c.type === 'ticket') {
+      if (canTrade) setTicket(stock ? { kind: 'stocks', symbol: base ?? symbol, price: last?.c } : { kind: 'crypto', symbol, price: last?.c });
+    } else if (c.type === 'bots') {
+      if (!index) openBots();
+    } else if (c.type === 'positions') remember({ charts: { showPositions: c.on } });
+    else if (c.type === 'refresh') void qc.invalidateQueries();
+    // Sentiq.iOS FD-V3-S19: the native „Indicatori” sheet (the rules of the site's window), an indicator's sheet closed,
+    // a signal's candle.
+    else if (c.type === 'addStudy') {
+      if (STUDY_META.some((m) => m.id === c.id)) addStudy(c.id as StudyId);
+    } else if (c.type === 'addPremium') {
+      if (prem[c.key] === 'off') remember({ charts: c.key === 'slingshot' ? { showSlingshot: true, slingshotHidden: false } : { showLma: true, lmaHidden: false } });
+    } else if (c.type === 'favorite') {
+      if (PREMIUM.some((x) => x.key === c.id) || STUDY_META.some((m) => m.id === c.id)) toggleFavorite(c.id as FavoriteId);
+    } else if (c.type === 'formClose') closeDrawer();
+    else if (c.type === 'goto') setFocusAt({ time: c.time, tick: Date.now() });
+  });
+  // The „Indicatori” sheet's list (once: it does not change) and what is on the chart now.
+  useEffect(() => {
+    if (!embedded) return;
+    sendToHost('catalog', {
+      premium: PREMIUM,
+      studies: STUDY_META.map((m) => ({ id: m.id, name: m.name, shortName: m.shortName, overlay: m.overlay, description: m.description, category: m.category })),
+      categories: STUDY_CATEGORIES.map((x) => ({ id: x.id, label: x.label })),
+    });
+  }, [embedded]);
+  useHostReport(embedded, 'indicators', { premium: prem, studyCount: studies.length, max: STUDY_MAX, studiesOn, favorites, favoriteError });
+
   return (
     <div className="flex flex-col gap-3.5">
       {/* Everything inside this frame goes full screen: the chart's toolbar, the pair picker and the chart. */}
-      <div ref={frame} className={clsx('flex flex-col gap-3.5', fs.active && 'fixed inset-0 z-[45] overflow-auto overscroll-contain bg-ink p-3 sm:p-4')}>
+      <div ref={frame} className={clsx('flex flex-col gap-3.5', fs.active && 'fixed inset-0 z-[45] overflow-auto overscroll-contain bg-ink p-3 sm:p-4', embedded && 'h-dvh gap-2')}>
         {/* FD-CHARTAUDIT §7: the page's banner is behind the full screen. */}
         {fs.active && <OfflineBanner framed />}
         {/* FD-ORDEREDIT: what came of the lines' changes (in the frame, so it shows in full screen too). */}
         <Toast message={tradeNote} onDone={quietTrade} autoHide={look.alerts.autoHideToasts} />
         {menuAt && <ChartMenu at={menuAt} items={menuItems} onClose={closeMenu} />}
         {lookOpen && <ChartSettingsDialog saved={savedLook} pairPrecision={pairPrecision} accountTz={tz} onPreview={setLookDraft} onSave={saveLook} onClose={closeLook} />}
+        {!embedded && (
         <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3">
           {/* FD-CHARTSTEADY §1: a fixed basis, so whether the toolbar fits beside it never depends on the symbol's data. */}
           <div className="flex min-w-0 flex-[1_1_34rem] flex-wrap items-baseline gap-x-4 gap-y-1.5">
@@ -1698,8 +1612,10 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
           {/* FD-CHARTTV §2: everything on a row as tall as its tallest; the buttons stay together (never split). */}
           {/* FD-CHARTPOLISH §2: left-aligned; it grows to its row's width (its basis is its content, so it still wraps
               as before), and only the list's button goes to the right edge, above the list. */}
-          <div className="flex flex-[1_1_auto] flex-wrap items-stretch gap-2.5">
-            <div className="seg" role="group" aria-label="Timeframe">
+          {/* FD-MOBILESYM §1: on a phone a column across the width (a row sized by its content would widen the page). */}
+          <div className="flex flex-[1_1_auto] flex-wrap items-stretch gap-2.5 max-sm:w-full max-sm:min-w-0 max-sm:flex-col">
+            {/* FD-MOBILESYM §1: on a phone one row, scrolling sideways, the chosen one brought into view. */}
+            <div ref={tfRow} className="seg max-sm:row-fill" role="group" aria-label="Timeframe">
               {TIMEFRAMES.map((t) => {
                 const off = tfs !== null && !tfs.includes(t);
                 const why = !off
@@ -1723,29 +1639,46 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
                 share the rows, so the list's button sits at the end of the last one, not alone on a row of its own.
                 FD-CHARTAUDIT §8: wider, the list's button is in the group, which grows to its row's width: it goes to
                 the next row only with the others (it was left alone on one at 1180 px, and at 1024 in full screen). */}
-            <div className="contents md:flex md:flex-[1_1_auto] md:flex-nowrap md:items-stretch md:gap-2.5">
-              <label className="inline-flex items-center gap-2 rounded-[10px] border border-line px-3 text-[13px] whitespace-nowrap text-muted">
-                <input type="checkbox" checked={prefs.showPositions} onChange={(e) => remember({ charts: { showPositions: e.target.checked } })} /> Pozițiile mele
-              </label>
+            {/* FD-MOBILESYM §1: on a phone a grid of six columns: „Tranzacționează” first on a row of its own, „Pozițiile
+                mele” and „Bot” half a row each, the last three a third each. */}
+            <div className="contents max-sm:grid max-sm:grid-cols-6 max-sm:gap-2.5 md:flex md:flex-[1_1_auto] md:flex-nowrap md:items-stretch md:gap-2.5">
+              {/* FIX-MOBILESYM2: „Tranzacționează” first, on every screen (as the user liked it on the phone). */}
               {canTrade && (
-                <button className="btn btn-primary" onClick={() => setTicket(stock ? { kind: 'stocks', symbol: base ?? symbol, price: last?.c } : { kind: 'crypto', symbol, price: last?.c })}>
+                <button
+                  className="btn btn-primary max-sm:col-span-6"
+                  onClick={() => setTicket(stock ? { kind: 'stocks', symbol: base ?? symbol, price: last?.c } : { kind: 'crypto', symbol, price: last?.c })}
+                >
                   <ArrowRightLeft size={16} aria-hidden /> Tranzacționează
                 </button>
               )}
+              <label
+                className={clsx(
+                  // It looks as „Bot” beside it, its pair (FD-MOBILESYM §1; FIX-MOBILESYM2: on every screen).
+                  'inline-flex items-center gap-2 rounded-[10px] border border-line-strong bg-panel-2 px-3 text-[13px] font-semibold whitespace-nowrap text-text max-sm:min-h-11 max-sm:justify-center',
+                  index ? 'max-sm:col-span-6' : 'max-sm:col-span-3',
+                )}
+              >
+                <input type="checkbox" checked={prefs.showPositions} onChange={(e) => remember({ charts: { showPositions: e.target.checked } })} /> Pozițiile mele
+              </label>
               {!index && (
-                <button className="btn" onClick={openBots}>
+                <button className="btn max-sm:col-span-3" onClick={openBots}>
                   <Bot size={16} aria-hidden /> Bot
                 </button>
               )}
-              <button className="btn whitespace-nowrap" onClick={() => setPicker(true)}>
+              <button className="btn whitespace-nowrap max-sm:col-span-2" onClick={() => setPicker(true)}>
                 <SlidersHorizontal size={16} aria-hidden /> Indicatori
               </button>
               {fs.active ? (
-                <button className="btn btn-primary w-[38px] px-0 pointer-coarse:w-11" onClick={fs.exit} aria-label="Ieși din ecran complet (Esc)" title="Ieși din ecran complet (Esc)">
+                <button
+                  className="btn btn-primary w-[38px] px-0 pointer-coarse:w-11 max-sm:col-span-2 max-sm:w-auto max-sm:pointer-coarse:w-auto"
+                  onClick={fs.exit}
+                  aria-label="Ieși din ecran complet (Esc)"
+                  title="Ieși din ecran complet (Esc)"
+                >
                   <Minimize2 size={16} aria-hidden />
                 </button>
               ) : (
-                <button className="btn" onClick={() => void fs.enter()} aria-label="Ecran complet" title="Ecran complet">
+                <button className="btn max-sm:col-span-2" onClick={() => void fs.enter()} aria-label="Ecran complet" title="Ecran complet">
                   <Maximize2 size={16} aria-hidden />
                   <span className="hidden sm:inline">Ecran complet</span>
                 </button>
@@ -1753,7 +1686,7 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
               {/* FD-CHARTTV §3, FD-CHARTTOUCH, FD-CHARTPOLISH §2: the symbol list's button at the right edge (its panel
                   comes from the right), the rest of the row staying on the left. */}
               <button
-                className="btn ml-auto w-[38px] shrink-0 px-0 pointer-coarse:w-11"
+                className="btn ml-auto w-[38px] shrink-0 px-0 pointer-coarse:w-11 max-sm:col-span-2 max-sm:ml-0 max-sm:w-auto max-sm:pointer-coarse:w-auto"
                 aria-pressed={listShown}
                 aria-label={listShown ? 'Ascunde lista de simboluri' : 'Arată lista de simboluri'}
                 title={listShown ? 'Ascunde lista de simboluri' : 'Arată lista de simboluri'}
@@ -1764,6 +1697,7 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
             </div>
           </div>
         </div>
+        )}
         {ticket && <OrderTicket seed={ticket} onClose={closeTicket} />}
         {botSeed && <BotsDialog seed={botSeed} onClose={closeBots} />}
         {lineAction && <LineActionDialog action={lineAction} onClose={closeLineAction} onDone={(text, bad) => setTradeNote({ text, bad, at: Date.now() })} />}
@@ -1807,17 +1741,17 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
         {studyError ? <Warning>Lista indicatorilor nu s-a putut salva ({errorMessage(studyError)}); se arată cea de pe server.</Warning> : null}
         {studyRuntime.error ? <Warning>Codul indicatorilor nu s-a putut încărca ({errorMessage(studyRuntime.error)}). Reîncarcă pagina.</Warning> : null}
         {/* FD-CHARTTV §3: the chart, then the symbol list on its right (under it on a narrow screen). */}
-        <div ref={chartRow} className={clsx('flex', fs.active && 'min-h-[320px] flex-1')}>
+        <div ref={chartRow} className={clsx('flex', (fs.active || embedded) && 'min-h-[320px] flex-1')}>
           {/* FD-CHARTSETTINGS: on the chart's own background, the loading one included (no flash of the theme's). */}
-          <div className="panel relative min-w-0 flex-1 overflow-hidden bg-chart" style={look.canvas.background.top ? ({ '--color-chart': look.canvas.background.top } as React.CSSProperties) : undefined}>
+          <div className={clsx('panel relative min-w-0 flex-1 overflow-hidden bg-chart', embedded && 'rounded-none border-x-0 border-b-0')} style={look.canvas.background.top ? ({ '--color-chart': look.canvas.background.top } as React.CSSProperties) : undefined}>
             {/* FD-CHARTAUDIT §6: while another timeframe or symbol loads, the panel keeps the chart's height (the page
                 below does not jump). */}
             {!candles.data && !candles.isError ? (
-              <div className={clsx('grid place-items-center px-6', fs.active && 'h-full')} style={fs.active ? undefined : { height: chartHeight }}>
+              <div className={clsx('grid place-items-center px-6', (fs.active || embedded) && 'h-full')} style={fs.active || embedded ? undefined : { height: chartHeight }}>
                 <Loading label="Se încarcă lumânările…" />
               </div>
             ) : !candles.data ? (
-              <div className={clsx('p-6', fs.active && 'h-full')} style={fs.active ? undefined : { height: chartHeight }}>
+              <div className={clsx('p-6', (fs.active || embedded) && 'h-full')} style={fs.active || embedded ? undefined : { height: chartHeight }}>
                 <ErrorNote error={candles.error} onRetry={() => candles.refetch()} />
               </div>
             ) : (
@@ -1839,8 +1773,8 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
                 mainOverlay={tpSl}
                 legends={legends}
                 onVisibleRange={readsVisible ? setVisibleRange : undefined}
-                className={fs.active ? 'h-full' : undefined}
-                style={fs.active ? undefined : { height: chartHeight }}
+                className={fs.active || embedded ? 'h-full' : undefined}
+                style={fs.active || embedded ? undefined : { height: chartHeight }}
                 hlines={shownHlines}
                 selectedHLine={hlineTarget}
                 onAddHLine={addHLine}
@@ -1860,12 +1794,14 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
                 look={look}
                 watermark={[`${symbolLabel}, ${activeTf}`, ...(instrumentName ? [instrumentName] : [])]}
                 resetView={resetTick}
+                focusTime={focusAt}
+                previewing={lookOpen}
                 onSettings={() => setLookOpen(true)}
                 onContextMenu={(at) => setMenuAt({ x: at.x, y: at.y })}
               />
             )}
           </div>
-          {wide && !list.hidden && (
+          {wide && !list.hidden && !embedded && (
             <>
               <div
                 role="separator"
@@ -1897,7 +1833,7 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
             </>
           )}
         </div>
-        {!wide && (
+        {!wide && !embedded && (
           // FD-WATCHDRAWER: in the page's frame, so the system's full screen shows it too.
           <ListDrawer open={listOpen} onClose={closeListDrawer}>
             <Watchlist
@@ -1939,6 +1875,7 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
         )}
       </div>
 
+      {!embedded && (
       <div className="grid gap-3.5 xl:grid-cols-[2fr_1fr]">
         <Panel title={`Semnale Slingshot ${SLINGSHOT_VERSION} pe ${activeTf}`} icon={ListChecks} flush>
           {result ? (
@@ -1974,6 +1911,7 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
           )}
         </Panel>
       </div>
+      )}
     </div>
   );
 }

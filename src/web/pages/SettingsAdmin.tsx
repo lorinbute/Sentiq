@@ -411,13 +411,14 @@ function EmailSection({ s }: { s: SettingsView }) {
             save.mutate({ ...(key.trim() ? { key: key.trim() } : {}), from: from.trim() || null });
           }}
         >
-          <label className="flex flex-col gap-1">
+          {/* FIX-FITWIDTH: on a phone both fields take the panel's width (the sender's fixed one went past the screen at 320 px). */}
+          <label className="flex flex-col gap-1 max-sm:w-full">
             <span className="text-faint">Cheie API {s.resendKeySet && <>(salvată: {s.resendKeyHint})</>}</span>
-            <input type="password" autoComplete="off" value={key} onChange={(e) => setKey(e.target.value)} placeholder={s.resendKeySet ? 'lasă gol ca s-o păstrezi' : 're_…'} className="w-64 max-w-full" />
+            <input type="password" autoComplete="off" value={key} onChange={(e) => setKey(e.target.value)} placeholder={s.resendKeySet ? 'lasă gol ca s-o păstrezi' : 're_…'} className="w-64 max-w-full max-sm:w-full" />
           </label>
-          <label className="flex flex-col gap-1">
+          <label className="flex flex-col gap-1 max-sm:w-full">
             <span className="text-faint">Expeditor</span>
-            <input value={from} onChange={(e) => setFrom(e.target.value)} placeholder="onboarding@resend.dev" className="w-72 max-w-full" maxLength={200} />
+            <input value={from} onChange={(e) => setFrom(e.target.value)} placeholder="onboarding@resend.dev" className="w-72 max-w-full max-sm:w-full" maxLength={200} />
           </label>
           <button className="btn" disabled={save.isPending}>
             Salvează

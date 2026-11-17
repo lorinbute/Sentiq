@@ -6,6 +6,7 @@ import type { AppContext } from '../context.ts';
 import { FULL_SESSION_MS, SESSION_COOKIE } from '../auth/sessions.ts';
 import type { Role, UserRow } from '../auth/users.ts';
 import { readCookie, setCookie } from './cookies.ts';
+import { isLocalHost } from './security.ts';
 
 export interface AuthUser {
   id: number;
@@ -92,8 +93,28 @@ export function isActive(u: UserRow | undefined): u is UserRow {
 
 export const toAuthUser = (u: UserRow): AuthUser => ({ id: u.id, role: u.role, email: u.email, name: u.name, twoFactor: u.totp_confirmed_at !== null });
 
-/** The session cookie's token (only the request's own cookie; never a query parameter). */
-export const sessionToken = (req: FastifyRequest) => readCookie(req, SESSION_COOKIE);
+/**
+ * FD-MOBILEAUTH: the native app (`X-Sentiq-Client: ios/…`). It keeps its session token in the iOS Keychain, never in a
+ * cookie: sign-in answers it in the body, and the app sends it back as `Authorization: Bearer`.
+ */
+export const isNativeClient = (req: FastifyRequest): boolean => /^ios\/[\w.\-]{1,40}$/.test(String(req.headers['x-sentiq-client'] ?? ''));
+
+const BEARER = /^Bearer ([A-Za-z0-9_-]{1,200})$/;
+
+/**
+ * FD-MOBILEAUTH: the token of `Authorization: Bearer`, only over HTTPS or on this Mac (a token never crosses a network
+ * in clear text), and only without a session cookie (the two never mix).
+ */
+export function bearerToken(req: FastifyRequest): string | undefined {
+  const h = req.headers.authorization;
+  const m = typeof h === 'string' ? BEARER.exec(h.trim()) : null;
+  if (!m) return undefined;
+  if (!req.viaHttps && (req.behindProxy || !isLocalHost(req.headers.host))) return undefined;
+  return m[1];
+}
+
+/** The session's token: the request's own cookie, else (FD-MOBILEAUTH) its Bearer token; never a query parameter. */
+export const sessionToken = (req: FastifyRequest) => readCookie(req, SESSION_COOKIE) ?? bearerToken(req);
 
 export function registerAuth(app: FastifyInstance, ctx: AppContext): void {
   app.decorateRequest('user', null);
@@ -108,8 +129,9 @@ export function registerAuth(app: FastifyInstance, ctx: AppContext): void {
       // A disabled (or deleted) account's sessions end at its next request.
       if (isActive(u)) {
         req.user = toAuthUser(u);
-        // 30 days from the last use (FD-USERS §5): the browser's cookie is renewed with the server's expiry.
-        if (session.slid && token) setCookie(req, reply, SESSION_COOKIE, token, { maxAgeMs: FULL_SESSION_MS });
+        // 30 days from the last use (FD-USERS §5): the browser's cookie is renewed with the server's expiry (a Bearer
+        // token has no cookie to renew: its expiry moved on the server).
+        if (session.slid && token && readCookie(req, SESSION_COOKIE)) setCookie(req, reply, SESSION_COOKIE, token, { maxAgeMs: FULL_SESSION_MS });
       } else await ctx.sessions.destroyAll(session.user_id);
     }
     if (isPublicRoute(req.method, route)) return undefined;

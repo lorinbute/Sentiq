@@ -26,3 +26,13 @@ describe('Slingshot and LMA hidden with the eye', () => {
     expect(premiumNote('hidden')).toBe('Pe grafic, ascuns');
   });
 });
+
+// FD-LEGENDCOLLAPSE: the price pane's list of indicators folded under the status line, remembered for every chart.
+describe('the legend list folded', () => {
+  it('is unfolded by default, also for settings saved before the switch existed, and kept when folded', () => {
+    expect(settingsSchema.parse({}).charts.legendCollapsed).toBe(false);
+    expect(settingsSchema.parse({ charts: { symbol: 'BTC/USDT', slingshotHidden: true } }).charts.legendCollapsed).toBe(false);
+    expect(settingsSchema.parse({ charts: { legendCollapsed: true } }).charts).toMatchObject({ legendCollapsed: true, slingshotHidden: false, lmaHidden: false });
+    expect(settingsSchema.safeParse({ charts: { legendCollapsed: 'yes' } }).success).toBe(false);
+  });
+});

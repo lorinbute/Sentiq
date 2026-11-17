@@ -271,6 +271,8 @@ describe('Alpaca', () => {
 
 describe('closed trades (FD-BROKERSTATS)', () => {
   const byId = (ts: ClosedTrade[]) => [...ts].sort((a, b) => a.id.localeCompare(b.id));
+  /** What the stats count (FD-BROKERSTATS); FD-TRADES' details are checked on their own. */
+  const counted = (ts: ClosedTrade[]) => byId(ts).map(({ id, closedAt, pnl, net }) => ({ id, closedAt, pnl, net }));
 
   describe('Trading 212', () => {
     const creds = { apiKey: 'KEY1234', secret: 'SECRET123' };
@@ -298,7 +300,7 @@ describe('closed trades (FD-BROKERSTATS)', () => {
       serve(at('/api/v0/equity/history/orders?limit=50', page1), at('/api/v0/equity/history/orders?limit=50&cursor=24', page2));
       const h = await brokerAdapter('trading212', creds, 'live', { now: () => NOW, ...noSleep }).closedTrades!(from);
       expect(h.currency).toBe('EUR');
-      expect(byId(h.trades)).toEqual([
+      expect(counted(h.trades)).toEqual([
         { id: '23', closedAt: Date.parse('2026-10-01T09:00:00Z'), pnl: 3, net: 3 },
         { id: '24', closedAt: Date.parse('2026-10-02T10:00:00Z'), pnl: 0, net: 0 },
         { id: '25', closedAt: Date.parse('2026-10-07T10:00:00Z'), pnl: null, net: null },
@@ -308,6 +310,11 @@ describe('closed trades (FD-BROKERSTATS)', () => {
       // The second page went past the start: the third is not asked for.
       expect(calls.some((c) => c.url.includes('cursor=21'))).toBe(false);
       expect(h).toMatchObject({ coveredFrom: from, asOf: null });
+      // FD-TRADES: the share, the quantity sold over the order's pieces and their average price; no entry in the history.
+      expect(h.trades.find((t) => t.id === '30')).toMatchObject({ symbol: 'AAPL', side: 'long', qty: 2, exit: 250, market: 'stock' });
+      expect(h.trades.find((t) => t.id === '30')?.entry).toBeUndefined();
+      // A fill without a price: the quantity and the price stay unknown.
+      expect(h.trades.find((t) => t.id === '24')).toMatchObject({ qty: null, exit: null });
     });
 
     it('at most 10 pages: complete back to the oldest row read; the end of the history is complete', async () => {
@@ -362,10 +369,49 @@ describe('closed trades (FD-BROKERSTATS)', () => {
       expect(calls[0]?.headers['x-request-id']).toMatch(/^[0-9a-f-]{36}$/);
       expect(h).toMatchObject({ currency: 'USD', coveredFrom: from, asOf: null });
       expect(h.trades).toHaveLength(102);
-      expect(h.trades.find((t) => t.id === '500')).toEqual({ id: '500', closedAt: Date.parse('2026-10-06T08:00:00Z'), pnl: 0, net: 0 });
+      expect(counted(h.trades).find((t) => t.id === '500')).toEqual({ id: '500', closedAt: Date.parse('2026-10-06T08:00:00Z'), pnl: 0, net: 0 });
       expect(h.trades.find((t) => t.id === '502')).toMatchObject({ pnl: null });
       expect(h.trades.find((t) => t.id === '501')).toBeUndefined();
       expect(h.trades.filter((t) => (t.pnl ?? 0) < 0)).toHaveLength(25);
+    });
+
+    it('FD-TRADES: each trade with its entry, exit, times, SL / TP, leverage and symbol; a CFD, a coin', async () => {
+      const from = Date.parse('2026-10-05T00:00:00Z');
+      const rows = [
+        { positionId: 7, instrumentId: 1001, isBuy: true, leverage: 5, units: 11.6, openRate: 171.2, closeRate: 175.5, openTimestamp: '2026-10-10T13:30:00Z', closeTimestamp: '2026-10-11T15:00:00Z', stopLossRate: 150, takeProfitRate: 0, investment: 1990, netProfit: 49.9 },
+        { positionId: 8, instrumentId: 1001, isBuy: true, leverage: 1, units: 2, openRate: 170, closeRate: 165, openTimestamp: '2026-10-09T13:30:00Z', closeTimestamp: '2026-10-10T15:00:00Z', stopLossRate: 0.0001, takeProfitRate: 190, investment: 340, netProfit: -10 },
+        { positionId: 9, instrumentId: 2002, isBuy: true, leverage: 1, units: 0.01, openRate: 60000, closeRate: 61000, openTimestamp: '2026-10-08T10:00:00Z', closeTimestamp: '2026-10-09T10:00:00Z', netProfit: 10 },
+        { positionId: 10, instrumentId: 3003, isBuy: false, leverage: 1, units: 3, openRate: 50, closeRate: 48, closeTimestamp: '2026-10-09T11:00:00Z', netProfit: 6 },
+      ];
+      serve(
+        (u) => (u.pathname === '/api/v1/trading/info/trade/history' ? { body: u.searchParams.get('page') === '1' ? rows : [] } : undefined),
+        at('/api/v2/market-data/instruments?instrumentsIds=1001&instrumentsIds=2002&instrumentsIds=3003&pageSize=100', {
+          results: [
+            { instrumentId: 1001, symbol: 'nvda', displayName: 'NVIDIA', type: 'Stocks' },
+            { instrumentId: 2002, symbol: 'BTC', displayName: 'Bitcoin', type: 'Crypto' },
+          ],
+        }),
+      );
+      const h = await brokerAdapter('etoro', creds, 'real', noSleep).closedTrades!(from);
+      expect(h.trades.find((t) => t.id === '7')).toMatchObject({
+        symbol: 'NVDA',
+        side: 'long',
+        qty: 11.6,
+        entry: 171.2,
+        exit: 175.5,
+        openedAt: Date.parse('2026-10-10T13:30:00Z'),
+        closedAt: Date.parse('2026-10-11T15:00:00Z'),
+        sl: 150,
+        tp: null,
+        leverage: 5,
+        market: 'cfd',
+        invested: 1990,
+        pnl: 49.9,
+      });
+      expect(h.trades.find((t) => t.id === '8')).toMatchObject({ market: 'stock', sl: 0.0001, tp: 190 });
+      expect(h.trades.find((t) => t.id === '9')).toMatchObject({ symbol: 'BTC', market: 'crypto' });
+      // Sold short: a CFD; an instrument eToro does not resolve keeps its number; no opening time: unknown.
+      expect(h.trades.find((t) => t.id === '10')).toMatchObject({ symbol: '#3003', side: 'short', market: 'cfd', openedAt: null });
     });
 
     it('the demo history; at most 20 pages; a full page repeated is not followed', async () => {
@@ -436,10 +482,31 @@ describe('closed trades (FD-BROKERSTATS)', () => {
         ['G', -1.5, -1.35],
       ]);
       expect(h.trades.find((t) => t.id === 'A')?.closedAt).toBe(Date.parse('2026-10-12T14:05:00Z'));
+      // FD-TRADES: no symbol in these rows: the trade keeps none; the quantity and price are unknown without them.
+      expect(h.trades.find((t) => t.id === 'A')).toMatchObject({ qty: null, exit: null, market: 'stock', currency: 'USD' });
+      expect(h.trades.find((t) => t.id === 'A')?.symbol).toBeUndefined();
+      expect(h.trades.find((t) => t.id === 'A')?.side).toBeUndefined();
       // The report is kept 15 minutes.
       const n = calls.length;
       await brokerAdapter('ibkr', creds, 'live', { now: () => NOW, ...noSleep }).closedTrades!(NOW - 90 * 86_400_000);
       expect(calls.length).toBe(n);
+    });
+
+    it('FD-TRADES: the instrument, the quantity closed and its average price, the side it closed', async () => {
+      flex(
+        report(
+          [
+            trade({ ibOrderID: 'S', symbol: 'AAPL', buySell: 'SELL', quantity: '-3', tradePrice: '200', openCloseIndicator: 'C', fifoPnlRealized: '30', dateTime: '20261012;100000' }),
+            trade({ ibOrderID: 'S', symbol: 'AAPL', buySell: 'SELL', quantity: '-1', tradePrice: '204', openCloseIndicator: 'C', fifoPnlRealized: '14', dateTime: '20261012;100100' }),
+            trade({ ibOrderID: 'B', symbol: 'TSLA', buySell: 'BUY', quantity: '2', tradePrice: '250', openCloseIndicator: 'C', fifoPnlRealized: '20', dateTime: '20261009;110000' }),
+            trade({ ibOrderID: 'O', symbol: 'AAPL  261120C00300000', assetCategory: 'OPT', multiplier: '100', buySell: 'SELL', quantity: '-1', tradePrice: '5', openCloseIndicator: 'C', fifoPnlRealized: '100', dateTime: '20261008;100000' }),
+          ].join(''),
+        ),
+      );
+      const h = await brokerAdapter('ibkr', creds, 'live', { now: () => NOW, ...noSleep }).closedTrades!(NOW - 90 * 86_400_000);
+      expect(h.trades.find((t) => t.id === 'S')).toMatchObject({ symbol: 'AAPL', side: 'long', qty: 4, exit: 201, market: 'stock', pnl: 44, currency: 'USD' });
+      expect(h.trades.find((t) => t.id === 'B')).toMatchObject({ symbol: 'TSLA', side: 'short', qty: 2, exit: 250 });
+      expect(h.trades.find((t) => t.id === 'O')).toMatchObject({ side: 'long', qty: 100, exit: 5, market: 'other' });
     });
 
     it('on Monday the report ends on Friday; orders without executions; what the query lacks', async () => {
@@ -535,6 +602,13 @@ describe('closed trades (FD-BROKERSTATS)', () => {
         ['o4', -15, 5],
         ['p2', 200, 9],
       ]);
+      // FD-TRADES: the closed quantity, the average exit and entry of the lots it closed, the oldest lot's time.
+      const o3 = r.find((t) => t.id === 'o3');
+      expect(o3).toMatchObject({ symbol: 'AAPL', side: 'long', qty: 12, exit: 120, openedAt: 1, market: 'stock' });
+      expect(o3?.entry).toBeCloseTo((10 * 100 + 2 * 110) / 12, 9);
+      expect(r.find((t) => t.id === 'o4')).toMatchObject({ qty: 3, entry: 110, exit: 105, openedAt: 2 });
+      expect(r.find((t) => t.id === 'c2')).toMatchObject({ symbol: 'BTC/USD', market: 'crypto', qty: 0.5, entry: 60000, exit: 62000 });
+      expect(r.find((t) => t.id === 'p2')).toMatchObject({ market: 'other', qty: 100, entry: 5, exit: 7 });
     });
 
     it('a sell beyond the shares held: a short where the account may short, otherwise an unknown result', () => {
@@ -551,6 +625,10 @@ describe('closed trades (FD-BROKERSTATS)', () => {
         ['r1', null],
         ['s1', null],
       ]);
+      // FD-TRADES: a buy closing a short is a short; a sale partly of unknown cost has no known entry, but its exit.
+      const shorts = fifoResults(execs, { complete: true, shorting: true });
+      expect(shorts.find((t) => t.id === 'b1')).toMatchObject({ side: 'short', qty: 2, entry: 300, exit: 280, openedAt: 1 });
+      expect(fifoResults(execs, { complete: true, shorting: false }).find((t) => t.id === 'r1')).toMatchObject({ side: 'long', qty: 3, entry: null, exit: 110, openedAt: null });
       expect(byId(fifoResults(execs, { complete: false, shorting: true })).map((t) => [t.id, t.pnl])).toEqual(unknown);
       // A sale Alpaca marks `sell_short` is a short even with a history read only in part.
       const marked = [{ ...ex('m1', 'AMD', 'sell', 3, 150, 10), short: true }, ex('m2', 'AMD', 'buy', 3, 140, 11)];

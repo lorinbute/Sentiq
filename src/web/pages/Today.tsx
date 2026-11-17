@@ -1,5 +1,5 @@
 // The Today page as a cockpit (FD-REDESIGN): one screen of tiles at 1440 × 900, fewer columns below.
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { type CSSProperties, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router';
 import { clsx } from 'clsx';
@@ -14,6 +14,7 @@ import { Sparkline, useSparks, useStockQuotes, useStockSparks } from '../compone
 import { chartPathOf } from '../chart/paths.ts';
 import { byDay, chartScale, cnnDay, cryptoDay, daySlots, fearGreedLabel, joined, segments } from '../history-chart.ts';
 import { sparkChange } from '../spark.ts';
+import { cardLevels } from '../card-levels.ts';
 import { ErrorNote, fmtScore, Loading } from '../components/ui.tsx';
 import { CoinLogo, EventIcon, TopicIcon } from '../components/icons.tsx';
 import { aiNameOf, ScoreWhy } from '../components/ScoreWhy.tsx';
@@ -415,25 +416,32 @@ function signalLine(r: ScanRow, tz: string) {
   );
 }
 
+/** A TP / SL row's label or price (FIX-CARDROWS): grows, never breaks, switches lines at the card's `--need`. */
+const LEVEL_PART = 'grow basis-[calc((var(--need)+0.6em-100%)*999)] whitespace-nowrap';
+
 function ScanLines({ r, digits, tf }: { r: ScanRow | undefined; digits: number; tf: string }) {
   const tz = useTz();
   if (r && !r.ok) return <span className="text-[12px] text-bear">{r.error}</span>;
   if (!r) return <span className="text-[12px] text-faint">Slingshot pe {tf}: se calculează…</span>;
+  const levels = cardLevels(r).map((l) => ({ ...l, price: fmtPrice(l.value, digits) }));
+  const need = Math.max(0, ...levels.map((l) => l.label.length + l.price.length));
   return (
     <div className="flex flex-col gap-0.5 text-[12px] text-muted">
       <div className="flex justify-between gap-2">
         {signalLine(r, tz)}
         {r.ms?.lastBreak && <span className={r.ms.lastBreak.type === 'msBullish' ? 'text-bull' : 'text-bear'}>{r.ms.lastBreak.type === 'msBullish' ? 'Bullish' : 'Bearish'}</span>}
       </div>
-      {/* FD-SLINGSHOT34: each side's TP/SL, the LONG's first; the two sides are independent. */}
-      {[r.atr, r.atrShort].map(
-        (a) =>
-          a && (
-            <span key={a.side} className="num">
-              {a.side === 'short' && 'SHORT · '}TP <span className="text-bull">{fmtPrice(a.tp, digits)}</span> SL <span className="text-bear">{fmtPrice(a.sl, digits)}</span>
-            </span>
-          ),
-      )}
+      {/* FD-SLINGSHOT34: each side's TP/SL, the LONG's first; the two sides are independent. FIX-CARDROWS: every level
+          on its own row, the side written on it; the price on the right, under the others. A card narrower than its
+          longest row (in monospace characters, plus the gap) puts every price under its label, still on the right: one
+          layout for the whole card, as in the app (the flex-basis switch: (threshold − width) × 999 is huge below the
+          threshold, one item per line, and negative above it, both on one line). */}
+      {levels.map((l) => (
+        <span key={l.key} className="flex flex-wrap gap-x-[0.6em] font-mono tabular-nums" style={{ '--need': `${need}ch` } as CSSProperties}>
+          <span className={LEVEL_PART}>{l.label}</span>
+          <span className={clsx(LEVEL_PART, 'text-right', l.tone === 'bull' ? 'text-bull' : 'text-bear')}>{l.price}</span>
+        </span>
+      ))}
       {r.liveSignal && <span className="text-bull">LONG în formare</span>}
       {r.liveShortSignal && <span className="text-bear">SHORT în formare</span>}
       {/* A stock without the Twelve Data key is scanned on daily candles (FD-SENTIQ §4.6). */}
@@ -448,11 +456,12 @@ function SignalTimeframe({ tf }: { tf: Timeframe }) {
   // A timeframe saved before (e.g. 30m) stays on the switch until another one is chosen.
   const options: Timeframe[] = (SCANNER_TFS as readonly Timeframe[]).includes(tf) ? [...SCANNER_TFS] : [...SCANNER_TFS, tf];
   return (
-    <div className="flex flex-wrap items-center justify-end gap-2.5 text-[12.5px] text-muted">
+    // FD-MOBILESYM §6: on a phone the label above and the switch across the whole row.
+    <div className="flex flex-wrap items-center justify-end gap-2.5 text-[12.5px] text-muted max-sm:flex-col max-sm:items-stretch max-sm:gap-1.5">
       <span id="signal-tf">Semnale Slingshot pe</span>
-      <div className="seg" role="group" aria-labelledby="signal-tf">
+      <div className="seg max-sm:row-fill" role="group" aria-labelledby="signal-tf">
         {options.map((t) => (
-          <button key={t} type="button" aria-pressed={t === tf} disabled={save.isPending} onClick={() => t !== tf && save.mutate({ scanner: { tf: t } })}>
+          <button key={t} type="button" aria-pressed={t === tf} disabled={save.isPending} onClick={() => t !== tf && save.mutate({ scanner: { tf: t } })} className="max-sm:px-1.5">
             {t}
           </button>
         ))}
@@ -509,9 +518,10 @@ function CoinsTile() {
           </span>
           {r?.ok && <TrendArrow up={Boolean(r.uptrend)} />}
         </div>
-        <div className="flex items-baseline justify-between gap-2">
+        {/* FIX-CARDPRICE: the change goes under the price, on the right, when the card is too narrow for both. */}
+        <div className="flex flex-wrap items-baseline justify-between gap-x-2">
           <span className="num text-[20px] tracking-[-0.02em]">{price !== undefined ? fmtPrice(price, digits) : '…'}</span>
-          {change !== null && <span className={clsx('num text-[12.5px]', change >= 0 ? 'text-bull' : 'text-bear')}>{fmtPct(change)}</span>}
+          {change !== null && <span className={clsx('num ml-auto text-[12.5px]', change >= 0 ? 'text-bull' : 'text-bear')}>{fmtPct(change)}</span>}
         </div>
         <Sparkline values={closes} width={200} height={40} className="h-10 w-full" change={change} />
         <ScanLines r={r} digits={digits} tf={tf} />
@@ -537,11 +547,12 @@ function CoinsTile() {
           </span>
           {r?.ok && <TrendArrow up={Boolean(r.uptrend)} />}
         </div>
-        <div className="flex items-baseline justify-between gap-2">
+        {/* FIX-CARDPRICE: as on a coin's card. */}
+        <div className="flex flex-wrap items-baseline justify-between gap-x-2">
           <span className="num text-[20px] tracking-[-0.02em]" title={w.kind === 'index' && q?.delayed ? INDEX_DELAY_NOTE : undefined}>
             {price !== undefined ? fmtPrice(price, digits) : q?.error ? '—' : '…'}
           </span>
-          <span className="flex items-baseline gap-2">
+          <span className="ml-auto flex items-baseline gap-2">
             {closed && <span className="text-[11.5px] text-faint">închis</span>}
             {change !== null && <span className={clsx('num text-[12.5px]', change >= 0 ? 'text-bull' : 'text-bear')}>{fmtPct(change)}</span>}
           </span>

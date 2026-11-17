@@ -1,14 +1,16 @@
 // FD-ORDEREDIT: "Confirmă" / "Renunță" on a trade's line once its SL / TP (or an order's level) was dragged. Confirmă
 // checks the changes on the server: errors stay next to the buttons (the lines stay dragged, to correct them); warnings
 // open the confirmation; otherwise the changes go out and the result is told.
-import { useEffect, useRef, useState } from 'react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { overlayRoot } from '../chart/fullscreen.ts';
 import { clsx } from 'clsx';
 import { Loader2 } from 'lucide-react';
 import type { AccountView } from '../../shared/api-types.ts';
+import type { BotLevel, BotLevelMove } from '../../shared/bot.ts';
 import type { ModifyPreview, ModifyResult, ModifyStepPlan, ModifyTicket as Ticket } from '../../shared/trading.ts';
-import { ApiError, errorMessage } from '../api.ts';
+import { api, ApiError, errorMessage } from '../api.ts';
 import { Modal } from './Modal.tsx';
 import { ModifyConfirm, useModifySend } from './ModifyTicket.tsx';
 import { DemoBadge } from './OrderTicket.tsx';
@@ -84,29 +86,7 @@ export function TradeDraftBar({
   };
 
   return (
-    // Not positioned: its message is placed against the whole overlay (the chart's data-* and variables).
-    <div>
-      {/* Discard, then Confirm next to the trade's box (TradingView's order). */}
-      <div className="flex items-center gap-1.5">
-        <button type="button" className={DISCARD} disabled={send.isPending} onClick={onDiscard} aria-label="Renunță la modificare">
-          Renunță
-        </button>
-        <button type="button" className={CONFIRM} disabled={busy} onClick={confirm} aria-label="Confirmă modificarea" aria-busy={busy}>
-          {/* While it is checked / sent: a spinner in its place, the box keeping its width. */}
-          <span className={clsx(busy && 'invisible')}>Confirmă</span>
-          {busy && <Loader2 size={12} className="absolute animate-spin" aria-hidden />}
-        </button>
-      </div>
-      {error && (
-        // Over the chart (nothing moves): under the buttons (above them in the pane's lower half), right-aligned with them,
-        // or from the pane's left when there is not enough room on their left (a phone). The chart places it (data-*).
-        <div
-          role="alert"
-          className="absolute top-full mt-1 w-max rounded-lg border border-bear/50 bg-panel-2 px-2.5 py-1.5 text-[12px] text-bear shadow-pop in-data-[msg=left]:left-(--overlay-from) in-data-[msg=left]:max-w-(--overlay-span) in-data-[msg=right]:right-0 in-data-[msg=right]:max-w-[min(340px,var(--overlay-room))] in-data-[open=up]:top-auto in-data-[open=up]:bottom-full in-data-[open=up]:mt-0 in-data-[open=up]:mb-1"
-        >
-          {error}
-        </div>
-      )}
+    <DraftButtons sending={send.isPending} busy={busy} error={error} onDiscard={onDiscard} onConfirm={confirm}>
       {confirming &&
         // On the page (the chart's overlays move with the chart): the warnings, then Confirm.
         createPortal(
@@ -135,6 +115,67 @@ export function TradeDraftBar({
           </Modal>,
           overlayRoot(),
         )}
+    </DraftButtons>
+  );
+}
+
+/** "Renunță", then "Confirmă" next to the trade's box (TradingView's order), and why a change was refused under them. */
+function DraftButtons({ sending, busy, error, onDiscard, onConfirm, children }: { sending: boolean; busy: boolean; error: string | null; onDiscard: () => void; onConfirm: () => void; children?: ReactNode }) {
+  return (
+    // Not positioned: its message is placed against the whole overlay (the chart's data-* and variables).
+    <div>
+      <div className="flex items-center gap-1.5">
+        <button type="button" className={DISCARD} disabled={sending} onClick={onDiscard} aria-label="Renunță la modificare">
+          Renunță
+        </button>
+        <button type="button" className={CONFIRM} disabled={busy} onClick={onConfirm} aria-label="Confirmă modificarea" aria-busy={busy}>
+          {/* While it is checked / sent: a spinner in its place, the box keeping its width. */}
+          <span className={clsx(busy && 'invisible')}>Confirmă</span>
+          {busy && <Loader2 size={12} className="absolute animate-spin" aria-hidden />}
+        </button>
+      </div>
+      {error && (
+        // Over the chart (nothing moves): under the buttons (above them in the pane's lower half), right-aligned with them,
+        // or from the pane's left when there is not enough room on their left (a phone). The chart places it (data-*).
+        <div
+          role="alert"
+          className="absolute top-full mt-1 w-max rounded-lg border border-bear/50 bg-panel-2 px-2.5 py-1.5 text-[12px] text-bear shadow-pop in-data-[msg=left]:left-(--overlay-from) in-data-[msg=left]:max-w-(--overlay-span) in-data-[msg=right]:right-0 in-data-[msg=right]:max-w-[min(340px,var(--overlay-room))] in-data-[open=up]:top-auto in-data-[open=up]:bottom-full in-data-[open=up]:mt-0 in-data-[open=up]:mb-1"
+        >
+          {error}
+        </div>
+      )}
+      {children}
     </div>
   );
+}
+
+/**
+ * FIX-BOTDRAG: "Renunță" / "Confirmă" on a bot's stop loss / take profit once dragged. Confirmă sends the new levels to
+ * the bot (no order leaves: the bot applies them at its next look); a refusal stays next to the buttons, the lines stay
+ * dragged. Sent, the chart has the new levels at once.
+ */
+export function BotDraftBar({ botId, move, onDiscard, onSent }: { botId: number; move: BotLevelMove; onDiscard: () => void; onSent: (message: string) => void }) {
+  const qc = useQueryClient();
+  const [error, setError] = useState<string | null>(null);
+  const send = useMutation({ mutationFn: (m: BotLevelMove) => api.post<BotLevel[]>(`/api/bots/${botId}/levels`, m) });
+  // A line dragged again: what was said about the previous levels no longer holds.
+  const sig = JSON.stringify(move);
+  useEffect(() => setError(null), [sig]);
+  const sigNow = useRef(sig);
+  sigNow.current = sig;
+  const confirm = () => {
+    setError(null);
+    const asked = sig;
+    send.mutate(move, {
+      onSuccess: (levels) => {
+        qc.setQueryData(['bot-levels'], levels);
+        void qc.invalidateQueries({ queryKey: ['bots'] });
+        // Dragged again meanwhile: that drag stays, to confirm.
+        if (sigNow.current !== asked) return;
+        onSent('Modificat: botul folosește noul nivel de la următoarea verificare.');
+      },
+      onError: (err) => setError(errorMessage(err)),
+    });
+  };
+  return <DraftButtons sending={send.isPending} busy={send.isPending} error={error} onDiscard={onDiscard} onConfirm={confirm} />;
 }

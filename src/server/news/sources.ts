@@ -1,4 +1,4 @@
-// Built-in news sources (verified live on 2026-10-12, see docs/research.md §1).
+// Built-in news sources (verified live on 2026-10-12, see docs/research.html §1).
 import type { Db } from '../db/database.ts';
 
 export type SourceCategory = 'crypto' | 'macro' | 'geopolitics' | 'stocks';
@@ -33,7 +33,8 @@ export const BUILTIN_SOURCES: SourceDef[] = [
   { id: 'marketwatch', name: 'MarketWatch', url: 'https://feeds.content.dowjones.io/public/rss/mw_topstories', category: 'macro', weight: 0.9 },
   { id: 'ft-markets', name: 'FT Markets', url: 'https://www.ft.com/markets?format=rss', category: 'macro', weight: 1.1 },
   { id: 'seekingalpha', name: 'Seeking Alpha Market Currents', url: 'https://seekingalpha.com/market_currents.xml', category: 'macro', weight: 0.8 },
-  { id: 'fxstreet', name: 'FXStreet', url: 'https://www.fxstreet.com/rss/news', category: 'macro', weight: 0.8 },
+  // FIX-SOURCES: off (Cloudflare refuses Azure's addresses with 403); it can be turned on in Setări → Admin → Surse.
+  { id: 'fxstreet', name: 'FXStreet', url: 'https://www.fxstreet.com/rss/news', category: 'macro', weight: 0.8, enabled: false },
   { id: 'investinglive', name: 'InvestingLive', url: 'https://investinglive.com/feed/', category: 'macro', weight: 0.9 },
   { id: 'investing', name: 'Investing.com', url: 'https://www.investing.com/rss/news.rss', category: 'macro', weight: 0.8 },
   { id: 'fed', name: 'Federal Reserve', url: 'https://www.federalreserve.gov/feeds/press_all.xml', category: 'macro', weight: 1.3 },
@@ -44,7 +45,7 @@ export const BUILTIN_SOURCES: SourceDef[] = [
   { id: 'cnbc-world', name: 'CNBC International', url: 'https://www.cnbc.com/id/100727362/device/rss/rss.html', category: 'geopolitics', weight: 1 },
   { id: 'cnbc-politics', name: 'CNBC Politics & Policy', url: 'https://www.cnbc.com/id/10000113/device/rss/rss.html', category: 'geopolitics', weight: 0.9 },
   { id: 'guardian-economics', name: 'The Guardian Economics', url: 'https://www.theguardian.com/business/economics/rss', category: 'geopolitics', weight: 0.8 },
-  // Stocks (FD-SENTIQ §4.4, docs/research.md §8)
+  // Stocks (FD-SENTIQ §4.4, docs/research.html §8)
   { id: 'nasdaq-stocks', name: 'Nasdaq Stocks', url: 'https://www.nasdaq.com/feed/rssoutbound?category=Stocks', category: 'stocks', weight: 0.9 },
   { id: 'investing-stocks', name: 'Investing.com Stock News', url: 'https://www.investing.com/rss/news_25.rss', category: 'stocks', weight: 0.8 },
   { id: 'cnbc-business', name: 'CNBC Business', url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10001147', category: 'stocks', weight: 0.9 },

@@ -5,42 +5,37 @@ import { useEffect, useId, useState } from 'react';
 import { clsx } from 'clsx';
 import type { IndicatorResult, InputConfig, PlotConfig } from 'oakscriptjs';
 import type { LineStyleId, Study } from '../../shared/studies.ts';
-import { TIMEFRAMES } from '../../shared/time.ts';
 import { errorMessage } from '../api.ts';
-import { changedInputs, inputProblem, pineTf, sanitizeInputs, SOURCES } from '../indicators/compute.ts';
+import { SOURCES } from '../indicators/compute.ts';
 import type { StudyModule } from '../indicators/catalog.ts';
 import type { StudyRuntime } from '../indicators/runtime.ts';
-import { hlineDefault, hlineShown, lineKind, plotWidth, styleFills, styleHlines, stylePlots } from '../indicators/style.ts';
-import { colorKey, INPUT_COLORED, INPUT_LINES, lineInput, linkStyle } from '../indicators/color-links.ts';
+import { hlineDefault, hlineShown, styleFills, styleHlines, stylePlots } from '../indicators/style.ts';
+import { INPUT_COLORED, INPUT_LINES, lineInput } from '../indicators/color-links.ts';
+import {
+  activeIn,
+  checkStudyDraft,
+  describeStudy,
+  groupsOf,
+  lineBoxOf,
+  plotBoxColor,
+  plotShownInForm,
+  setFill as fillSetter,
+  setHline as hlineSetter,
+  setInput as inputSetter,
+  setPlot as plotSetter,
+  setPlots,
+  studyDefaults,
+  studyDraftOf,
+  studyHostForm,
+  studyToSave,
+  styleId,
+  TF_OPTIONS,
+  type StudyDraft,
+} from '../indicators/study-form.ts';
 import { ColorPicker } from './ColorPicker.tsx';
 import { InfoTip } from './InfoTip.tsx';
-
-/** FD-STYLEUNIFY: a line's style as the script declares it (TradingView's names), solid when it declares none. */
-const styleId = (v: unknown): LineStyleId => (v === 'dashed' || v === 'dotted' ? v : 'solid');
-
-type PlotStyle = NonNullable<Study['plots']>[string];
-type HlineStyle = NonNullable<Study['hlines']>[string];
-type FillStyle = NonNullable<Study['fills']>[string];
-
-/** The timeframes an input can take: the chart's, Sentiq's, the month (from daily bars). */
-const TF_OPTIONS: { value: string; label: string }[] = [{ value: '', label: 'Grafic' }, ...TIMEFRAMES.map((t) => ({ value: pineTf(t), label: t })), { value: '1M', label: '1M' }];
-
-/** Consecutive inputs of one group (Pine `group`), and in it the rows of inputs that share `inline`. */
-function groupsOf(inputs: readonly InputConfig[]): { title: string | null; rows: InputConfig[][] }[] {
-  const out: { title: string | null; rows: InputConfig[][] }[] = [];
-  for (const cfg of inputs) {
-    const title = cfg.group ?? null;
-    let g = out.at(-1);
-    if (!g || g.title !== title) {
-      g = { title, rows: [] };
-      out.push(g);
-    }
-    const row = g.rows.at(-1);
-    if (cfg.inline && row && row[0]?.inline === cfg.inline) row.push(cfg);
-    else g.rows.push([cfg]);
-  }
-  return out;
-}
+import { useEmbedded } from '../embed.ts';
+import { HostSetters, useHostForm, type HostForm } from '../host-form.ts';
 
 export function StudySettings({
   name,
@@ -59,13 +54,12 @@ export function StudySettings({
   onSave: (next: Study) => Promise<unknown>;
 }) {
   const formId = useId();
+  // Sentiq.iOS FD-V3-S19: in the app the form is drawn natively from its description (below), the drawer hidden.
+  const embedded = useEmbedded();
   const [tab, setTab] = useState<'inputs' | 'style'>('inputs');
   // FD-COLORUNIFY: in the linked form (a line's colour chosen before in Stil, where it is now its input's).
-  const initial = () => {
-    const st = linkStyle(study);
-    return { inputs: sanitizeInputs(mod, st.inputs), plots: { ...(st.plots ?? {}) }, hlines: { ...(st.hlines ?? {}) }, fills: { ...(st.fills ?? {}) } };
-  };
-  const [draft, setDraft] = useState(initial);
+  const initial = () => studyDraftOf(mod, study);
+  const [draft, setDraft] = useState<StudyDraft>(initial);
   const [invalid, setInvalid] = useState<string | null>(null);
   const [status, setStatus] = useState<'idle' | 'saving' | 'saved' | { error: unknown }>('idle');
   // A save elsewhere (another tab, the defaults of another instance) resets the form only when the saved values change.
@@ -73,27 +67,20 @@ export function StudySettings({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => setDraft(initial()), [savedKey]);
 
-  const setInput = (id: string, v: unknown) => setDraft((d) => ({ ...d, inputs: { ...d.inputs, [id]: v } }));
-  const setPlot = (id: string, patch: Partial<PlotStyle>) => setDraft((d) => ({ ...d, plots: { ...d.plots, [id]: { ...d.plots[id], ...patch } } }));
-  const setHline = (id: string, patch: Partial<HlineStyle>) => setDraft((d) => ({ ...d, hlines: { ...d.hlines, [id]: { ...d.hlines[id], ...patch } } }));
-  const setFill = (key: string, patch: Partial<FillStyle>) => setDraft((d) => ({ ...d, fills: { ...d.fills, [key]: { ...d.fills[key], ...patch } } }));
-  const active = (cfg: InputConfig) => {
-    try {
-      return runtime.isInputActive(cfg, draft.inputs, mod.inputConfig);
-    } catch {
-      return true;
-    }
-  };
+  const setInput = (id: string, v: unknown) => setDraft(inputSetter(id, v));
+  const setPlot = (...a: Parameters<typeof plotSetter>) => setDraft(plotSetter(...a));
+  const setHline = (...a: Parameters<typeof hlineSetter>) => setDraft(hlineSetter(...a));
+  const setFill = (...a: Parameters<typeof fillSetter>) => setDraft(fillSetter(...a));
+  const active = activeIn(runtime.isInputActive, mod, draft);
   /**
    * FD-COLORUNIFY: a line's width and style in its box, written to every plot in `ids` (a colour input that colours
    * several lines sets them all; the box shows the first one's).
    */
   const lineBox = (def: PlotConfig, ids: readonly string[]) => {
-    const o = draft.plots[def.id] ?? {};
-    const all = (patch: Partial<PlotStyle>) => setDraft((d) => ({ ...d, plots: { ...d.plots, ...Object.fromEntries(ids.map((pid) => [pid, { ...d.plots[pid], ...patch }])) } }));
+    const lb = lineBoxOf(def, draft);
     return {
-      ...(lineKind(def) ? { lineWidth: o.width ?? plotWidth(def), onLineWidth: (w: number) => all({ width: w }) } : {}),
-      ...(lineKind(def) === 'line' ? { lineStyle: o.style ?? styleId(def.linestyle), onLineStyle: (st: LineStyleId) => all({ style: st }) } : {}),
+      ...(lb.lineWidth !== undefined ? { lineWidth: lb.lineWidth, onLineWidth: (w: number) => setDraft(setPlots(ids, { width: w })) } : {}),
+      ...(lb.lineStyle !== undefined ? { lineStyle: lb.lineStyle, onLineStyle: (st: LineStyleId) => setDraft(setPlots(ids, { style: st })) } : {}),
     };
   };
   // FIX-INFOTIP: the Pine tooltip behind an (i), on hover and on a click or a tap.
@@ -173,45 +160,14 @@ export function StudySettings({
   };
 
   const save = async () => {
-    // Only the inputs that apply are checked (an inactive one keeps its value, as in TradingView).
-    const bad = mod.inputConfig
-      .filter((cfg) => active(cfg) && inputProblem(cfg, draft.inputs[cfg.id]) !== null)
-      .map((cfg) => {
-        const range = (cfg.type === 'int' || cfg.type === 'float') && (cfg.min !== undefined || cfg.max !== undefined) ? ` (${cfg.min ?? '…'} – ${cfg.max ?? '…'})` : '';
-        return `${cfg.title ?? cfg.id}${range}`;
-      });
-    if (bad.length) {
-      setInvalid(`Valori invalide: ${bad.join(', ')}.`);
-      setTab('inputs');
-      return;
-    }
-    // FD-HLINELEVELS: a level left empty (or not a number) is refused with the line's name.
-    const badLevels = styleHlines(mod).filter((h) => {
-      const v = draft.hlines[h.id]?.price;
-      return v !== undefined && (!Number.isFinite(v) || Math.abs(v) > 1e12);
-    });
-    if (badLevels.length) {
-      setInvalid(`Nivel invalid: ${badLevels.map((h) => h.title ?? h.id).join(', ')}.`);
-      setTab('style');
+    const problem = checkStudyDraft(mod, draft, active);
+    if (problem) {
+      setInvalid(problem.invalid);
+      setTab(problem.tab);
       return;
     }
     setInvalid(null);
-    const clean = <T extends Record<string, unknown>>(r: Record<string, T>) => {
-      const out: Record<string, T> = {};
-      for (const [k, o] of Object.entries(r)) {
-        const kept = Object.fromEntries(Object.entries(o).filter(([, x]) => x !== undefined)) as T;
-        if (Object.keys(kept).length) out[k] = kept;
-      }
-      return Object.keys(out).length ? out : undefined;
-    };
-    const next: Study = { uid: study.uid, id: study.id, visible: study.visible, inputs: changedInputs(mod, draft.inputs) };
-    const plots = clean(draft.plots);
-    const hlines = clean(draft.hlines);
-    const fills = clean(draft.fills);
-    if (plots) next.plots = plots;
-    if (hlines) next.hlines = hlines;
-    if (fills) next.fills = fills;
-    if (study.height !== undefined) next.height = study.height;
+    const next = studyToSave(study, mod, draft);
     setStatus('saving');
     try {
       await onSave(next);
@@ -224,6 +180,24 @@ export function StudySettings({
   const plots = stylePlots(mod);
   const hlines = styleHlines(mod);
   const fills = styleFills(mod, result);
+
+  // Sentiq.iOS FD-V3-S19: the same fields, values and setters as the drawer's, described for the app's native sheet (built
+  // only in the app: in a browser the drawer is the form).
+  const host = new HostSetters();
+  const parts = embedded ? describeStudy({ mod, study, draft, result, active }) : null;
+  if (parts) for (const [key, fn] of parts.setters) host.add(key, (v) => setDraft((d) => fn(d, v)));
+  const hostForm: HostForm | null = parts
+    ? studyHostForm({ uid: study.uid, name, mod, tab, parts, invalid, error: typeof status === 'object' ? errorMessage(status.error) : null, saving: status === 'saving', saved: status === 'saved' })
+    : null;
+  useHostForm(embedded, hostForm, host, {
+    save: () => void save(),
+    defaults: () => {
+      setInvalid(null);
+      setDraft(studyDefaults(mod));
+    },
+    tab: setTab,
+  });
+
   return (
     <form
       noValidate
@@ -270,7 +244,7 @@ export function StudySettings({
           {plots.length === 0 && hlines.length === 0 && fills.length === 0 && <p className="text-[13px] text-faint">Nimic de stilizat.</p>}
           {plots.map((def) => {
             const o = draft.plots[def.id] ?? {};
-            const shown = o.visible ?? !(def.display === 'none' || (typeof def.visible === 'boolean' && !def.visible) || (typeof def.visible === 'string' && draft.inputs[def.visible] === false));
+            const shown = plotShownInForm(def, o, draft.inputs);
             const palette = def.palette?.length ? def.palette : null;
             const title = def.title || def.id;
             // FD-COLORUNIFY: a line whose colour is an input (MA Ribbon) edits that input, as its box in Intrări does.
@@ -297,7 +271,7 @@ export function StudySettings({
                 <ColorPicker
                   key={c ?? 'color'}
                   label={c ? `${title}: culoarea ${c}` : `${title}: culoare`}
-                  value={c ? (o.palette?.[c] ?? (o.color && def.color && colorKey(def.color) === colorKey(c) ? o.color : c)) : (o.color ?? def.color ?? '#2962FF')}
+                  value={plotBoxColor(def, o, c)}
                   onChange={(v) => setPlot(def.id, c ? { palette: { ...o.palette, [c]: v } } : { color: v })}
                   {...lineBox(def, [def.id])}
                 />
@@ -382,7 +356,7 @@ export function StudySettings({
           className="btn"
           onClick={() => {
             setInvalid(null);
-            setDraft({ inputs: { ...mod.defaultInputs }, plots: {}, hlines: {}, fills: {} });
+            setDraft(studyDefaults(mod));
           }}
         >
           Valorile implicite

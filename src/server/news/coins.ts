@@ -1,4 +1,4 @@
-// Coin detection in headlines (docs/technical-design.md §5.5), and the companies of the filter indices (FD-INDEXNEWS).
+// Coin detection in headlines (docs/technical-design.html §5.5), and the companies of the filter indices (FD-INDEXNEWS).
 import { COMPANY_TAG, memberTag, type FilterIndexId } from '../../shared/stock-indices.ts';
 
 export interface CoinEntry {
@@ -110,6 +110,26 @@ interface Matcher {
   symbol: string;
   re: RegExp;
   len: number;
+  /** FIX-DBSTUCK: the name's first word (lower case, ASCII), which a text naming it contains; null: always tried. */
+  key: string | null;
+}
+
+const WORD_SPLIT = /[^\p{L}\p{N}]+/u;
+
+/**
+ * FIX-DBSTUCK: a name's first word in lower case, when it is ASCII: a text the name matches in (bounded by what is not a
+ * letter or a digit) has that word; null otherwise (the name is always tried).
+ */
+export function firstWord(name: string): string | null {
+  const word = name.split(WORD_SPLIT).find((w) => w.length > 0);
+  if (!word) return null;
+  const lower = word.toLowerCase();
+  return /^[a-z0-9]+$/.test(lower) ? lower : null;
+}
+
+/** The words of a text in lower case; „ſ” as „s” and the Kelvin sign as „k”, as the case-insensitive match folds them. */
+function wordsOf(text: string): Set<string> {
+  return new Set(text.toLowerCase().replace(/ſ/g, 's').split(WORD_SPLIT));
 }
 
 interface NameDef {
@@ -189,6 +209,7 @@ export class CoinDetector {
       .map((d) => ({
         symbol: d.symbol,
         len: d.name.length,
+        key: firstWord(d.name),
         re: d.caseSensitive
           ? new RegExp(bounded([...new Set([d.name, d.name.toUpperCase(), ...(d.titleCase ? [titleOf(d.name)] : [])])].map(escapeRe).join('|')), 'gu')
           : new RegExp(bounded(escapeRe(d.name)), 'giu'),
@@ -203,11 +224,23 @@ export class CoinDetector {
   }
 
   detect(text: string): string[] {
+    return this.run(text, false);
+  }
+
+  /** FIX-DBSTUCK, for the tests: every name tried, without the first-word filter (the result must be the same). */
+  detectUnfiltered(text: string): string[] {
+    return this.run(text, true);
+  }
+
+  private run(text: string, all: boolean): string[] {
     const found = new Set<string>();
     const used: [number, number][] = [];
     const overlaps = (s: number, e: number) => used.some(([a, b]) => s < b && e > a);
+    // FIX-DBSTUCK: only the names whose first word the text has (hundreds of names, a few words in a text).
+    const words = all ? null : wordsOf(text);
     // 1) names, longest first, each span consumed once ("Bitcoin Cash" before "Bitcoin")
     for (const m of this.nameMatchers) {
+      if (words && m.key !== null && !words.has(m.key)) continue;
       m.re.lastIndex = 0;
       for (let r = m.re.exec(text); r; r = m.re.exec(text)) {
         const s = r.index;

@@ -95,21 +95,33 @@ export class Scanner {
   private readonly source: MarketSource;
   /** The last row of each stock per settings signature, when it was computed and whether the market was closed then. */
   private readonly stockRows = new Map<string, { row: ScanRow; at: number; closed: boolean; tf: Timeframe }>();
+  /** FD-KEYIDLE: the users using Sentiq now (only for them a share is read with their key); absent, everyone (tests). */
+  private readonly present: (() => Promise<Set<number>>) | null;
 
-  constructor(db: Db, settings: SettingsService, market: MarketData, log: Logger, stocks: StockData | null = null, source: MarketSource | null = null) {
+  constructor(
+    db: Db,
+    settings: SettingsService,
+    market: MarketData,
+    log: Logger,
+    stocks: StockData | null = null,
+    source: MarketSource | null = null,
+    present: (() => Promise<Set<number>>) | null = null,
+  ) {
     this.db = db;
     this.settings = settings;
     this.market = market;
     this.log = log;
     this.stocks = stocks;
     this.source = source ?? new MarketSource(db, settings, market);
+    this.present = present;
   }
 
   /**
    * A stock's or an index's row for the user: recomputed every 30 min while the market trades, once after it closes,
-   * otherwise reused. A share's timeframes and candles depend on the user's own Twelve Data key (FD-TDKEYS).
+   * otherwise reused. A share's timeframes and candles depend on the user's own Twelve Data key (FD-TDKEYS); read with
+   * it only while the user uses Sentiq (`here`, FD-KEYIDLE): else the last row, however old, or none (null).
    */
-  private async stockRow(userId: number, coin: string, kind: 'stock' | 'index', tfWanted: Timeframe, s: Settings, count: number, signal?: AbortSignal): Promise<ScanRow> {
+  private async stockRow(userId: number, coin: string, kind: 'stock' | 'index', tfWanted: Timeframe, s: Settings, count: number, here: boolean, signal?: AbortSignal): Promise<ScanRow | null> {
     const stocks = this.stocks;
     const symbol = `${coin}/USD`;
     if (!stocks) return { coin, kind, symbol, tf: tfWanted, ok: false, error: 'datele pentru acțiuni nu sunt disponibile' };
@@ -126,6 +138,8 @@ export class Scanner {
     const prev = this.stockRows.get(key);
     const now = Date.now();
     if (prev && prev.tf === tf && (closed ? prev.closed : now - prev.at < STOCK_SCAN_EVERY_MS)) return prev.row;
+    // Not read with the key of somebody who is not using Sentiq; nothing kept, so it is read when they come back.
+    if (own !== null && !here) return prev?.row ?? null;
     if (signal?.aborted) return prev?.row ?? { coin, kind, symbol, tf, ok: false, error: 'scanare întreruptă' };
     const chartSec = tfSeconds(tf);
     const msSec = p.msTf ? tfSeconds(p.msTf) : chartSec;
@@ -160,11 +174,12 @@ export class Scanner {
   /** Scans every active user's favourites; a coin shared by users with the same settings is computed once. */
   async run(signal?: AbortSignal): Promise<void> {
     const users = (await this.db.all<{ id: number }>(SCANNED_USERS)).map((u) => u.id);
+    const present = this.present ? await this.present() : null;
     // One run: the same pair with the same settings for two users is one computation.
     const memo = new Map<string, ScanRow>();
     for (const userId of users) {
       if (signal?.aborted) break;
-      const result = await this.runFor(userId, memo, signal);
+      const result = await this.runFor(userId, memo, present === null || present.has(userId), signal);
       // An interrupted run (shutdown / timeout) keeps the previous complete result.
       if (result) this.latest.set(userId, result);
     }
@@ -174,7 +189,7 @@ export class Scanner {
     for (const [k, v] of this.stockRows) if (now - v.at > 86_400_000) this.stockRows.delete(k);
   }
 
-  private async runFor(userId: number, memo: Map<string, ScanRow>, signal?: AbortSignal): Promise<ScanResult | null> {
+  private async runFor(userId: number, memo: Map<string, ScanRow>, here: boolean, signal?: AbortSignal): Promise<ScanResult | null> {
     const s = await this.settings.forUser(userId);
     const tf = s.scanner.tf;
     // FD-MARKETSRC: the user's exchange (connected, chosen or the default); a pair it lacks comes from the default.
@@ -190,7 +205,8 @@ export class Scanner {
     for (const w of coins) {
       if (signal?.aborted) return null;
       if (w.kind === 'stock' || w.kind === 'index') {
-        rows.push(await this.stockRow(userId, w.coin, w.kind, tf, s, count, signal));
+        const row = await this.stockRow(userId, w.coin, w.kind, tf, s, count, here, signal);
+        if (row) rows.push(row);
         continue;
       }
       const symbol = `${w.coin}/${w.quote}`;

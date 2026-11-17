@@ -38,7 +38,8 @@ export function StockDataSection({ s }: { s: SettingsView }) {
           </a>{' '}
           (gratuită; după înregistrare, în pagina API Keys) ai și 1m – 4h, iar semnalele acțiunilor de pe Azi folosesc timeframe-ul ales. Planul gratuit are 8 cereri pe minut și
           800 pe zi; un plan plătit (de exemplu Grow, fără limită zilnică) e recunoscut singur, din cheie. Cheia și creditele ei sunt doar ale tale; aplicația ține minte
-          lumânările, ca să nu consume cereri degeaba. Indicii nu au nevoie de cheie.
+          lumânările, ca să nu consume cereri degeaba. Cheia se folosește doar cât ai Sentiq deschis și îl folosești (graficele, semnalele de pe Azi, citirea
+          planului); boții porniți pe acțiuni o folosesc și când Sentiq e închis. Indicii nu au nevoie de cheie.
         </p>
         <form
           className="flex flex-wrap items-end gap-2"
@@ -47,9 +48,10 @@ export function StockDataSection({ s }: { s: SettingsView }) {
             if (key.trim()) setTdKey.mutate(key.trim());
           }}
         >
-          <label className="flex flex-col gap-1">
+          {/* FIX-FITWIDTH: on a phone the field takes the panel's width (a fixed one went past the screen at 320 px). */}
+          <label className="flex flex-col gap-1 max-sm:w-full">
             <span className="text-faint">Cheia Twelve Data {s.twelveDataKeySet && <>(salvată: {s.twelveDataKeyHint})</>}</span>
-            <input type="password" autoComplete="off" value={key} onChange={(e) => setKey(e.target.value)} placeholder="cheia de 32 de caractere" className="w-72 max-w-full" />
+            <input type="password" autoComplete="off" value={key} onChange={(e) => setKey(e.target.value)} placeholder="cheia de 32 de caractere" className="w-72 max-w-full max-sm:w-full" />
           </label>
           <button className="btn" disabled={!key.trim() || setTdKey.isPending}>
             {setTdKey.isPending ? 'Se verifică…' : s.twelveDataKeySet ? 'Verifică și înlocuiește' : 'Verifică și salvează'}

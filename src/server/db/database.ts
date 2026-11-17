@@ -55,6 +55,11 @@ const CLEAN_SQL = 'IF @@TRANCOUNT > 0 ROLLBACK;';
 
 /** A Sentiq transaction holding the write lock this long is stuck: Sentiq's last seconds (FD-DBHEAL §2). */
 export const STUCK_TX_MS = 5 * 60_000;
+/**
+ * FIX-DBSTUCK: another container's Sentiq session holding the lock this long, not reading its result (or sending nothing
+ * more), is an orphan: its process is gone or frozen (a restart, a move to another worker).
+ */
+export const ORPHAN_TX_MS = 60_000;
 /** At most one look at the lock's holder per instance and minute. */
 const HEAL_EVERY_MS = 60_000;
 
@@ -67,19 +72,35 @@ export interface LockHolder {
   /** Age of its open transaction, in seconds (null without one). */
   txAgeS: number | null;
   lastSql: string | null;
+  /** FIX-DBSTUCK: the host of the session asking (this process's), what the holder waits on, and whether it runs nothing. */
+  me?: string | null;
+  wait?: string | null;
+  idle?: boolean | number | null;
 }
 
-/** Whether the holder is one of Sentiq's own sessions, stuck in a transaction (FD-DBHEAL §2). */
-export function isStuckHolder(h: LockHolder | undefined, stuckMs = STUCK_TX_MS): h is LockHolder {
-  return Boolean(h && h.prog === 'Sentiq' && h.txAgeS !== null && h.txAgeS * 1000 >= stuckMs);
+/**
+ * Whether the holder is one of Sentiq's own sessions, stuck in a transaction (FD-DBHEAL §2): open for minutes; or
+ * (FIX-DBSTUCK) another container's, open for a minute, not reading its result or sending nothing more.
+ */
+export function isStuckHolder(h: LockHolder | undefined, stuckMs = STUCK_TX_MS, orphanMs = ORPHAN_TX_MS): h is LockHolder {
+  if (!h || h.prog !== 'Sentiq' || h.txAgeS === null) return false;
+  const age = h.txAgeS * 1000;
+  return age >= stuckMs || (isOrphan(h) && age >= orphanMs);
+}
+
+/** FIX-DBSTUCK: another host's session that waits for its client to read, or runs nothing, with its transaction open. */
+export function isOrphan(h: LockHolder): boolean {
+  return Boolean(h.host && h.me && h.host !== h.me && (Boolean(h.idle) || h.wait === 'ASYNC_NETWORK_IO'));
 }
 
 const HOLDER_SQL = `${CLEAN_SQL}
 SELECT TOP (1) l.request_session_id AS spid, s.login_time AS login, s.program_name AS prog, s.host_name AS host,
        DATEDIFF(second, t.transaction_begin_time, SYSDATETIME()) AS txAgeS,
-       LEFT(REPLACE(REPLACE(txt.text, CHAR(10), ' '), CHAR(13), ' '), 200) AS lastSql
+       LEFT(REPLACE(REPLACE(txt.text, CHAR(10), ' '), CHAR(13), ' '), 200) AS lastSql,
+       CAST(HOST_NAME() AS nvarchar(128)) AS me, r.wait_type AS wait, CASE WHEN r.session_id IS NULL THEN 1 ELSE 0 END AS idle
 FROM sys.dm_tran_locks l
 JOIN sys.dm_exec_sessions s ON s.session_id = l.request_session_id
+LEFT JOIN sys.dm_exec_requests r ON r.session_id = s.session_id
 LEFT JOIN sys.dm_tran_session_transactions st ON st.session_id = s.session_id
 LEFT JOIN sys.dm_tran_active_transactions t ON t.transaction_id = st.transaction_id
 LEFT JOIN sys.dm_exec_connections c ON c.session_id = s.session_id
@@ -304,7 +325,8 @@ export class Db {
       const again = await this.lockHolder();
       if (!isStuckHolder(again) || again.spid !== holder.spid || again.login.getTime() !== holder.login.getTime()) return false;
       await this.pool.request().query(`KILL ${Math.trunc(again.spid)}`);
-      this.onWarn?.(`database: ended a stuck session ${again.spid} (${again.host ?? '?'}, transaction open ${again.txAgeS} s; last: ${again.lastSql ?? '?'})`);
+      const orphan = isOrphan(again) && (again.txAgeS ?? 0) * 1000 < STUCK_TX_MS ? '; another container, not reading its result' : '';
+      this.onWarn?.(`database: ended a stuck session ${again.spid} (${again.host ?? '?'}, transaction open ${again.txAgeS} s${orphan}; last: ${again.lastSql ?? '?'})`);
       return true;
     } catch {
       return false;

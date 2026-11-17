@@ -3,7 +3,8 @@
 import { useState, type FormEvent, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { browserSupportsWebAuthn, startRegistration } from '@simplewebauthn/browser';
+import type { startRegistration } from '@simplewebauthn/browser';
+import { passkeyRegister, supportsPasskeys } from '../webauthn.ts';
 import { Fingerprint, KeyRound, LogOut, Pencil, ShieldCheck, Trash2, UserRound } from 'lucide-react';
 import type { AccountInfo, PasskeySummary, PublicUser, TwoFactorView } from '../../shared/api-types.ts';
 import { api, ApiError, errorMessage } from '../api.ts';
@@ -46,20 +47,26 @@ function ProfileSection({ user }: { user: PublicUser }) {
           save.mutate();
         }}
       >
-        <label className="flex flex-col gap-1">
-          <span className="text-faint">Nume</span>
-          <input value={name} onChange={(e) => setName(e.target.value)} maxLength={80} autoComplete="name" className="w-64 max-w-full" />
-        </label>
-        <button className="btn" disabled={save.isPending || !name.trim() || name.trim() === user.name}>
-          Salvează
-        </button>
-        <div className="flex flex-col gap-1">
-          <span className="text-faint">Email</span>
-          <span className="py-2">{user.email}</span>
+        {/* FIX-SECNAME: the name and its „Salvează” wrap together, the email and the role together (on a phone the
+            button goes under its field, never onto the email's row). */}
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="flex flex-col gap-1">
+            <span className="text-faint">Nume</span>
+            <input value={name} onChange={(e) => setName(e.target.value)} maxLength={80} autoComplete="name" className="w-64 max-w-full" />
+          </label>
+          <button className="btn" disabled={save.isPending || !name.trim() || name.trim() === user.name}>
+            Salvează
+          </button>
         </div>
-        <div className="flex flex-col gap-1">
-          <span className="text-faint">Rol</span>
-          <span className="py-2">{user.role === 'admin' ? 'Admin' : 'Utilizator'}</span>
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="flex flex-col gap-1">
+            <span className="text-faint">Email</span>
+            <span className="py-2">{user.email}</span>
+          </div>
+          <div className="flex flex-col gap-1">
+            <span className="text-faint">Rol</span>
+            <span className="py-2">{user.role === 'admin' ? 'Admin' : 'Utilizator'}</span>
+          </div>
         </div>
       </form>
       {save.isSuccess && <Msg>Numele e salvat.</Msg>}
@@ -359,13 +366,13 @@ function PasskeysSection({ list, here }: { list: PasskeySummary[]; here: boolean
   const refresh = useRefreshAccount();
   const tz = useTz();
   const [name, setName] = useState('');
-  const supported = browserSupportsWebAuthn();
+  const supported = supportsPasskeys();
   const add = useMutation({
     mutationFn: async () => {
       const options = await api.post<Parameters<typeof startRegistration>[0]['optionsJSON']>('/api/account/passkeys/options');
       let response;
       try {
-        response = await startRegistration({ optionsJSON: options });
+        response = await passkeyRegister(options);
       } catch (err) {
         throw new Error(passkeyMessage(err));
       }

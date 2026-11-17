@@ -1,5 +1,5 @@
 // What the engine keeps of a bot between two looks (TD-BOT §4), in `bots.state`: only the engine writes it.
-import type { BotEndAction, BotSide, BotTradeReason } from '../../shared/bot.ts';
+import { botInputSchema, type BotEndAction, type BotInput, type BotLevelMove, type BotMarginMode, type BotMarket, type BotSide, type BotTradeReason, type PositionsMode } from '../../shared/bot.ts';
 import type { Timeframe } from '../../shared/time.ts';
 
 export interface BotPosition {
@@ -18,6 +18,22 @@ export interface BotPosition {
   tp: number | null;
   /** Premium: the time of the signal it entered on (its V2 bar), to find what became of it. */
   signalTime?: number;
+  /** FIX-BOTMARGIN: the futures margin it opened with (its close keeps it); absent before it: the pair's. */
+  mm?: BotMarginMode;
+  /**
+   * FIX-BOTSHORTS: entered on a Slingshot setup still forming. `start`: the time its V2 search started (the same setup
+   * while its V2 moves); `sl` / `tp`: the levels it entered with (one moved on the chart since then stays the user's).
+   * Gone at the confirmation (the position then follows the signal) or when the setup is cancelled.
+   */
+  setup?: PositionSetup;
+}
+
+export interface PositionSetup {
+  start: number;
+  sl: number;
+  tp: number;
+  /** FIX-BOTV1STOP: the setup's V1 (where Slingshot cancels it): the stop with "Slingshot". */
+  v1?: number;
 }
 
 export interface GridSlot {
@@ -32,6 +48,8 @@ export interface GridState {
   lines: number[];
   qty: number;
   lev: number;
+  /** FIX-BOTMARGIN: the futures margin of all its orders; absent on a grid from before it: the pair's. */
+  mm?: BotMarginMode;
   /** Waiting for the start price (above: the price has to rise to it). */
   waiting: { trigger: number; above: boolean } | null;
   started: boolean;
@@ -49,6 +67,13 @@ export interface DcaDeal {
   margin: number;
   fees: number;
   openedAt: number;
+  /** FD-BOTEDIT §2: the cycle's leverage (its safety orders keep it when the settings change); absent before it. */
+  lev?: number;
+  /** FIX-BOTMARGIN: the cycle's futures margin (its safety orders and its close keep it); absent before it: the pair's. */
+  mm?: BotMarginMode;
+  /** FIX-BOTDRAG: the levels moved on the chart; the cycle keeps them until it closes (else they come from the settings). */
+  sl?: number;
+  tp?: number;
 }
 
 export interface DcaState {
@@ -75,6 +100,13 @@ export interface PremiumState {
   ai: { day: string; n: number };
   /** The last results, in percent of the amount used (for the AI: no sums). */
   recent: number[];
+  /** FIX-BOTSHORTS: per symbol and side, the setup (its start) the AI said no to; asked again at its confirmation. */
+  aiNo?: Record<string, Partial<Record<BotSide, number>>>;
+  /**
+   * FIX-BOTSHORTS: per symbol and side, the last setup (its start) the bot entered on: one entry a setup while it forms
+   * (an exit before its confirmation does not enter it again; the confirmed signal is an entry of its own).
+   */
+  setupTaken?: Record<string, Partial<Record<BotSide, number>>>;
 }
 
 export interface BrokerRefs {
@@ -134,6 +166,14 @@ export interface BotState {
   grid: GridState | null;
   dca: DcaState | null;
   premium: PremiumState | null;
+  /**
+   * FD-BOTEDIT: the settings the open positions run with. The same as `bots.config` but during a transition (another
+   * account, market, DCA or grid symbol, another grid): then the positions finish or close with these first. Absent in
+   * the states from before it: the first look takes the bot's settings.
+   */
+  basis?: BotInput;
+  /** FD-BOTEDIT §3: how the positions of a transition end (the edit's choice, through the API's command). */
+  switchMode?: PositionsMode | null;
 }
 
 export const newState = (refPrice: number | null): BotState => ({
@@ -163,6 +203,33 @@ export const newState = (refPrice: number | null): BotState => ({
   premium: null,
 });
 
+/** FD-BOTEDIT: the settings of the open positions (`state.basis`), read as the settings are; null when absent or unreadable. */
+export function basisOf(st: BotState): BotInput | null {
+  if (!st.basis) return null;
+  const r = botInputSchema.safeParse(st.basis);
+  return r.success ? r.data : null;
+}
+
+/**
+ * FIX-BOTDRAG: the levels dragged on the chart, onto the positions they were dragged for (the same symbol, side and
+ * opening): a Slingshot position's, the open DCA cycle's (on `dcaSymbol`, the symbol its settings trade). Applied again,
+ * the same. A grid's stop is a setting (written there).
+ */
+export function applyLevels(st: BotState, moves: readonly BotLevelMove[], dcaSymbol: string): void {
+  for (const m of moves) {
+    const set = (x: { sl: number | null } | { sl?: number }, y: { tp: number | null } | { tp?: number }) => {
+      if (m.sl !== undefined) x.sl = m.sl;
+      if (m.tp !== undefined) y.tp = m.tp;
+    };
+    for (const p of st.premium?.positions ?? []) if (p.symbol === m.symbol && p.side === m.side && p.openedAt === m.openedAt) set(p, p);
+    const d = st.dca?.deal;
+    if (d && m.symbol === dcaSymbol && d.side === m.side && d.openedAt === m.openedAt) set(d, d);
+  }
+}
+
+/** Whether the bot holds anything: a Slingshot position, a DCA cycle, a full grid interval. */
+export const holdsPositions = (st: BotState): boolean => Boolean((st.premium?.positions.length ?? 0) > 0 || st.dca?.deal || st.grid?.slots.some((s) => s.entry !== null));
+
 /** A closed trade, as `bot_trades` keeps it. */
 export interface ClosedTrade {
   symbol: string;
@@ -175,6 +242,12 @@ export interface ClosedTrade {
   openedAt: number;
   closedAt: number;
   reason: BotTradeReason;
+  /** FD-TRADES: where it was made (the settings its position ran with; no account in Simulare) and its levels. */
+  market: BotMarket;
+  accountId: number | null;
+  lev: number;
+  sl: number | null;
+  tp: number | null;
 }
 
 /** The state from the database: anything unreadable starts again (the positions of a real bot stay on the platform). */

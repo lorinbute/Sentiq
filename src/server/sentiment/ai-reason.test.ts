@@ -40,6 +40,12 @@ describe('the reason of an AI score', () => {
     expect(long.endsWith('…')).toBe(true);
   });
 
+  it('FIX-SENTWEIGHT: told that energy and AI weigh more, and which way energy prices move the market', () => {
+    expect(SCORE_SYSTEM).toMatch(/News about oil, gasoline, diesel, natural gas, electricity, energy production or energy prices, and news about AI .* get a higher impact: at least 2, and 3 when/);
+    expect(SCORE_SYSTEM).toContain('Rising oil, fuel, gas or electricity prices are bearish for risk assets; falling ones are bullish.');
+    expect(SCORE_SYSTEM).toMatch(/Turmoil at a leading AI company .* strongly bearish/);
+  });
+
   it('is asked for, in Romanian, and read with each score', async () => {
     expect(SCORE_SYSTEM).toMatch(/reason for its score in Romanian/);
     const scorer = new AiScorer({ client: withReasons, log: silentLogger });

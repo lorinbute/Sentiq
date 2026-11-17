@@ -24,12 +24,17 @@ export const TABLES = [
   'daily_sentiment',
   'calendar_raw',
   'calendar_custom',
+  'earn_results',
   'job_state',
   'job_lease',
   'watch_list_items',
   'watch_lists',
   'watchlist',
   'cost_basis',
+  'paper_trades',
+  'paper_orders',
+  'paper_positions',
+  'paper_accounts',
   'exchange_accounts',
   'market_cache',
   'settings',
@@ -47,7 +52,7 @@ export const TABLES = [
 ] as const;
 
 /** Tables whose `id` is an IDENTITY column. */
-export const IDENTITY_TABLES = new Set(['users', 'calendar_custom', 'exchange_accounts', 'passkeys', 'account_requests', 'trade_log', 'watch_lists', 'bots', 'bot_trades', 'bot_events']);
+export const IDENTITY_TABLES = new Set(['users', 'calendar_custom', 'exchange_accounts', 'passkeys', 'account_requests', 'trade_log', 'watch_lists', 'bots', 'bot_trades', 'bot_events', 'paper_positions', 'paper_orders', 'paper_trades']);
 
 /** The admin (id 1) every new database starts with, without e-mail or password (FD-USERS §3). */
 export const SEED_ADMIN = `SET IDENTITY_INSERT users ON;
@@ -514,6 +519,120 @@ export const MIGRATIONS: string[][] = [
     );
     CREATE INDEX bot_events_bot ON bot_events(bot_id, id);`,
   ],
+  // 11 — FD-TRADES: a bot's trade keeps the account and the market it was made on (null account: Simulare) and its
+  // levels, for the account's trade history. Old rows: the bot's account and market; the levels of a Slingshot entry from
+  // its `enter` event (same bot, symbol and moment). A new column is seen only by a later batch.
+  [
+    `ALTER TABLE bot_trades ADD account_id INT NULL, market ${t(8)} NULL, lev FLOAT NULL, sl FLOAT NULL, tp FLOAT NULL;`,
+    `CREATE INDEX bot_trades_account ON bot_trades(account_id, closed_at);
+    UPDATE t SET account_id = CASE WHEN b.execution = N'real' THEN b.account_id END, market = b.market FROM bot_trades t JOIN bots b ON b.id = t.bot_id;`,
+    `UPDATE t SET sl = TRY_CAST(JSON_VALUE(e.detail, '$.sl') AS FLOAT), tp = TRY_CAST(JSON_VALUE(e.detail, '$.tp') AS FLOAT), lev = TRY_CAST(JSON_VALUE(e.detail, '$.leverage') AS FLOAT)
+    FROM bot_trades t
+    CROSS APPLY (SELECT TOP (1) x.detail FROM bot_events x WHERE x.bot_id = t.bot_id AND x.kind = N'enter' AND x.symbol = t.symbol AND x.at = t.opened_at AND ISJSON(x.detail) = 1 ORDER BY x.id DESC) e;`,
+  ],
+  // 12 — FD-CALACTUAL §3: the results a company reported (TradingView), kept apart from the calendar's events, which
+  // the earnings refresh rewrites; one row per stock and day. §4: an indicator's former name the page knows.
+  [
+    `CREATE TABLE earn_results (
+      symbol ${t(40)} NOT NULL,
+      day ${t(10)} NOT NULL,
+      released_at BIGINT NULL,
+      eps FLOAT NULL,
+      eps_forecast FLOAT NULL,
+      eps_surprise_pct FLOAT NULL,
+      revenue FLOAT NULL,
+      revenue_forecast FLOAT NULL,
+      revenue_surprise_pct FLOAT NULL,
+      currency ${t(8)} NULL,
+      fetched_at BIGINT NOT NULL,
+      CONSTRAINT earn_results_pk PRIMARY KEY (symbol, day)
+    );
+    CREATE INDEX earn_results_day ON earn_results(day);`,
+    // FD-CALACTUAL §4: the former name the page knows, for an indicator the source renamed.
+    `ALTER TABLE econ_indicators ADD alt_name ${t('MAX')} NULL;`,
+  ],
+  // 13 — FD-PAPER: Paper Trading profiles (an account of their own, `exchange = paper`, its market in `kind`), with their
+  // money and settings, positions (spot holdings, futures, shares), waiting orders and closed trades.
+  [
+    `ALTER TABLE exchange_accounts ADD kind ${t(10)} NULL;`,
+    `CREATE TABLE paper_accounts (
+      account_id INT NOT NULL PRIMARY KEY REFERENCES exchange_accounts(id) ON DELETE CASCADE,
+      kind ${t(10)} NOT NULL,
+      budget FLOAT NOT NULL,
+      cash FLOAT NOT NULL,
+      commission_type ${t(10)} NOT NULL,
+      commission_value FLOAT NOT NULL,
+      reset_at BIGINT NOT NULL,
+      checked_at BIGINT NULL
+    );
+    CREATE TABLE paper_positions (
+      id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+      account_id INT NOT NULL REFERENCES exchange_accounts(id) ON DELETE CASCADE,
+      market ${t(8)} NOT NULL,
+      symbol ${t(40)} NOT NULL,
+      side ${t(5)} NOT NULL,
+      qty FLOAT NOT NULL,
+      entry FLOAT NOT NULL,
+      leverage FLOAT NOT NULL,
+      margin_mode ${t(10)} NOT NULL,
+      margin FLOAT NOT NULL,
+      sl FLOAT NULL,
+      tp FLOAT NULL,
+      fees FLOAT NOT NULL,
+      opened_at BIGINT NOT NULL,
+      updated_at BIGINT NOT NULL,
+      CONSTRAINT paper_positions_one UNIQUE (account_id, market, symbol)
+    );
+    CREATE TABLE paper_orders (
+      id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+      account_id INT NOT NULL REFERENCES exchange_accounts(id) ON DELETE CASCADE,
+      market ${t(8)} NOT NULL,
+      symbol ${t(40)} NOT NULL,
+      side ${t(4)} NOT NULL,
+      kind ${t(12)} NOT NULL,
+      qty FLOAT NOT NULL,
+      price FLOAT NULL,
+      trigger_price FLOAT NULL,
+      leverage FLOAT NULL,
+      margin_mode ${t(10)} NULL,
+      reduce_only BIT NOT NULL DEFAULT 0,
+      sl FLOAT NULL,
+      tp FLOAT NULL,
+      triggered BIT NOT NULL DEFAULT 0,
+      reserved FLOAT NOT NULL DEFAULT 0,
+      created_at BIGINT NOT NULL,
+      checked_at BIGINT NOT NULL
+    );
+    CREATE INDEX paper_orders_account ON paper_orders(account_id);
+    CREATE TABLE paper_trades (
+      id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+      account_id INT NOT NULL REFERENCES exchange_accounts(id) ON DELETE CASCADE,
+      market ${t(8)} NOT NULL,
+      symbol ${t(40)} NOT NULL,
+      side ${t(5)} NOT NULL,
+      qty FLOAT NOT NULL,
+      entry FLOAT NOT NULL,
+      [exit] FLOAT NOT NULL,
+      pnl FLOAT NOT NULL,
+      fees FLOAT NOT NULL,
+      leverage FLOAT NOT NULL,
+      sl FLOAT NULL,
+      tp FLOAT NULL,
+      opened_at BIGINT NOT NULL,
+      closed_at BIGINT NOT NULL,
+      reason ${t(16)} NOT NULL
+    );
+    CREATE INDEX paper_trades_account ON paper_trades(account_id, closed_at);`,
+  ],
+  // 14 — FIX-PAPERLEV: a profile's spot coins become positions like the others (leverage 1, their cost held as margin,
+  // not spent): the cost goes back into the money, and is held as the position's margin.
+  [
+    `UPDATE a SET cash = a.cash + x.cost FROM paper_accounts a JOIN (SELECT account_id, SUM(qty * entry) AS cost FROM paper_positions WHERE market = N'spot' AND margin = 0 GROUP BY account_id) x ON x.account_id = a.account_id;`,
+    `UPDATE paper_positions SET margin = qty * entry, leverage = 1 WHERE market = N'spot' AND margin = 0;`,
+  ],
+  // 15 — FIX-SOURCES: FXStreet answers Azure with 403 (Cloudflare blocks its data-center addresses, since 16 Oct 2026):
+  // the built-in source is turned off once; the user may turn it on again (Setări → Admin → Surse).
+  [`UPDATE sources SET enabled = 0 WHERE id = N'fxstreet' AND builtin = 1;`],
 ];
 
 const VERSION_TABLE = "OBJECT_ID(QUOTENAME(SCHEMA_NAME()) + N'.schema_version', N'U')";

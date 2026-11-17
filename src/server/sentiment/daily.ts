@@ -14,9 +14,9 @@ export const MAX_FINALIZE_DAYS = 120;
 /**
  * Version of the way the index weighs news. A higher one than the history was built with recomputes it once
  * (`upgradeHistory`). 2 = FD-IMPACT: Claude's importance, geopolitics at 0.8. 3 = FD-MACRORULES: macro by the user's
- * rules, the other news moved to their subject.
+ * rules, the other news moved to their subject. 4 = FIX-SENTWEIGHT: energy and AI stories × 1.5.
  */
-export const INDEX_VERSION = 3;
+export const INDEX_VERSION = 4;
 export const DAILY_JOB = 'sentiment.daily';
 /** Job data of the maintenance job: the latest retention threshold applied (news older than it are gone). */
 export const MAINTENANCE_JOB = 'maintenance';
@@ -234,7 +234,7 @@ export class DailySentimentService {
       const w = why.get(d.id);
       if (w) d.why = w;
       const t = terms.get(d.id);
-      if (t) d.weighs = { relevance: t.relevance, impact: t.impact, sourceWeight: t.sourceWeight, spec: t.spec, flags: t.flags, decay: t.decay, clusterN: t.clusterN, cap: t.cap, share: t.share };
+      if (t) d.weighs = { relevance: t.relevance, impact: t.impact, sourceWeight: t.sourceWeight, spec: t.spec, theme: t.theme, flags: t.flags, decay: t.decay, clusterN: t.clusterN, cap: t.cap, share: t.share };
       const m = moved.get(d.id);
       if (m) {
         d.without = m.without;

@@ -33,8 +33,8 @@ export function periodStart(period: StatsPeriod, now: number, tz: string): numbe
 /** When a closed position was closed (KuCoin `closeTime`, the others' update time). */
 export const closedAt = (p: Position): number => Number(p.lastUpdateTimestamp ?? p.timestamp ?? 0);
 
-/** A closed position's identity across overlapping requests. */
-function keyOf(p: Position): string {
+/** A closed position's identity across overlapping requests (FD-TRADES: and its row's key in the history). */
+export function keyOf(p: Position): string {
   const info = (p.info ?? {}) as Record<string, unknown>;
   const id = p.id ?? info.closeId ?? info.posId ?? info.orderId;
   return id !== undefined && id !== null && id !== '' ? `${p.symbol}|${String(id)}` : `${p.symbol}|${closedAt(p)}|${String(p.realizedPnl)}`;

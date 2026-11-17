@@ -1,14 +1,14 @@
 // The grid (FD-BOT §4): each grid between two lines buys at its low line and sells at its high one (a long), or the
 // other way round (a short). At each look, every grid the price has reached moves; together they make one order.
-import { gridPlan, reached, type GridConfig } from '../../shared/bot.ts';
+import { gridPlan, reached, type BotMarginMode, type GridConfig } from '../../shared/bot.ts';
 import type { GridState } from './state.ts';
 
 /**
  * The grid at `price`, before its start order (the grids that start full are filled by it). With a start price not yet
  * reached it waits; `refPrice` (the price when the bot was made) says whether the price has to rise or fall to it. A
- * Neutral grid's sides follow the price it starts at: it is made again then.
+ * Neutral grid's sides follow the price it starts at: it is made again then. `mm`: its futures margin (FIX-BOTMARGIN).
  */
-export function initGrid(cfg: GridConfig, investment: number, lev: number, price: number, refPrice: number | null): GridState {
+export function initGrid(cfg: GridConfig, investment: number, lev: number, price: number, refPrice: number | null, mm?: BotMarginMode): GridState {
   const plan = gridPlan(cfg, investment, lev, 0, price);
   const ref = refPrice ?? price;
   const waiting = cfg.trigger !== null ? { trigger: cfg.trigger, above: cfg.trigger > ref } : null;
@@ -16,6 +16,7 @@ export function initGrid(cfg: GridConfig, investment: number, lev: number, price
     lines: plan.lines,
     qty: plan.qty,
     lev,
+    ...(mm ? { mm } : {}),
     waiting: waiting && !reached(price, waiting.trigger, waiting.above) ? waiting : null,
     started: false,
     slots: plan.slots.map((s) => ({ side: s.side, entry: null, openedAt: null, fees: 0 })),

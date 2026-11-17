@@ -1,19 +1,23 @@
 // The bot form (FD-BOT §1–§6): where it trades, the strategy's settings, the limits, the period, the safety; under them
-// the server's summary of what the bot will do (POST /api/bots/check). A bot that runs edits only what may change (§7).
+// the server's summary of what the bot will do (POST /api/bots/check). A bot that exists edits every setting the same
+// way (FD-BOTEDIT), with its own check: what becomes of its open positions too.
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { clsx } from 'clsx';
 import { AlertTriangle, Loader2, Plus, X } from 'lucide-react';
-import { CRYPTO_PAIR_RE, defaultBotName, END_ACTION_RO, STOCK_TICKER_RE, WEIGHT_KEYS, WEIGHT_RO, type BotCheck, type BotDetail, type BotEdit, type BotEndAction } from '../../../shared/bot.ts';
+import { BOT_MARGIN_MODES, CRYPTO_PAIR_RE, defaultBotName, END_ACTION_RO, ENTRY_RO, MARGIN_HINT_PAPER_RO, MARGIN_HINT_RO, MARGIN_RO, MIN_TRADE_PROFIT, STOCK_TICKER_RE, WEIGHT_KEYS, WEIGHT_RO, type BotCheck, type BotDetail, type BotEdit, type BotEndAction, type BotMarginMode, type BotTransition, type PositionsMode } from '../../../shared/bot.ts';
+import { isPaperExchange, providerById } from '../../../shared/providers.ts';
+import { commissionText } from '../../../shared/paper.ts';
+import type { AccountView } from '../../../shared/api-types.ts';
 import { TIMEFRAMES, type Timeframe } from '../../../shared/time.ts';
 import { isDemoEnv, TRADING, type TradingCaps } from '../../../shared/trading.ts';
 import { api, errorMessage } from '../../api.ts';
-import { useWatchlist } from '../../hooks.ts';
-import { fmtNum, fmtPrice, autoDigits } from '../../format.ts';
+import { useTz, useWatchlist } from '../../hooks.ts';
+import { fmtDateTime, fmtNum, fmtPrice, autoDigits } from '../../format.ts';
 import { useTradingCaps } from '../OrderTicket.tsx';
 import { Seg, Warning } from '../ui.tsx';
 import { Check, Field, ReadOnly, Section } from './bot-ui.tsx';
-import { longPatch, marketPatch, ratioOf, toInput, zoneText, type BotForm } from './bot-form.ts';
+import { longPatch, marketPatch, numText, ratioOf, toInput, withoutSymbol, zoneText, type BotForm } from './bot-form.ts';
 
 export const BOTS_KEY = ['bots'] as const;
 
@@ -45,7 +49,10 @@ export function BotFormView({ form, setForm, edit, onDone, onCancel }: { form: B
   const qc = useQueryClient();
   const caps = useTradingCaps();
   const watch = useWatchlist();
+  const tz = useTz();
   const [ack, setAck] = useState(false);
+  /** FD-BOTEDIT §3: the edit's choice for the open positions the new settings cannot keep (null: the check's default). */
+  const [positions, setPositions] = useState<PositionsMode | null>(null);
   const [symbolText, setSymbolText] = useState('');
   const stocks = form.market === 'stock';
   const futures = form.market === 'futures';
@@ -59,34 +66,59 @@ export function BotFormView({ form, setForm, edit, onDone, onCancel }: { form: B
   const setDca = (p: Partial<BotForm['dca']>) => set({ dca: { ...form.dca, ...p } });
   const setPremium = (p: Partial<BotForm['premium']>) => set({ premium: { ...form.premium, ...p } });
 
-  // Coins trade on an exchange, shares at a broker (FD-BOT §10): the accounts of the bot's area where trading is on.
-  const accounts = (caps.data?.accounts ?? []).filter((a) => a.enabled && (stocks ? a.kind === 'stocks' && a.markets.includes('stock') : a.kind === 'crypto' && a.markets.some((m) => m === 'spot' || m === 'futures')));
+  // Coins trade on an exchange, shares at a broker (FD-BOT §10): the accounts of the bot's area where trading is on; at an
+  // edit, the bot's own too (its trading switched off since: the check says so, the form does not change it silently).
+  // FD-PAPER §7: the Paper Trading profiles first (a simulation), then the real accounts.
+  const accounts = (caps.data?.accounts ?? [])
+    .filter((a) => (a.enabled && (stocks ? a.kind === 'stocks' && a.markets.includes('stock') : a.kind === 'crypto' && a.markets.some((m) => m === 'spot' || m === 'futures'))) || (edit !== null && a.accountId === edit.input.accountId))
+    .sort((a, b) => Number(isPaperExchange(b.exchange)) - Number(isPaperExchange(a.exchange)));
+  // A profile's commission is the bot's (FD-PAPER §7): read with the accounts.
+  const views = useQuery({ queryKey: ['accounts'], queryFn: () => api.get<AccountView[]>('/api/accounts') });
+  const paperFee = (accountId: number): string | null => {
+    const p = views.data?.find((v) => v.id === accountId)?.paper;
+    if (!p) return null;
+    return numText(p.commissionType === 'percent' ? p.commissionValue : 0);
+  };
   const account = accounts.find((a) => a.accountId === form.accountId) ?? null;
   const etoroOf = (a: TradingCaps | null) => Boolean(a && TRADING[a.exchange as keyof typeof TRADING]?.etoro);
+  const paper = account !== null && isPaperExchange(account.exchange);
+  const paperProfile = paper ? views.data?.find((v) => v.id === account?.accountId)?.paper : undefined;
+  const paperCommission = paperProfile ? `${commissionText(paperProfile.commissionType, paperProfile.commissionValue)} (al profilului)` : null;
+  // FIX-BOTMARGIN: Bybit's account sets the margin itself (Sentiq does not change it), as in the order form.
+  const accountMargin = form.exec === 'real' && account !== null && TRADING[account.exchange as keyof typeof TRADING]?.futures?.marginModes === null;
   /** The account picked: its market, and on shares long only unless it is eToro. */
-  const accountPatch = (a: TradingCaps): Partial<BotForm> =>
-    stocks ? { accountId: a.accountId, ...(etoroOf(a) ? {} : longPatch(form)) } : { accountId: a.accountId, ...marketPatch(form, a.markets.includes(form.market) ? form.market : (a.markets.find((m) => m !== 'stock') ?? 'spot')) };
-  const { input, error } = useMemo(() => toInput(form), [form]);
-  const body = useDebounced(input ? JSON.stringify(input) : null, 400);
+  const accountPatch = (a: TradingCaps): Partial<BotForm> => {
+    const fee = isPaperExchange(a.exchange) ? paperFee(a.accountId) : null;
+    const withFee = fee !== null ? { fee } : {};
+    return stocks
+      ? { exec: 'real', accountId: a.accountId, ...withFee, ...(etoroOf(a) || isPaperExchange(a.exchange) ? {} : longPatch(form)) }
+      : { exec: 'real', accountId: a.accountId, ...withFee, ...marketPatch(form, a.markets.includes(form.market) ? form.market : (a.markets.find((m) => m !== 'stock') ?? 'spot'), isPaperExchange(a.exchange)) };
+  };
+  // FIX-PAPERLEV: on a Paper Trading profile every market has leverage and margin (as futures).
+  const margined = futures || paper;
+  const { input, error } = useMemo(() => toInput(form, Date.now(), margined), [form, margined]);
+  // At an edit, the bot's own check (FD-BOTEDIT §4): its open positions, and the choice for them.
+  const body = useDebounced(input ? JSON.stringify(edit ? ({ input, ...(positions ? { positions } : {}) } satisfies BotEdit) : input) : null, 400);
   const check = useQuery({
-    queryKey: ['bots', 'check', body],
-    queryFn: () => api.post<BotCheck>('/api/bots/check', JSON.parse(body as string)),
-    enabled: body !== null && !edit,
+    queryKey: ['bots', 'check', edit?.id ?? null, body],
+    queryFn: () => api.post<BotCheck>(edit ? `/api/bots/${edit.id}/check` : '/api/bots/check', JSON.parse(body as string)),
+    enabled: body !== null,
     staleTime: 15_000,
     retry: false,
   });
+  // The last transition stays while the check runs again (its choice does not blink away and back).
+  const [lastTransition, setLastTransition] = useState<BotTransition | null>(null);
+  useEffect(() => {
+    if (check.data) setLastTransition(check.data.transition ?? null);
+  }, [check.data]);
+  const transition = check.data ? (check.data.transition ?? null) : lastTransition;
+  const mode: PositionsMode | null = transition?.modes.length ? (positions !== null && transition.modes.includes(positions) ? positions : transition.mode) : null;
   const save = useMutation({
     mutationFn: () => {
       if (!input) throw new Error(error ?? 'Setări invalide.');
       if (!edit) return api.post<BotDetail>('/api/bots', input);
-      const patch: BotEdit = { name: input.name, endsAt: input.endsAt, endAction: input.endAction, dailyLoss: input.dailyLoss, lossStop: input.lossStop, fee: input.fee };
-      if (edit.strategy !== 'grid') patch.maxAmount = input.maxAmount;
-      if (input.strategy === 'premium') {
-        patch.premium = input.premium;
-        patch.tf = input.tf;
-        if (input.market === 'futures') patch.leverage = input.leverage;
-      }
-      return api.put<BotDetail>(`/api/bots/${edit.id}`, patch);
+      const e: BotEdit = { input, ...(mode ? { positions: mode } : {}) };
+      return api.put<BotDetail>(`/api/bots/${edit.id}`, e);
     },
     onSuccess: (bot) => {
       void qc.invalidateQueries({ queryKey: BOTS_KEY });
@@ -94,11 +126,21 @@ export function BotFormView({ form, setForm, edit, onDone, onCancel }: { form: B
     },
   });
 
-  // Real trading: only coins, only on an account where trading is on.
+  // Real money is acknowledged for the account it names: another account asks again.
+  useEffect(() => setAck(false), [form.exec, form.accountId]);
+
+  // The first account (a Paper Trading profile when there is one), until one is chosen (an edited bot's own stays).
   useEffect(() => {
-    if (form.exec === 'real' && !account && accounts[0] && !edit) set(accountPatch(accounts[0]));
+    if (form.accountId === null && accounts[0]) set(accountPatch(accounts[0]));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once the accounts are known
-  }, [form.exec, accounts.length]);
+  }, [accounts.length]);
+  // A profile's commission known only once the accounts are read: the bot's then.
+  useEffect(() => {
+    if (!paper || form.accountId === null) return;
+    const fee = paperFee(form.accountId);
+    if (fee !== null && fee !== form.fee) set({ fee });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- when the profiles are read
+  }, [paper, form.accountId, views.data]);
 
   const suggestions = (watch.data ?? []).filter((w) => (stocks ? w.kind === 'stock' : w.kind === 'crypto')).map((w) => (stocks ? w.coin : `${w.coin}/${w.quote}`));
   const addSymbol = () => {
@@ -110,16 +152,20 @@ export function BotFormView({ form, setForm, edit, onDone, onCancel }: { form: B
   const symbolOk = (s: string) => (stocks ? STOCK_TICKER_RE.test(s) : CRYPTO_PAIR_RE.test(s));
   const many = form.strategy === 'premium';
   const marketOptions = form.exec === 'real' && account ? account.markets.filter((m): m is 'spot' | 'futures' => m === 'spot' || m === 'futures') : (['spot', 'futures'] as const);
-  const longOnly = form.market === 'spot' || (stocks && form.exec === 'real' && !etoroOf(account));
+  const longOnly = (form.market === 'spot' && !paper) || (stocks && !etoroOf(account) && !paper);
   /** The Slingshot bot's direction as the form shows it. */
   const direction = longOnly ? 'long' : form.premium.direction;
   const longOnlyText = (
     <>
-      Long <span className="text-faint">· {stocks ? 'short pe acțiuni doar la eToro' : 'short doar pe futures'}</span>
+      Long <span className="text-faint">· {stocks ? 'short pe acțiuni doar la eToro sau pe Paper Trading' : 'short doar pe futures sau pe Paper Trading'}</span>
     </>
   );
   const cur = stocks ? 'USD' : (form.symbols[0]?.split('/')[1] ?? 'USDT');
-  const ready = input !== null && (edit !== null || (!check.data?.errors.length && check.data !== undefined)) && (form.exec !== 'real' || ack || edit !== null);
+  /** Real money on an account the bot did not trade on before (a new bot, or an edit to Real or to another account). */
+  const askAck = form.exec === 'real' && account !== null && !paper && (!edit || edit.input.exec !== 'real' || edit.input.accountId !== form.accountId);
+  const ready = input !== null && check.data !== undefined && !check.data.errors.length && (!askAck || ack);
+  /** FD-BOTEDIT §1: a bot that has started keeps its start. */
+  const started = edit !== null && edit.status !== 'scheduled';
   const scheduled = input?.startsAt !== null && input?.startsAt !== undefined;
   const price = check.data?.price ?? null;
 
@@ -131,122 +177,107 @@ export function BotFormView({ form, setForm, edit, onDone, onCancel }: { form: B
         if (ready) save.mutate();
       }}
     >
-      <Section title={edit ? 'Botul' : 'Unde tranzacționează'}>
+      <Section title="Unde tranzacționează">
         <Field label="Nume">
           <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value, nameTyped: true })} maxLength={60} />
         </Field>
-        {edit ? (
-          <>
-            <p className="text-[13px] text-muted">
-              {edit.symbols.join(', ')} · {edit.market === 'stock' ? 'Acțiuni' : edit.market === 'futures' ? 'Futures' : 'Spot'} · {edit.exec === 'paper' ? 'Simulare' : `Real, ${edit.account?.label ?? 'cont șters'}`}
-            </p>
-            {edit.strategy === 'premium' && (
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <Field label="Timeframe-ul semnalelor" hint="Botul îl preia la următoarea verificare (≤ 30 s) și ia semnalele de pe lumânările care se închid după ea; pozițiile deschise își păstrează SL / TP-ul.">
-                  <TfSelect value={form.tf} onChange={(tf) => set({ tf })} />
-                </Field>
-              </div>
-            )}
-          </>
-        ) : (
-          <>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <Field label="Execuția" hint={form.exec === 'paper' ? 'Nicio comandă nu pleacă: botul face tot, la prețul de atunci.' : stocks ? 'Doar cât bursa e deschisă.' : undefined}>
-                <div className="seg" role="group" aria-label="Execuția">
-                  <button type="button" aria-pressed={form.exec === 'paper'} onClick={() => set({ exec: 'paper', accountId: null })}>
-                    Simulare
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          {/* FD-PAPER §7: no „Execuția”: a simulation is a Paper Trading profile, chosen here like any account. */}
+          <Field
+            label="Contul"
+            hint={
+              accounts.length === 0
+                ? `Niciun cont ${stocks ? 'de acțiuni' : 'crypto'} cu tranzacționarea pornită. Pentru o simulare, fă un cont Paper Trading (Tranzacții → Adaugă un cont).`
+                : paper
+                  ? `Paper Trading: niciun ordin real.${stocks ? ' Doar cât bursa e deschisă.' : ''}`
+                  : stocks
+                    ? 'Ordine reale. Doar cât bursa e deschisă.'
+                    : 'Ordine reale.'
+            }
+          >
+            <select
+              value={form.accountId ?? ''}
+              disabled={accounts.length === 0}
+              onChange={(e) => {
+                const a = accounts.find((x) => x.accountId === Number(e.target.value));
+                if (a) set(accountPatch(a));
+              }}
+            >
+              {accounts.length === 0 && <option value="">—</option>}
+              {accounts.map((a) => (
+                <option key={a.accountId} value={a.accountId}>
+                  {a.label}
+                  {isPaperExchange(a.exchange) ? ' · Paper' : ` · Real${isDemoEnv(a.env) ? ' (DEMO)' : ''}`}
+                </option>
+              ))}
+            </select>
+          </Field>
+          {!stocks && (
+            <Field label="Piața" group>
+              <div className="seg" role="group" aria-label="Piața">
+                {marketOptions.map((m) => (
+                  <button key={m} type="button" aria-pressed={form.market === m} onClick={() => set(marketPatch(form, m, paper))}>
+                    {m === 'spot' ? 'Spot' : 'Futures'}
                   </button>
-                  <button type="button" aria-pressed={form.exec === 'real'} disabled={accounts.length === 0} title={accounts.length === 0 ? `Niciun cont ${stocks ? 'de acțiuni' : 'crypto'} cu tranzacționarea pornită (Tranzacții).` : undefined} onClick={() => set({ exec: 'real' })}>
-                    Real
-                  </button>
-                </div>
-              </Field>
-              {form.exec === 'real' && (
-                <Field label="Contul">
-                  <select
-                    value={form.accountId ?? ''}
-                    onChange={(e) => {
-                      const a = accounts.find((x) => x.accountId === Number(e.target.value));
-                      if (a) set(accountPatch(a));
-                    }}
-                  >
-                    {accounts.map((a) => (
-                      <option key={a.accountId} value={a.accountId}>
-                        {a.label}
-                        {isDemoEnv(a.env) ? ' (DEMO)' : ''}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-              )}
-              {!stocks && (
-                <Field label="Piața">
-                  <div className="seg" role="group" aria-label="Piața">
-                    {marketOptions.map((m) => (
-                      <button key={m} type="button" aria-pressed={form.market === m} onClick={() => set(marketPatch(form, m))}>
-                        {m === 'spot' ? 'Spot' : 'Futures'}
-                      </button>
-                    ))}
-                  </div>
-                </Field>
-              )}
-              {form.strategy === 'premium' && (
-                <Field label="Timeframe-ul semnalelor">
-                  <TfSelect value={form.tf} onChange={(tf) => set({ tf })} />
-                </Field>
-              )}
-            </div>
-            <Field label={many ? `Simbolurile (${form.symbols.length} din 10)` : 'Simbolul'} hint={many ? 'Botul urmărește fiecare simbol; o singură poziție pe simbol.' : undefined}>
-              {many ? (
-                <div className="flex flex-col gap-2">
-                  {form.symbols.length > 0 && (
-                    <div className="flex flex-wrap gap-1.5">
-                      {form.symbols.map((s) => (
-                        <span key={s} className={clsx('chip num', !symbolOk(s) && 'border-bear text-bear')}>
-                          {s}
-                          <button type="button" className="-mr-1 flex size-5 items-center justify-center rounded-full text-faint hover:text-text" aria-label={`Scoate ${s}`} onClick={() => set({ symbols: form.symbols.filter((x) => x !== s) })}>
-                            <X size={12} aria-hidden />
-                          </button>
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                  <div className="flex gap-2">
-                    <input
-                      value={symbolText}
-                      onChange={(e) => setSymbolText(e.target.value.toUpperCase())}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          e.preventDefault();
-                          addSymbol();
-                        }
-                      }}
-                      list="bot-symbols"
-                      placeholder={stocks ? 'MSFT' : 'ETH/USDT'}
-                      className="num min-w-0 flex-1"
-                      autoComplete="off"
-                      spellCheck={false}
-                      aria-label="Adaugă un simbol"
-                    />
-                    <button type="button" className="btn" onClick={addSymbol} disabled={!symbolText.trim() || form.symbols.length >= 10}>
-                      <Plus size={15} aria-hidden /> Adaugă
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <input value={form.symbols[0] ?? ''} onChange={(e) => set({ symbols: [e.target.value.toUpperCase()] })} list="bot-symbols" className="num" autoComplete="off" spellCheck={false} />
-              )}
-              <datalist id="bot-symbols">
-                {suggestions.map((s) => (
-                  <option key={s} value={s} />
                 ))}
-              </datalist>
+              </div>
             </Field>
-          </>
-        )}
+          )}
+          {form.strategy === 'premium' && (
+            <Field label="Timeframe-ul semnalelor" hint={edit ? 'Botul îl preia la următoarea verificare (≤ 30 s) și ia semnalele de pe lumânările care se închid după ea; pozițiile deschise își păstrează SL / TP-ul.' : undefined}>
+              <TfSelect value={form.tf} onChange={(tf) => set({ tf })} />
+            </Field>
+          )}
+        </div>
+        <Field label={many ? `Simbolurile (${form.symbols.length} din 10)` : 'Simbolul'} group={many} hint={many ? 'Botul urmărește fiecare simbol; o singură poziție pe simbol.' : undefined}>
+          {many ? (
+            <div className="flex flex-col gap-2">
+              {form.symbols.length > 0 && (
+                <div className="flex flex-wrap gap-1.5">
+                  {form.symbols.map((s) => (
+                    <span key={s} className={clsx('chip num', !symbolOk(s) && 'border-bear text-bear')}>
+                      {s}
+                      <button type="button" className="-mr-1 flex size-5 items-center justify-center rounded-full text-faint hover:text-text" aria-label={`Scoate ${s}`} onClick={() => set(withoutSymbol(form, s))}>
+                        <X size={12} aria-hidden />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              <div className="flex gap-2">
+                <input
+                  value={symbolText}
+                  onChange={(e) => setSymbolText(e.target.value.toUpperCase())}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      addSymbol();
+                    }
+                  }}
+                  list="bot-symbols"
+                  placeholder={stocks ? 'MSFT' : 'ETH/USDT'}
+                  className="num min-w-0 flex-1"
+                  autoComplete="off"
+                  spellCheck={false}
+                  aria-label="Adaugă un simbol"
+                />
+                <button type="button" className="btn" onClick={addSymbol} disabled={!symbolText.trim() || form.symbols.length >= 10}>
+                  <Plus size={15} aria-hidden /> Adaugă
+                </button>
+              </div>
+            </div>
+          ) : (
+            <input value={form.symbols[0] ?? ''} onChange={(e) => set({ symbols: [e.target.value.toUpperCase()] })} list="bot-symbols" className="num" autoComplete="off" spellCheck={false} />
+          )}
+          <datalist id="bot-symbols">
+            {suggestions.map((s) => (
+              <option key={s} value={s} />
+            ))}
+          </datalist>
+        </Field>
       </Section>
 
-      {form.strategy === 'grid' && !edit && (
+      {form.strategy === 'grid' && (
         <Section title="Grila" aside={price !== null ? <span className="text-[12.5px] text-muted">Prețul acum: <span className="num text-text">{fmtPrice(price, autoDigits(price))}</span></span> : null}>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
             <Field label="Limita de jos">
@@ -260,13 +291,13 @@ export function BotFormView({ form, setForm, edit, onDone, onCancel }: { form: B
             </Field>
           </div>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <Field label="Spațierea">
+            <Field label="Spațierea" group>
               <Seg label="Spațierea" value={form.grid.spacing} options={[{ value: 'arithmetic', label: 'Aritmetică' }, { value: 'geometric', label: 'Geometrică' }]} onChange={(v) => setGrid({ spacing: v })} />
             </Field>
             {longOnly ? (
               <ReadOnly label="Direcția">{longOnlyText}</ReadOnly>
             ) : (
-              <Field label="Direcția">
+              <Field label="Direcția" group>
                 <Seg label="Direcția" value={form.grid.direction} options={[{ value: 'long', label: 'Long' }, { value: 'short', label: 'Short' }, { value: 'neutral', label: 'Neutru' }]} onChange={(v) => setGrid({ direction: v })} />
               </Field>
             )}
@@ -285,13 +316,13 @@ export function BotFormView({ form, setForm, edit, onDone, onCancel }: { form: B
         </Section>
       )}
 
-      {form.strategy === 'dca' && !edit && (
+      {form.strategy === 'dca' && (
         <Section title="DCA">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             {longOnly ? (
               <ReadOnly label="Direcția">{longOnlyText}</ReadOnly>
             ) : (
-              <Field label="Direcția">
+              <Field label="Direcția" group>
                 <Seg label="Direcția DCA" value={form.dca.direction} options={[{ value: 'long', label: 'Long' }, { value: 'short', label: 'Short' }]} onChange={(v) => setDca({ direction: v })} />
               </Field>
             )}
@@ -345,27 +376,20 @@ export function BotFormView({ form, setForm, edit, onDone, onCancel }: { form: B
               {longOnly ? (
                 <ReadOnly label="Direcția">{longOnlyText}</ReadOnly>
               ) : (
-                <Field label="Direcția">
+                <Field label="Direcția" group>
                   <Seg label="Direcția Slingshot" value={form.premium.direction} options={[{ value: 'long', label: 'Long' }, { value: 'short', label: 'Short' }, { value: 'both', label: 'Ambele' }]} onChange={(v) => setPremium({ direction: v })} />
                 </Field>
               )}
-              <Field label="Tranzacții deschise odată">
-                <Num value={form.premium.maxOpen} onChange={(v) => setPremium({ maxOpen: v })} />
+              {/* FIX-BOTSHORTS: at the close of the first bar with the setup forming (the levels moved at the confirmation), or on the confirmed signal. */}
+              <Field label="Intrarea" group>
+                <Seg label="Intrarea" value={form.premium.entry} options={[{ value: 'setup', label: ENTRY_RO.setup }, { value: 'signal', label: ENTRY_RO.signal }]} onChange={(v) => setPremium({ entry: v })} />
               </Field>
-              <Field label="Mărimea unei tranzacții">
-                <Seg label="Mărimea" value={form.premium.sizing} options={[{ value: 'fixed', label: 'Sumă fixă' }, { value: 'risk', label: 'Risc %' }]} onChange={(v) => setPremium({ sizing: v })} />
-              </Field>
-              {form.premium.sizing === 'fixed' ? (
-                <Field label={`Suma pe tranzacție (${cur}${futures ? ', marjă' : ''})`}>
-                  <Num value={form.premium.amount} onChange={(v) => setPremium({ amount: v })} />
-                </Field>
-              ) : (
-                <Field label="Riscul (% din suma maximă, la stop loss)">
-                  <Num value={form.premium.riskPct} onChange={(v) => setPremium({ riskPct: v })} />
-                </Field>
-              )}
+              <p className="text-[12.5px] text-muted sm:col-span-2">
+                <span className="text-text">La setup:</span> botul intră la închiderea primei lumânări pe care setup-ul Slingshot e în formare (eticheta de previzualizare de pe grafic). Stop loss-ul stă la maximul V1 (minimul, la long), unde Slingshot anulează setup-ul; take profit-ul e cel de pe grafic. La confirmare, SL-ul și TP-ul se mută la cele ale semnalului; dacă trendul se întoarce înainte, iese (cu „Ieși când trendul se întoarce”).{' '}
+                <span className="text-text">La confirmare:</span> așteaptă semnalul confirmat (stocasticul iese din supracumpărare / supravânzare).
+              </p>
               {/* FD-BOTSLRR / FD-BOTPCT: Slingshot's levels as they are, or a stop and a take profit of one's own; never both. */}
-              <Field label="Stop loss și take profit">
+              <Field label="Stop loss și take profit" group>
                 <Seg
                   label="Stop loss și take profit"
                   value={form.premium.levels}
@@ -392,9 +416,6 @@ export function BotFormView({ form, setForm, edit, onDone, onCancel }: { form: B
                   </p>
                 </>
               )}
-              <Field label={`Suma maximă pe tranzacție (${cur})`} hint="Opțional.">
-                <Num value={form.premium.maxPerTrade} onChange={(v) => setPremium({ maxPerTrade: v })} />
-              </Field>
             </div>
             <div className="flex flex-col gap-2">
               <Check checked={form.premium.exitOnTpSignal} onChange={(on) => setPremium({ exitOnTpSignal: on })}>
@@ -454,7 +475,7 @@ export function BotFormView({ form, setForm, edit, onDone, onCancel }: { form: B
               </div>
             </details>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <Field label="AI">
+              <Field label="AI" group>
                 <Seg label="AI" value={form.premium.ai} options={[{ value: 'off', label: 'Fără AI' }, { value: 'confirm', label: 'AI confirmă' }]} onChange={(v) => setPremium({ ai: v })} />
               </Field>
               {form.premium.ai === 'confirm' && (
@@ -466,46 +487,86 @@ export function BotFormView({ form, setForm, edit, onDone, onCancel }: { form: B
                 </Field>
               )}
             </div>
-            {form.premium.ai === 'confirm' && <p className="text-[12.5px] text-muted">Modelul din Setări → AI se uită la semnal, la scor, la știrile simbolului și la calendar înainte de fiecare intrare aprobată de reguli; poate doar să oprească o intrare.</p>}
+            {form.premium.ai === 'confirm' && <p className="text-[12.5px] text-muted">Modelul din Setări → AI se uită la semnal, la scor, la știrile simbolului și la calendar înainte de fiecare intrare aprobată de reguli. Poate opri o intrare, niciodată porni una refuzată, și alege suma ei, în intervalul botului.</p>}
           </Section>
         </>
       )}
 
       <Section title="Limitele">
+        {form.strategy === 'premium' && (
+          <p className="text-[12.5px] text-muted">
+            Botul împarte bugetul liber între tranzacțiile pe care le mai poate deschide, cel mult suma maximă pe fiecare{form.premium.ai === 'confirm' ? ', iar AI-ul alege suma fiecăreia în interval' : ''}. Nu intră într-o tranzacție care la take profit ar aduce
+            mai puțin de {MIN_TRADE_PROFIT} USD după comisioane.
+          </p>
+        )}
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-          {!(edit && edit.strategy === 'grid') && (
-            <Field label={`Suma maximă (${cur})`} hint={form.strategy === 'grid' ? 'Investiția grilei.' : futures ? 'Marja angajată, cel mult.' : 'Valoarea angajată, cel mult.'}>
+          {/* FIX-BOTBUDGET: a Slingshot bot's budget, the most a trade takes from it, how many trades share it. */}
+          {form.strategy === 'premium' ? (
+            <>
+              <Field label={`Bugetul botului (${cur})`} hint="Cât folosește botul, cel mult, în toate tranzacțiile lui deschise (marja, fără levier).">
+                <Num value={form.maxAmount} onChange={(v) => set({ maxAmount: v })} />
+              </Field>
+              <Field label={`Suma maximă pe tranzacție (${cur})`} hint={margined ? 'Cât ia, cel mult, o tranzacție din buget; poziția e suma × levierul.' : 'Cât ia, cel mult, o tranzacție din buget.'}>
+                <Num value={form.premium.maxPerTrade} onChange={(v) => setPremium({ maxPerTrade: v })} />
+              </Field>
+              <Field label="Tranzacții deschise odată" hint="Cel mult; cu mai puține simboluri, câte unul pe simbol.">
+                <Num value={form.premium.maxOpen} onChange={(v) => setPremium({ maxOpen: v })} />
+              </Field>
+            </>
+          ) : (
+            <Field label={`Suma maximă (${cur})`} hint={form.strategy === 'grid' ? 'Investiția grilei.' : margined ? 'Marja angajată, cel mult.' : 'Valoarea angajată, cel mult.'}>
               <Num value={form.maxAmount} onChange={(v) => set({ maxAmount: v })} />
             </Field>
           )}
-          {futures && !(edit && edit.strategy !== 'premium') && (
-            <Field label={form.strategy === 'premium' ? 'Levierul maxim' : 'Levierul'}>
+          {margined && (
+            <Field label="Levierul">
               <Num value={form.leverage} onChange={(v) => set({ leverage: v })} />
             </Field>
           )}
+          {margined &&
+            (accountMargin && account ? (
+              <ReadOnly label="Marja">Cea din contul {providerById(account.exchange)?.name ?? account.exchange}</ReadOnly>
+            ) : (
+              <Field label="Marja" hint={<MarginHint shown={form.marginMode} hints={paper ? MARGIN_HINT_PAPER_RO : MARGIN_HINT_RO} />}>
+                <select value={form.marginMode} onChange={(e) => set({ marginMode: e.target.value as BotMarginMode })}>
+                  {BOT_MARGIN_MODES.map((m) => (
+                    <option key={m} value={m}>
+                      {MARGIN_RO[m]}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            ))}
           <Field label={`Pierdere maximă pe zi (${cur})`} hint="Atinsă: nicio intrare până mâine.">
             <Num value={form.dailyLoss} onChange={(v) => set({ dailyLoss: v })} placeholder="fără" />
           </Field>
           <Field label={`Oprește la o pierdere de (${cur})`} hint="Închide tot și se oprește.">
             <Num value={form.lossStop} onChange={(v) => set({ lossStop: v })} placeholder="fără" />
           </Field>
-          <Field label="Comision (%)" hint={form.exec === 'paper' ? 'Scăzut la fiecare execuție.' : 'Pentru câștigul afișat.'}>
-            <Num value={form.fee} onChange={(v) => set({ fee: v })} />
-          </Field>
+          {/* FD-PAPER §7: a profile's commission is its own (Setări profil). */}
+          {paper ? (
+            <ReadOnly label="Comision">{paperCommission ?? '—'}</ReadOnly>
+          ) : (
+            <Field label="Comision (%)" hint="Pentru câștigul afișat.">
+              <Num value={form.fee} onChange={(v) => set({ fee: v })} />
+            </Field>
+          )}
         </div>
       </Section>
 
       <Section title="Perioada">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          {!edit && (
-            <Field label="Începe">
+          {started ? (
+            <ReadOnly label="Începe">A pornit pe {fmtDateTime(edit.startsAt, tz)}</ReadOnly>
+          ) : (
+            <Field label="Începe" group>
               <div className="flex flex-wrap items-center gap-2">
                 <Seg label="Începe" value={form.startsAt === null ? 'now' : 'at'} options={[{ value: 'now', label: 'Acum' }, { value: 'at', label: 'La data' }]} onChange={(v) => set({ startsAt: v === 'now' ? null : '' })} />
                 {form.startsAt !== null && <input type="datetime-local" value={form.startsAt} onChange={(e) => set({ startsAt: e.target.value })} aria-label="Data începutului" className="min-w-0" />}
               </div>
             </Field>
           )}
-          <Field label="Se termină">
+          <Field label="Se termină" group>
             <div className="flex flex-wrap items-center gap-2">
               <Seg label="Se termină" value={form.endsAt === null ? 'never' : 'at'} options={[{ value: 'never', label: 'Fără sfârșit' }, { value: 'at', label: 'La data' }]} onChange={(v) => set({ endsAt: v === 'never' ? null : '' })} />
               {form.endsAt !== null && <input type="datetime-local" value={form.endsAt} onChange={(e) => set({ endsAt: e.target.value })} aria-label="Data sfârșitului" className="min-w-0" />}
@@ -523,23 +584,33 @@ export function BotFormView({ form, setForm, edit, onDone, onCancel }: { form: B
         </div>
       </Section>
 
-      {!edit && (
-        <Section title="Ce va face botul">
-          {error ? (
-            <p className="text-[13px] text-bear">{error}</p>
-          ) : check.isError ? (
-            <p className="text-[13px] text-bear">{errorMessage(check.error)}</p>
-          ) : !check.data ? (
-            <p className="flex items-center gap-2 text-[13px] text-muted">
-              <Loader2 size={14} className="animate-spin" aria-hidden /> Se verifică…
-            </p>
-          ) : (
-            <CheckView check={check.data} currency={cur} />
-          )}
-        </Section>
-      )}
+      <Section title="Ce va face botul">
+        {/* FD-BOTEDIT §3: the open positions the new settings cannot keep, and the choice for them. */}
+        {mode !== null && transition && (
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {transition.modes.length > 1 ? (
+              <Field label="Pozițiile deschise acum" group>
+                <Seg label="Pozițiile deschise acum" value={mode} options={[{ value: 'finish', label: 'Se termină' }, { value: 'close', label: 'Se închid acum' }]} onChange={(v) => setPositions(v)} />
+              </Field>
+            ) : (
+              <ReadOnly label="Pozițiile deschise acum">Se închid la piață; grila pornește din nou</ReadOnly>
+            )}
+          </div>
+        )}
+        {error ? (
+          <p className="text-[13px] text-bear">{error}</p>
+        ) : check.isError ? (
+          <p className="text-[13px] text-bear">{errorMessage(check.error)}</p>
+        ) : !check.data ? (
+          <p className="flex items-center gap-2 text-[13px] text-muted">
+            <Loader2 size={14} className="animate-spin" aria-hidden /> Se verifică…
+          </p>
+        ) : (
+          <CheckView check={check.data} currency={cur} />
+        )}
+      </Section>
 
-      {form.exec === 'real' && !edit && account && (
+      {askAck && account && (
         <Check checked={ack} onChange={setAck}>
           Înțeleg că botul trimite ordine reale în contul <strong>{account.label}</strong>
           {isDemoEnv(account.env) ? ' (DEMO)' : ''} și le închide el însuși, doar cât timp serverul Sentiq rulează.
@@ -616,5 +687,21 @@ function CheckView({ check, currency }: { check: BotCheck; currency: string }) {
         </div>
       ))}
     </div>
+  );
+}
+
+/**
+ * FIX-BOTMARGIN: the words under „Marja”. All of them take the same place (the one shown over the others, which stay
+ * hidden), so another choice never makes the row taller and pushes the form down. FIX-PAPERLEV: a profile's own words.
+ */
+function MarginHint({ shown, hints }: { shown: BotMarginMode; hints: Record<BotMarginMode, string> }) {
+  return (
+    <span className="grid">
+      {(Object.keys(hints) as BotMarginMode[]).map((k) => (
+        <span key={k} className={clsx('[grid-area:1/1]', k !== shown && 'invisible')} aria-hidden={k !== shown}>
+          {hints[k]}
+        </span>
+      ))}
+    </span>
   );
 }

@@ -22,6 +22,8 @@ type Sent = '' | 'positive' | 'neutral' | 'negative' | 'pending';
 const NEW_MS = 15 * 60_000;
 const CAT_LABEL: Record<string, string> = { crypto: 'Crypto', stocks: 'Acțiuni', macro: 'Macro', geopolitics: 'Geopolitică', other: 'Altele' };
 const FLAG_LABEL: Record<string, string> = { sponsored: 'sponsorizat', speculative: 'speculativ', recap: 'rezumat', lowRelevance: 'relevanță scăzută' };
+/** FIX-SENTWEIGHT: the themes that weigh more in the sentiment (not a warning). */
+const THEME_LABEL: Record<string, string> = { energy: 'energie', ai: 'AI' };
 
 function NewsRow({ item, tz, stocks }: { item: NewsItemDto; tz: string; stocks: ReadonlySet<string> }) {
   const [open, setOpen] = useState(false);
@@ -29,11 +31,13 @@ function NewsRow({ item, tz, stocks }: { item: NewsItemDto; tz: string; stocks: 
   return (
     <li
       className={clsx(
-        'grid grid-cols-[52px_minmax(0,1fr)] gap-x-3 gap-y-2 px-4 py-3.5 sm:grid-cols-[64px_30px_minmax(0,1fr)_110px] sm:gap-x-4 sm:px-5',
+        // FIX-MOBILESYM2: on a phone two columns, the story and its score (the time is in the story's small top line).
+        'grid grid-cols-[minmax(0,1fr)_76px] gap-x-4 gap-y-2 px-4 py-3.5 sm:grid-cols-[64px_30px_minmax(0,1fr)_110px] sm:px-5',
       )}
     >
-      {/* Another day: the date on its own line above the time, so it can never run into the title. */}
-      <div className="num flex flex-col pt-0.5 text-[12.5px] leading-tight text-muted" title={fmtDateTime(item.publishedAt, tz)}>
+      {/* Another day: the date on its own line above the time, so it can never run into the title. FD-MOBILESYM §5:
+          on a phone the time is in the card's head instead. */}
+      <div className="num flex flex-col pt-0.5 text-[12.5px] leading-tight text-muted max-sm:hidden" title={fmtDateTime(item.publishedAt, tz)}>
         {!today && <span className="text-[11.5px] text-faint">{fmtDate(item.publishedAt, tz)}</span>}
         <span>{fmtTime(item.publishedAt, tz)}</span>
       </div>
@@ -41,18 +45,28 @@ function NewsRow({ item, tz, stocks }: { item: NewsItemDto; tz: string; stocks: 
         <TopicIcon title={item.title} summary={item.summary} category={item.category} coins={item.coins} size={16} boxed stocks={stocks} />
       </div>
       <div className="min-w-0">
+        {/* FD-MOBILESYM §5: on a phone the time leads the story's small top line (its column is gone there). */}
         <div className="flex flex-wrap items-center gap-x-2 text-[12px] text-faint">
+          <span className="num shrink-0 text-muted sm:hidden" title={fmtDateTime(item.publishedAt, tz)}>
+            {today ? fmtTime(item.publishedAt, tz) : `${fmtDate(item.publishedAt, tz)}, ${fmtTime(item.publishedAt, tz)}`}
+          </span>
           <span className="inline-flex sm:hidden">
             <TopicIcon title={item.title} summary={item.summary} category={item.category} coins={item.coins} size={13} stocks={stocks} />
           </span>
           {Date.now() - item.fetchedAt < NEW_MS && <span className="rounded-[5px] bg-accent/15 px-1.5 font-semibold text-accent">nou</span>}
           <span className="text-muted">{item.source.name}</span>
           <span>{CAT_LABEL[item.category] ?? item.category}</span>
-          {item.flags.map((f) => (
-            <span key={f} className="text-warn">
-              {FLAG_LABEL[f] ?? f}
-            </span>
-          ))}
+          {item.flags.map((f) =>
+            THEME_LABEL[f] ? (
+              <span key={f} className="text-accent" title="Știrile despre energie și AI cântăresc de 1,5 ori mai mult în sentiment.">
+                {THEME_LABEL[f]}
+              </span>
+            ) : (
+              <span key={f} className="text-warn">
+                {FLAG_LABEL[f] ?? f}
+              </span>
+            ),
+          )}
         </div>
         {/* Low-relevance items are toned down by colour (not opacity), keeping small text readable. */}
         <h3 className={clsx('mt-0.5 text-[15px] leading-snug tracking-[-0.01em]', item.flags.includes('lowRelevance') ? 'font-normal' : 'font-[550]')}>
@@ -103,8 +117,13 @@ function NewsRow({ item, tz, stocks }: { item: NewsItemDto; tz: string; stocks: 
           </ul>
         )}
       </div>
-      <div className="col-start-2 sm:col-start-4 sm:justify-self-end">
-        <ScoreBar score={item.sentiment ? item.sentiment.score : null} />
+      {/* FIX-MOBILESYM2: the score larger on every screen. */}
+      <div className="max-sm:hidden sm:col-start-4 sm:justify-self-end">
+        <ScoreBar score={item.sentiment ? item.sentiment.score : null} big />
+      </div>
+      {/* FIX-MOBILESYM2: on a phone the score's own column, at the top, larger. */}
+      <div className="col-start-2 row-start-1 self-start justify-self-end pt-0.5 sm:hidden">
+        <ScoreBar score={item.sentiment ? item.sentiment.score : null} width={64} big />
       </div>
     </li>
   );
@@ -140,6 +159,8 @@ export default function NewsPageView() {
   const [category, setCategory] = useState<Cat>('');
   const [sentiment, setSentiment] = useState<Sent>('');
   const [source, setSource] = useState('');
+  // FD-MOBILESYM §5, FIX-MOBILESYM2: the symbols' filter folded at every visit, on every screen.
+  const [symbolsOpen, setSymbolsOpen] = useState(false);
   const [text, setText] = useState(urlQ);
   const [search, setSearch] = useState(urlQ);
   // ⌘K "Caută în știri" lands here with ?q=…, also while the page is already open.
@@ -199,8 +220,10 @@ export default function NewsPageView() {
           Acțiuni: doar companiile din {stockNote} (plus știrile generale de bursă și simbolurile urmărite). <Link to="/settings#stock-news">Schimbă în Setări</Link>
         </p>
       )}
-      <div role="toolbar" aria-label="Filtre" className="panel flex flex-wrap items-center gap-x-4 gap-y-2.5 rounded-[14px] px-3 py-2.5">
+      {/* FD-MOBILESYM §5: on a phone every filter on its own row, the groups scrolling sideways, the symbols folded. */}
+      <div role="toolbar" aria-label="Filtre" className="panel flex flex-wrap items-center gap-x-4 gap-y-2.5 rounded-[14px] px-3 py-2.5 max-sm:flex-col max-sm:items-stretch">
         <Seg
+          className="max-sm:row-fill"
           label="Interval"
           value={range}
           onChange={setRange}
@@ -211,14 +234,14 @@ export default function NewsPageView() {
             { value: '7d', label: '7 zile' },
           ]}
         />
-        <div role="group" aria-label="Categorie" className="flex flex-wrap gap-1">
+        <div role="group" aria-label="Categorie" className="flex flex-wrap gap-1 max-sm:row-fill">
           {CATEGORIES.map((c) => (
             <button key={c.value} type="button" className="chip-soft" aria-pressed={category === c.value} onClick={() => setCategory(c.value)}>
               {c.label}
             </button>
           ))}
         </div>
-        <div role="group" aria-label="Sentiment" className="flex flex-wrap gap-1">
+        <div role="group" aria-label="Sentiment" className="flex flex-wrap gap-1 max-sm:row-fill">
           {SENTIMENTS.map((x) => (
             <button key={x.value} type="button" className={clsx('chip-soft', sentiment !== x.value && x.cls)} aria-pressed={sentiment === x.value} onClick={() => setSentiment(x.value)}>
               {x.label}
@@ -226,7 +249,7 @@ export default function NewsPageView() {
           ))}
         </div>
         {/* The height of the interval switch beside it (FD-SELECTSAFARI), as every dropdown. */}
-        <select aria-label="Sursă" value={source} onChange={(e) => setSource(e.target.value)} className="max-w-[220px] text-[13px]">
+        <select aria-label="Sursă" value={source} onChange={(e) => setSource(e.target.value)} className="max-w-[220px] text-[13px] max-sm:w-full max-sm:max-w-none">
           <option value="">Toate sursele active</option>
           {(sources.data ?? [])
             .filter((s) => s.enabled)
@@ -237,21 +260,43 @@ export default function NewsPageView() {
             ))}
         </select>
         {favList.length > 0 && (
-          <div role="group" aria-label="Simbolurile urmărite" className="flex flex-wrap items-center gap-1.5">
-            {favList.map((c) => (
-              <button key={c} type="button" className="chip gap-1.5 pl-1.5" aria-pressed={activeCoins.includes(c)} onClick={() => toggleCoin(c)}>
-                <CoinLogo coin={c} size={16} badge={stockSet.has(c)} square={stockSet.has(c)} />
-                {plainSymbol(c)}
-              </button>
-            ))}
-            <label className="ml-1 inline-flex items-center gap-2 text-[12.5px] text-muted">
-              <input type="checkbox" checked={favorites} onChange={(e) => setFavorites(e.target.checked)} />
-              doar urmărite
-            </label>
+          // FIX-MOBILESYM2: one card on every screen, its head and, opened, the symbols inside it (opened, it takes the
+          // filters' whole row).
+          <div className={clsx('rounded-[10px] border border-line-strong bg-panel-2', symbolsOpen ? 'w-full' : 'max-sm:w-full')}>
+            <button
+              type="button"
+              className="flex min-h-[36px] w-full items-center justify-between gap-3 px-3.5 text-[13px] font-semibold text-text pointer-coarse:min-h-11 max-sm:min-h-11"
+              aria-expanded={symbolsOpen}
+              aria-controls="news-symbols"
+              onClick={() => setSymbolsOpen((o) => !o)}
+            >
+              <span>
+                Simboluri
+                {activeCoins.length > 0 ? <span className="font-normal text-accent"> · {activeCoins.length === 1 ? '1 ales' : `${activeCoins.length} alese`}</span> : favorites ? <span className="font-normal text-accent"> · doar urmărite</span> : null}
+              </span>
+              <ChevronDown size={16} className={clsx('shrink-0 transition-transform', symbolsOpen && 'rotate-180')} aria-hidden />
+            </button>
+            <div
+              id="news-symbols"
+              role="group"
+              aria-label="Simbolurile urmărite"
+              className={clsx('flex flex-wrap items-center gap-1.5 border-t border-line px-3 py-3', !symbolsOpen && 'hidden')}
+            >
+              {favList.map((c) => (
+                <button key={c} type="button" className="chip gap-1.5 pl-1.5" aria-pressed={activeCoins.includes(c)} onClick={() => toggleCoin(c)}>
+                  <CoinLogo coin={c} size={16} badge={stockSet.has(c)} square={stockSet.has(c)} />
+                  {plainSymbol(c)}
+                </button>
+              ))}
+              <label className="ml-1 inline-flex items-center gap-2 text-[12.5px] text-muted">
+                <input type="checkbox" checked={favorites} onChange={(e) => setFavorites(e.target.checked)} />
+                doar urmărite
+              </label>
+            </div>
           </div>
         )}
         <form
-          className="flex min-h-[38px] min-w-[220px] flex-1 items-center gap-2 rounded-[10px] border border-line-strong bg-ink px-3 focus-within:border-accent-dim pointer-coarse:min-h-11 lg:max-w-[300px]"
+          className="flex min-h-[38px] min-w-[220px] flex-1 items-center gap-2 rounded-[10px] border border-line-strong bg-ink px-3 focus-within:border-accent-dim pointer-coarse:min-h-11 max-sm:min-w-0 lg:max-w-[300px]"
           role="search"
           onSubmit={(e) => {
             e.preventDefault();

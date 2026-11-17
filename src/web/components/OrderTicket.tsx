@@ -1,7 +1,7 @@
 // The order form (FD-TRADING §2–§3): fill in, "Verifică ordinul" (the server rounds and checks it), the confirmation
 // with exactly what leaves, "Confirmă și trimite", the result. Opened from Tranzacții (new order, sell a holding,
 // close a position) and from a chart. One key per version of the form: sending the same form twice places one order.
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { clsx } from 'clsx';
 import { AlertTriangle, CheckCircle2, Loader2 } from 'lucide-react';
@@ -76,12 +76,25 @@ function useDebounced<T>(value: T, ms: number): T {
   return v;
 }
 
-function Field({ label, children, hint }: { label: string; children: React.ReactNode; hint?: React.ReactNode }) {
+/** One control: a `<label>`; `group`: buttons (a switch), a titled group, so no click presses the first one (FIX-BOTLABEL). */
+function Field({ label, children, hint, group = false }: { label: string; children: React.ReactNode; hint?: React.ReactNode; group?: boolean }) {
+  const id = useId();
+  const hintEl = hint && <span className="text-[11.5px] text-faint">{hint}</span>;
+  if (group)
+    return (
+      <div role="group" aria-labelledby={id} className="flex min-w-0 flex-col gap-1 text-[13px]">
+        <span id={id} className="text-faint">
+          {label}
+        </span>
+        {children}
+        {hintEl}
+      </div>
+    );
   return (
     <label className="flex min-w-0 flex-col gap-1 text-[13px]">
       <span className="text-faint">{label}</span>
       {children}
-      {hint && <span className="text-[11.5px] text-faint">{hint}</span>}
+      {hintEl}
     </label>
   );
 }
@@ -102,8 +115,11 @@ function ReadOnly({ label, children }: { label: string; children: React.ReactNod
 
 export function DemoBadge({ env }: { env: string }) {
   if (!isDemoEnv(env)) return null;
-  return <span className="rounded-md bg-warn/15 px-1.5 py-0.5 text-[11px] font-semibold tracking-wide text-warn">DEMO</span>;
+  return <span className="rounded-md bg-warn/15 px-1.5 py-0.5 text-[11px] font-semibold tracking-wide text-warn">{env === 'paper' ? 'PAPER' : 'DEMO'}</span>;
 }
+
+/** FD-PAPER: an account's environment after its name: „ (PAPER)” (Paper Trading, Alpaca Paper), „ (DEMO)”. */
+export const envSuffix = (env: string): string => (isDemoEnv(env) ? (env === 'paper' ? ' (PAPER)' : ' (DEMO)') : '');
 
 export function OrderTicket({ seed, onClose }: { seed: TicketSeed; onClose: () => void }) {
   const qc = useQueryClient();
@@ -173,7 +189,7 @@ export function OrderTicket({ seed, onClose }: { seed: TicketSeed; onClose: () =
   const symbols = useQuery({
     queryKey: ['trading', account?.accountId, 'symbols', mkt],
     queryFn: () => api.get<TradeSymbol[]>(`/api/trading/${account!.accountId}/symbols?market=${mkt}`),
-    enabled: !!account && !stocks,
+    enabled: !!account && !stocks && !platform?.paper,
     staleTime: 10 * 60_000,
   });
   const symbolSet = useMemo(() => new Set((symbols.data ?? []).map((s) => s.symbol)), [symbols.data]);
@@ -191,7 +207,8 @@ export function OrderTicket({ seed, onClose }: { seed: TicketSeed; onClose: () =
     if (alt) setSymbol(alt);
   }, [stocks, futures, symbols.data, symbolSet, symbol]);
   const typed = useDebounced(symbol.trim(), 400);
-  const symbolOk = stocks ? /^[A-Za-z0-9.#/_-]{1,40}$/.test(typed) : symbolSet.has(typed);
+  // FD-PAPER: a profile's pairs are typed (any pair of the chart exchange in USDT / USDC / USD), checked by the server.
+  const symbolOk = stocks ? /^[A-Za-z0-9.#/_-]{1,40}$/.test(typed) : platform?.paper ? (futures ? /^[A-Z0-9]+\/[A-Z0-9]+:[A-Z0-9]+$/ : /^[A-Z0-9]+\/[A-Z0-9]+$/).test(typed) : symbolSet.has(typed);
   const info = useQuery({
     queryKey: ['trading', account?.accountId, 'instrument', mkt, typed],
     queryFn: () => api.get<InstrumentInfo>(`/api/trading/${account!.accountId}/instrument?market=${mkt}&symbol=${encodeURIComponent(typed)}`),
@@ -204,10 +221,13 @@ export function OrderTicket({ seed, onClose }: { seed: TicketSeed; onClose: () =
   const base = ins?.base ?? typed.split('/')[0] ?? '';
   // eToro's leverage limits are per instrument (and are checked there): no maximum shown for it.
   const maxLev = ins?.maxLeverage ?? platform?.futures?.maxLeverage ?? null;
-  const showsLeverage = futures || !!platform?.etoro;
+  // FIX-PAPERLEV: a Paper Trading profile trades every market as futures: leverage, margin, reduce-only, TP / SL, short.
+  const paper = !!platform?.paper;
+  const margined = futures || paper;
+  const showsLeverage = margined || !!platform?.etoro;
   // A value only where the platform takes one (Trading 212: shares only), whatever was chosen on another account.
   const amountIn: 'base' | 'quote' = platform?.amountIn.includes(amountInSel) ? amountInSel : 'base';
-  const tpsl = (futures && !reduceOnly && platform?.futures?.tpsl !== 'none' && (platform?.futures?.tpsl !== 'after-market' || kind === 'market')) || !!platform?.etoro || !!platform?.alpaca;
+  const tpsl = (margined && !reduceOnly && platform?.futures?.tpsl !== 'none' && (platform?.futures?.tpsl !== 'after-market' || kind === 'market')) || !!platform?.etoro || !!platform?.alpaca;
 
   // FD-ETOROROWS: eToro positions as rows, each with its own "Vinde" and an optional number of units to sell.
   const posRows = useMemo(() => (seed.close && ins?.positions ? closeRows(ins.positions, seed.close.positionIds) : null), [ins?.positions, seed.close]);
@@ -228,9 +248,9 @@ export function OrderTicket({ seed, onClose }: { seed: TicketSeed; onClose: () =
     ...(['stop', 'stop_limit', 'mit'].includes(kind) && parseNum(trigger) !== undefined ? { triggerPrice: parseNum(trigger) } : {}),
     ...(platform && platform.tif.length > 1 && kind !== 'market' ? { tif } : {}),
     // A reduce-only order closes: it neither sets the leverage nor attaches TP / SL.
-    ...(showsLeverage && !(futures && reduceOnly) && parseNum(leverage) !== undefined ? { leverage: Math.round(parseNum(leverage) as number) } : {}),
-    ...(futures && platform?.futures?.marginModes ? { marginMode } : {}),
-    ...(futures && reduceOnly ? { reduceOnly: true } : {}),
+    ...(showsLeverage && !(margined && reduceOnly) && parseNum(leverage) !== undefined ? { leverage: Math.round(parseNum(leverage) as number) } : {}),
+    ...(margined && platform?.futures?.marginModes ? { marginMode } : {}),
+    ...(margined && reduceOnly ? { reduceOnly: true } : {}),
     ...(tpsl && parseNum(tp) !== undefined ? { takeProfit: parseNum(tp) } : {}),
     ...(tpsl && parseNum(sl) !== undefined ? { stopLoss: parseNum(sl) } : {}),
     ...(stocks && extendedHours ? { extendedHours: true } : {}),
@@ -290,10 +310,10 @@ export function OrderTicket({ seed, onClose }: { seed: TicketSeed; onClose: () =
   /** A share of what is free: the quote to buy with (futures: margin × leverage), the asset to sell. */
   const fill = (part: number) => {
     if (!ins) return;
-    const lev = futures ? (parseNum(leverage) ?? 1) : 1;
+    const lev = margined ? (parseNum(leverage) ?? 1) : 1;
     const ref = parseNum(price) ?? parseNum(trigger) ?? ins.last;
-    // Selling what is held (eToro's "Short" opens a position: it is paid like a buy).
-    if (side === 'sell' && !futures && !platform?.etoro) {
+    // Selling what is held (eToro's "Short" opens a position: it is paid like a buy; a profile's sale too).
+    if (side === 'sell' && !margined && !platform?.etoro) {
       if (ins.availableBase !== null) {
         setAmountIn('base');
         setAmount(plain(ins.availableBase * part));
@@ -399,7 +419,7 @@ export function OrderTicket({ seed, onClose }: { seed: TicketSeed; onClose: () =
               ? 'Cumpărare'
               : 'Vânzare';
     const rows: [string, React.ReactNode][] = [
-      ['Cont', `${account.label}${isDemoEnv(p.env) ? ' (DEMO)' : ''}`],
+      ['Cont', `${account.label}${envSuffix(p.env)}`],
       ['Instrument', p.displaySymbol],
       ['Direcție', <span className={long && !p.ticket.close ? 'text-bull' : 'text-bear'}>{sideRo}</span>],
       ...(hedgeOrder ? [['Mod poziții', 'hedge (long și short separate)'] as [string, React.ReactNode]] : []),
@@ -410,7 +430,7 @@ export function OrderTicket({ seed, onClose }: { seed: TicketSeed; onClose: () =
     if (p.triggerPrice !== null) rows.push(['Preț de declanșare', `${plain(p.triggerPrice)} ${quote}`]);
     if (p.last !== null) rows.push(['Prețul de acum', `${plain(p.last)} ${quote}`]);
     rows.push(['Valoare estimată', p.value !== null ? `${plain(p.value, 2)} ${p.currency}` : '—']);
-    if (p.ticket.leverage && (futures || platform.etoro)) rows.push(['Levier', `${p.ticket.leverage}×${p.ticket.marginMode ? `, marjă ${p.ticket.marginMode}` : ''}`]);
+    if (p.ticket.leverage && (margined || platform.etoro)) rows.push(['Levier', `${p.ticket.leverage}×${p.ticket.marginMode ? `, marjă ${p.ticket.marginMode}` : ''}`]);
     if (p.margin !== null) rows.push(['Marjă', `${plain(p.margin, 2)} ${p.currency}`]);
     if (p.ticket.takeProfit) rows.push(['Take profit', plain(p.ticket.takeProfit)]);
     if (p.ticket.stopLoss) rows.push(['Stop loss', plain(p.ticket.stopLoss)]);
@@ -422,7 +442,7 @@ export function OrderTicket({ seed, onClose }: { seed: TicketSeed; onClose: () =
       const pnl = closing.every((r) => r.pnl !== null) ? closing.reduce((t, r) => t + (r.pnl as number), 0) : null;
       if (pnl !== null && p.ticket.close?.units === undefined) rows.push(['Profit / pierdere (nerealizat)', <span className={pnl >= 0 ? 'text-bull' : 'text-bear'}>{signedUsd(pnl)}</span>]);
     }
-    if (p.available !== null) rows.push(['Disponibil', `${plain(p.available, 4)} ${p.ticket.side === 'sell' && !futures && !p.ticket.close ? base : p.currency}`]);
+    if (p.available !== null) rows.push(['Disponibil', `${plain(p.available, 4)} ${p.ticket.side === 'sell' && !margined && !p.ticket.close ? base : p.currency}`]);
     const sendErr = send.error;
     const unknown = sendErr instanceof ApiError && sendErr.code === 'UNKNOWN_OUTCOME';
     return (
@@ -488,7 +508,9 @@ export function OrderTicket({ seed, onClose }: { seed: TicketSeed; onClose: () =
       : [['buy', 'Long'], ['sell', 'Short']]
     : platform.etoro
       ? [['buy', 'Cumpără'], ['sell', 'Short']]
-      : [['buy', 'Cumpără'], ['sell', 'Vinde']];
+      : paper
+        ? [['buy', 'Cumpără / Long'], ['sell', 'Vinde / Short']]
+        : [['buy', 'Cumpără'], ['sell', 'Vinde']];
   const needsPrice = ['limit', 'stop_limit', 'limit_ioc'].includes(kind);
   const needsTrigger = ['stop', 'stop_limit', 'mit'].includes(kind);
   return (
@@ -504,7 +526,7 @@ export function OrderTicket({ seed, onClose }: { seed: TicketSeed; onClose: () =
           {closing || eligible.length === 1 ? (
             <ReadOnly label="Cont">
               {account.label}
-              {isDemoEnv(account.env) ? ' (DEMO)' : ''}
+              {envSuffix(account.env)}
             </ReadOnly>
           ) : (
             <Field label="Cont">
@@ -520,7 +542,7 @@ export function OrderTicket({ seed, onClose }: { seed: TicketSeed; onClose: () =
                 {eligible.map((a) => (
                   <option key={a.accountId} value={a.accountId}>
                     {a.label}
-                    {isDemoEnv(a.env) ? ' (DEMO)' : ''}
+                    {envSuffix(a.env)}
                   </option>
                 ))}
               </select>
@@ -530,7 +552,7 @@ export function OrderTicket({ seed, onClose }: { seed: TicketSeed; onClose: () =
             (closing ? (
               <ReadOnly label="Piață">{mkt === 'futures' ? 'Futures' : 'Spot'}</ReadOnly>
             ) : (
-              <Field label="Piață">
+              <Field label="Piață" group>
                 <div className="seg" role="group" aria-label="Piață">
                   {account.markets
                     .filter((m) => m !== 'stock')
@@ -560,7 +582,7 @@ export function OrderTicket({ seed, onClose }: { seed: TicketSeed; onClose: () =
           )}
         </div>
         {!closing && (
-          <Field label={stocks ? 'Simbol (ex. AAPL)' : 'Pereche'} hint={info.isError ? errorMessage(info.error) : ins?.name ?? (stocks ? undefined : symbol && !symbolSet.has(symbol.trim()) && symbols.data ? 'Alege o pereche din listă.' : undefined)}>
+          <Field label={stocks ? 'Simbol (ex. AAPL)' : 'Pereche'} hint={info.isError ? errorMessage(info.error) : ins?.name ?? (stocks || platform.paper ? undefined : symbol && !symbolSet.has(symbol.trim()) && symbols.data ? 'Alege o pereche din listă.' : undefined)}>
             <input value={symbol} onChange={(e) => setSymbol(e.target.value.toUpperCase())} list={stocks ? undefined : `ticket-symbols-${account.accountId}-${mkt}`} placeholder={stocks ? 'AAPL' : futures ? 'BTC/USDT:USDT' : 'BTC/USDT'} autoComplete="off" spellCheck={false} className="num" required />
             {!stocks && (
               <datalist id={`ticket-symbols-${account.accountId}-${mkt}`}>
@@ -696,7 +718,7 @@ export function OrderTicket({ seed, onClose }: { seed: TicketSeed; onClose: () =
                   </span>
                 </ReadOnly>
               ) : (
-                <Field label="Direcție">
+                <Field label="Direcție" group>
                   <div className="seg" role="group" aria-label="Direcție">
                     {sideLabels.map(([v, l]) => (
                       <button
@@ -780,9 +802,9 @@ export function OrderTicket({ seed, onClose }: { seed: TicketSeed; onClose: () =
                 </div>
               )}
             </div>
-            {((showsLeverage && !(futures && reduceOnly)) || (futures && platform.futures?.marginModes && !closing) || (platform.tif.length > 1 && kind !== 'market')) && (
+            {((showsLeverage && !(margined && reduceOnly)) || (margined && platform.futures?.marginModes && !closing) || (platform.tif.length > 1 && kind !== 'market')) && (
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                {showsLeverage && !(futures && reduceOnly) && (
+                {showsLeverage && !(margined && reduceOnly) && (
                   <Field label={maxLev ? `Levier (max ${maxLev}×)` : 'Levier'}>
                     <input
                       value={leverage}
@@ -797,7 +819,7 @@ export function OrderTicket({ seed, onClose }: { seed: TicketSeed; onClose: () =
                     />
                   </Field>
                 )}
-                {futures && platform.futures?.marginModes && !closing && (
+                {margined && platform.futures?.marginModes && !closing && (
                   <Field label="Marjă">
                     <select
                       value={marginMode}
@@ -841,7 +863,7 @@ export function OrderTicket({ seed, onClose }: { seed: TicketSeed; onClose: () =
               </div>
             )}
             <div className="flex flex-wrap gap-x-5 gap-y-2 text-[13px]">
-              {futures &&
+              {margined &&
                 (closing ? (
                   // Closing: fixed, so said, not a locked checkbox.
                   <span className="text-muted">Reduce-only: da (doar micșorează poziția)</span>

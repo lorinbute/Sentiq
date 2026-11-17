@@ -29,7 +29,12 @@ export interface AppConfig {
   allowedHosts: string[];
   /** The public address (FD-ONLINE): an origin, `https://host[:port]` (or `http://localhost` for local tests), or null. */
   publicUrl: string | null;
+  /** FD-PASSKEYAPP: the iOS apps (`TEAMID.bundle`) Apple may give this domain's passkeys to. */
+  iosAppIds: string[];
 }
+
+/** FD-PASSKEYAPP: the Sentiq iOS app (the user's team and bundle, set in Xcode). */
+export const IOS_APP_IDS = ['25H945694A.com.dustyenterprise.sentiq'];
 
 const LOOPBACK_NAMES = new Set(['localhost', '127.0.0.1', '[::1]']);
 
@@ -90,6 +95,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       ...(siteHost ? [siteHost] : []),
     ],
     publicUrl,
+    iosAppIds: (() => {
+      const own = (envOf(env, 'IOS_APP_IDS') ?? '').split(',').map((a) => a.trim()).filter((a) => /^[A-Z0-9]{10}\.[A-Za-z0-9.-]+$/.test(a));
+      return own.length ? own : IOS_APP_IDS;
+    })(),
   };
 }
 

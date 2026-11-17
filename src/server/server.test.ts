@@ -16,12 +16,14 @@ import { Scheduler } from './jobs/scheduler.ts';
 import type { NliScorer } from './sentiment/local.ts';
 import { costBasis } from './exchange/cost-basis.ts';
 import { BrokerError } from './exchange/brokers.ts';
-import { hasRiskyPermissions, keyPermissions, mapExchangeError, orderPositionSide, positionSideOf, stopDirection, type ClientFactory } from './exchange/accounts.ts';
+import { hasRiskyPermissions, keyPermissions, mapExchangeError, orderPositionSide, positionMargin, positionSideOf, stopDirection, type ClientFactory } from './exchange/accounts.ts';
 import { isRateLimitError, isTransientError, withRetry } from './exchange/retry.ts';
 import { MarketData } from './market/market.ts';
 import { deepMerge } from './settings.ts';
 import ccxt from 'ccxt';
 import { hashPassword } from './auth/passwords.ts';
+import { registerJobs } from './jobs/register.ts';
+import { TD_PLAN_EVERY_MS, TD_PLAN_JOB } from './market/stocks.ts';
 
 // Every API route needs a signed-in user (FD-USERS): H / M carry the admin's session cookie, set in beforeEach.
 const H: Record<string, string> = { host: '127.0.0.1:4317' };
@@ -337,17 +339,17 @@ describe('settings API', () => {
   });
   it('remembers the chart settings and the LMA inputs (FD-CHARTUX)', async () => {
     const s = (await app.inject({ method: 'GET', url: '/api/settings', headers: H })).json();
-    expect(s.charts).toEqual({ symbol: '', showPositions: true, showLma: true, showSlingshot: true, slingshotHidden: false, lmaHidden: false, lmaPane: 0.25, logScale: false, listId: null });
+    expect(s.charts).toEqual({ symbol: '', showPositions: true, showLma: true, showSlingshot: true, slingshotHidden: false, lmaHidden: false, legendCollapsed: false, lmaPane: 0.25, logScale: false, listId: null });
     expect(s.lma).toMatchObject({ preset: 'Default', period: 100, steepness: 2.5, maType: 'EMA', smooth: 10, colorBars: true });
     const r = await app.inject({
       method: 'PUT',
       url: '/api/settings',
       headers: M,
-      payload: { charts: { symbol: 'SOL/USDT', showLma: false, showSlingshot: false, logScale: true }, market: { defaultTf: '4h' }, lma: { preset: 'Scalping', maType: 'VWMA' } },
+      payload: { charts: { symbol: 'SOL/USDT', showLma: false, showSlingshot: false, logScale: true, legendCollapsed: true }, market: { defaultTf: '4h' }, lma: { preset: 'Scalping', maType: 'VWMA' } },
     });
     expect(r.statusCode).toBe(200);
     // Both indicators off: a chart with candles only (FD-CHARTFAV §1). The price scale stays logarithmic (FD-CHARTTV §4).
-    expect(r.json().charts).toEqual({ symbol: 'SOL/USDT', showPositions: true, showLma: false, showSlingshot: false, slingshotHidden: false, lmaHidden: false, lmaPane: 0.25, logScale: true, listId: null });
+    expect(r.json().charts).toEqual({ symbol: 'SOL/USDT', showPositions: true, showLma: false, showSlingshot: false, slingshotHidden: false, lmaHidden: false, legendCollapsed: true, lmaPane: 0.25, logScale: true, listId: null });
     expect(r.json().market.defaultTf).toBe('4h');
     expect(r.json().lma).toMatchObject({ preset: 'Scalping', maType: 'VWMA', period: 100 });
     for (const bad of [
@@ -356,6 +358,7 @@ describe('settings API', () => {
       { charts: { lmaPane: 0.95 } },
       { charts: { showSlingshot: 'no' } },
       { charts: { logScale: 'yes' } },
+      { charts: { legendCollapsed: 'no' } },
       { lma: { period: 300 } },
       { lma: { shortThreshold: 0.5 } },
       { lma: { bullishColor: 'red' } },
@@ -729,6 +732,90 @@ describe('accounts & portfolio', () => {
   });
 });
 
+describe('a position\'s amount (FIX-POSAMOUNT)', () => {
+  it('the platform\'s initial margin (KuCoin\'s posInit); else the value at entry / the leverage; else unknown', () => {
+    expect(positionMargin({ initialMargin: 3.35148, contracts: 2, contractSize: 0.01, entryPrice: 4189.35, leverage: 25 })).toBe(3.35148);
+    expect(positionMargin({ contracts: -3, contractSize: 0.001, entryPrice: 100_000, leverage: 5 })).toBeCloseTo(60, 9);
+    expect(positionMargin({ initialMargin: '0', contracts: 2, entryPrice: 50, leverage: 2 })).toBe(50);
+    expect(positionMargin({ contracts: 2, entryPrice: 50 })).toBeNull();
+    expect(positionMargin({ contracts: 2, leverage: 3 })).toBeNull();
+    // An inverse contract (settled in BTC): only the platform's own margin, never a value worked out in dollars.
+    expect(positionMargin({ symbol: 'BTC/USD:BTC', contracts: 100, contractSize: 1, entryPrice: 100_000, leverage: 10 })).toBeNull();
+    expect(positionMargin({ symbol: 'BTC/USD:BTC', initialMargin: 0.0001, contracts: 100, entryPrice: 100_000, leverage: 10 })).toBe(0.0001);
+    expect(positionMargin({ symbol: 'BTC/USDT:USDT', contracts: 1, contractSize: 0.001, entryPrice: 100_000, leverage: 10 })).toBeCloseTo(10, 9);
+  });
+});
+
+describe('Paper Trading profiles (FD-PAPER)', () => {
+  it('made, renamed with another commission, traded on from the order form, reset, deleted; only the own; no key, no switch', async () => {
+    // The prices the profiles execute at, by hand.
+    const px: Record<string, number> = { 'BTC/USDT': 100 };
+    const candle = (p: number) => ({ t: Math.floor(Date.now() / 60_000) * 60_000, o: p, h: p, l: p, c: p, v: 1 });
+    ctx.paper.setQuotes({
+      source: ctx.marketSource,
+      market: { candles: async (_e: string, sym: string) => ({ candles: [candle(px[sym] as number)], fetchedAt: Date.now(), lastClosedIndex: 0 }), lastPrice: async (_e: string, sym: string) => px[sym] ?? null } as never,
+      stocks: { confirmedStatus: async () => ({ state: 'open' }), quote: async () => ({ last: 200 }) } as never,
+    });
+    const r = await app.inject({ method: 'POST', url: '/api/accounts/paper', headers: M, payload: { label: 'Paper 1', kind: 'crypto', budget: 5000, commissionType: 'fixed', commissionValue: 1 } });
+    expect(r.statusCode, r.body).toBe(200);
+    const a = r.json();
+    expect(a).toMatchObject({ exchange: 'paper', env: 'paper', kind: 'crypto', label: 'Paper 1', paper: { kind: 'crypto', budget: 5000, cash: 5000, commissionType: 'fixed', commissionValue: 1 } });
+    expect((await app.inject({ method: 'GET', url: '/api/accounts', headers: M })).json().map((x: { id: number }) => x.id)).toContain(a.id);
+    const bad = await app.inject({ method: 'POST', url: '/api/accounts/paper', headers: M, payload: { label: 'X', kind: 'crypto', budget: 10, commissionType: 'percent', commissionValue: 0.1 } });
+    expect(bad.statusCode).toBe(400);
+    // Not through the route of the platforms' accounts; no key to test; trading always on.
+    expect((await app.inject({ method: 'POST', url: '/api/accounts', headers: M, payload: { exchange: 'paper', label: 'X', credentials: {} } })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'POST', url: `/api/accounts/${a.id}/test`, headers: M })).json()).toMatchObject({ id: a.id, lastError: null });
+    expect((await app.inject({ method: 'POST', url: `/api/accounts/${a.id}/trading`, headers: M, payload: { enabled: false } })).json().error.message).toBe('Tranzacționarea unui profil Paper Trading e mereu pornită.');
+    const s = await app.inject({ method: 'PUT', url: `/api/accounts/${a.id}/paper`, headers: M, payload: { label: 'Paper 2', commissionType: 'percent', commissionValue: 0.05 } });
+    expect(s.statusCode, s.body).toBe(200);
+    expect(s.json()).toMatchObject({ label: 'Paper 2', paper: { commissionType: 'percent', commissionValue: 0.05 } });
+
+    // The order form: a market buy fills at once with its commission.
+    const ticket = { accountId: a.id, idemKey: '7d0f2c1e-5b6d-4c7e-8f90-000000000001', market: 'spot', symbol: 'BTC/USDT', side: 'buy', kind: 'market', amount: 10, amountIn: 'base' };
+    const pre = await app.inject({ method: 'POST', url: `/api/trading/${a.id}/preview`, headers: M, payload: ticket });
+    expect(pre.statusCode, pre.body).toBe(200);
+    expect(pre.json().warnings).toContain('Paper Trading: niciun ordin real.');
+    const o = await app.inject({ method: 'POST', url: `/api/trading/${a.id}/orders`, headers: M, payload: ticket });
+    expect(o.statusCode, o.body).toBe(200);
+    expect(o.json()).toMatchObject({ status: 'filled' });
+    // FIX-PAPERLEV: a position (1×: its cost held as margin), the money less the commission.
+    let pf = (await app.inject({ method: 'GET', url: `/api/portfolio/${a.id}`, headers: M })).json();
+    expect(pf.positions).toMatchObject([{ symbol: 'BTC/USDT', side: 'long', size: 10, leverage: 1 }]);
+    expect(pf.balances.find((b: { asset: string }) => b.asset === 'USDT').total).toBeCloseTo(5000 - 0.5, 9);
+    expect(pf.totals.futuresAvailable).toBeCloseTo(5000 - 0.5 - 1000, 9);
+    // Its average price is its fills': not set by hand.
+    const basis = await app.inject({ method: 'PUT', url: `/api/portfolio/${a.id}/cost-basis/BTC`, headers: M, payload: { avgPrice: 90 } });
+    expect(basis.statusCode).toBe(400);
+    expect(basis.json().error.message).toBe('Un profil Paper Trading își știe prețul mediu din execuții.');
+
+    const reset = await app.inject({ method: 'POST', url: `/api/accounts/${a.id}/paper/reset`, headers: M, payload: { budget: 2000 } });
+    expect(reset.statusCode, reset.body).toBe(200);
+    expect(reset.json()).toMatchObject({ account: { paper: { budget: 2000, cash: 2000 } }, endedBots: 0 });
+    pf = (await app.inject({ method: 'GET', url: `/api/portfolio/${a.id}`, headers: M })).json();
+    expect(pf.balances.map((b: { asset: string }) => b.asset)).toEqual(['USDT']);
+    expect(pf.positions).toEqual([]);
+    // FIX-PAPERLEV: from the order form, a spot short at 5× with its margin (the form's schema takes them off futures).
+    const short = { ...ticket, idemKey: '7d0f2c1e-5b6d-4c7e-8f90-000000000002', side: 'sell', amount: 1, leverage: 5, marginMode: 'cross', stopLoss: 110 };
+    const so = await app.inject({ method: 'POST', url: `/api/trading/${a.id}/orders`, headers: M, payload: short });
+    expect(so.statusCode, so.body).toBe(200);
+    pf = (await app.inject({ method: 'GET', url: `/api/portfolio/${a.id}`, headers: M })).json();
+    expect(pf.positions).toMatchObject([{ symbol: 'BTC/USDT', side: 'short', size: 1, leverage: 5, marginMode: 'cross' }]);
+    expect(pf.orders.map((x: { id: string }) => x.id)).toEqual([expect.stringMatching(/^sl-/)]);
+
+    // Another user's profile, or an account that is not a profile: not found.
+    const other = (await ctx.db.run("INSERT INTO users(email, name, role, created_at) VALUES (N'b@example.com', N'B', N'user', 1)")).lastInsertRowid;
+    const theirs = await ctx.paper.create(other, { label: 'Theirs', kind: 'crypto', budget: 1000, commissionType: 'percent', commissionValue: 0.1 }, 20);
+    expect((await app.inject({ method: 'PUT', url: `/api/accounts/${theirs}/paper`, headers: M, payload: { label: 'Mine', commissionType: 'percent', commissionValue: 0 } })).statusCode).toBe(404);
+    expect((await app.inject({ method: 'POST', url: `/api/accounts/${theirs}/paper/reset`, headers: M, payload: { budget: 1000 } })).statusCode).toBe(404);
+    const kucoin = (await app.inject({ method: 'POST', url: '/api/accounts', headers: M, payload: { exchange: 'kucoin', label: 'Main', apiKey: 'key-123456789', secret: 'secret-123456789', password: 'pass' } })).json();
+    expect((await app.inject({ method: 'POST', url: `/api/accounts/${kucoin.id}/paper/reset`, headers: M, payload: { budget: 1000 } })).statusCode).toBe(404);
+
+    expect((await app.inject({ method: 'DELETE', url: `/api/accounts/${a.id}`, headers: M })).json()).toEqual({ ok: true });
+    expect(await ctx.db.get('SELECT count(*) AS n FROM paper_accounts WHERE account_id = ?', [a.id])).toEqual({ n: 0 });
+  });
+});
+
 describe('exchange rate limits (TD-RATELIMIT)', () => {
   const kucoin429 = () => new ccxt.ExchangeError('kucoin {"code":"429000","msg":"Too many requests. System-level rate limit exceeded."}');
   type FakeSpot = {
@@ -953,6 +1040,43 @@ describe('exchange rate limits (TD-RATELIMIT)', () => {
     expect(loads).toBe(3);
     expect((await md3.candles('kucoin', 'BTC/USDT', '1h', 3)).candles.length).toBeGreaterThan(0);
     expect(loads).toBe(4);
+  });
+
+  it("FIX-2ZPRICE: a pair's last trade price from the ticker, kept 10 s; none is null; an exchange error says so", async () => {
+    const markets = { '2Z/USDT': { symbol: '2Z/USDT', base: '2Z', quote: 'USDT', spot: true, precision: { price: 0.00001 } } };
+    let t = 1_000_000;
+    let calls = 0;
+    let ticker: { last?: number | null; close?: number | null } | Error = { last: 0.01929, close: 0.0193 };
+    const fake = {
+      id: 'kucoin',
+      markets,
+      timeframes: { '1m': '1min' },
+      precisionMode: ccxt.TICK_SIZE,
+      loadMarkets: async () => markets,
+      fetchTicker: async (s: string) => {
+        calls++;
+        expect(s).toBe('2Z/USDT');
+        if (ticker instanceof Error) throw ticker;
+        return ticker;
+      },
+    };
+    const md = new MarketData({ factory: () => fake as never, retryDelaysMs: [0, 0], now: () => t });
+    expect(await md.lastPrice('kucoin', '2Z/USDT')).toBe(0.01929);
+    // Asked again within 10 s: the same answer, no request.
+    t += 9_000;
+    expect(await md.lastPrice('kucoin', '2Z/USDT')).toBe(0.01929);
+    expect(calls).toBe(1);
+    // After: asked again; without `last`, the close; nothing usable, null.
+    t += 2_000;
+    ticker = { last: null, close: 0.0194 };
+    expect(await md.lastPrice('kucoin', '2Z/USDT')).toBe(0.0194);
+    t += 11_000;
+    ticker = { last: 0, close: null };
+    expect(await md.lastPrice('kucoin', '2Z/USDT')).toBeNull();
+    t += 11_000;
+    ticker = new Error('boom');
+    await expect(md.lastPrice('kucoin', '2Z/USDT')).rejects.toThrow('kucoin: boom');
+    await expect(md.lastPrice('kucoin', 'NOPE/USDT')).rejects.toThrow('NOPE/USDT nu este listat pe kucoin');
   });
 
   it('keeps the old market list when the daily refresh fails and tries again after 5 minutes', async () => {
@@ -1525,10 +1649,11 @@ describe('stocks API (FD-SENTIQ §4)', () => {
     const info = (await app.inject({ method: 'GET', url: '/api/stocks/info', headers: H })).json();
     expect(info.timeframes).toContain('1h');
     expect(info.budget).toMatchObject({ perMinute: 55, perDay: null, plan: { category: 'grow', assumed: false } });
-    // FD-TDKEYS: the key and its credits are the user's; the health page only counts who has one.
+    // FD-TDKEYS: the key and its credits are the user's; the health page only counts who has one (and, FD-KEYIDLE, how
+    // many of them are in the app now: none, these requests are no tab's beats).
     // The new key's day: its check, then its plan (the refused key's check is not its).
     expect(info.budget.used).toBe(2);
-    expect((await app.inject({ method: 'GET', url: '/api/health', headers: H })).json().twelveData).toEqual({ users: 1 });
+    expect((await app.inject({ method: 'GET', url: '/api/health', headers: H })).json().twelveData).toEqual({ users: 1, active: 0 });
     expect(await ctx.db.get("SELECT 1 AS x FROM user_keys WHERE user_id = 1 AND name = N'twelvedata'")).toBeDefined();
     // Read again on request (after an upgrade).
     serveJson((u) => (u.pathname === '/api_usage' ? { timestamp: 'x', current_usage: 0, plan_limit: 610, plan_category: 'pro' } : null));
@@ -1538,7 +1663,7 @@ describe('stocks API (FD-SENTIQ §4)', () => {
     expect(cleared.json()).toMatchObject({ twelveDataKeySet: false });
     expect((await app.inject({ method: 'GET', url: '/api/stocks/info', headers: H })).json().budget).toMatchObject({ perMinute: 8, perDay: 800, plan: { assumed: true } });
     expect((await app.inject({ method: 'POST', url: '/api/settings/twelvedata-plan', headers: M })).json().error.message).toBe('Cheia ta Twelve Data lipsește');
-    expect((await app.inject({ method: 'GET', url: '/api/health', headers: H })).json().twelveData).toEqual({ users: 0 });
+    expect((await app.inject({ method: 'GET', url: '/api/health', headers: H })).json().twelveData).toEqual({ users: 0, active: 0 });
   });
 
   it('serves an index: daily candles, quotes and the spark line (FD-INDICES)', async () => {
@@ -1722,5 +1847,69 @@ describe('watch lists API (FD-WATCHLISTS)', () => {
     expect((await post('/api/symbols/translate', { kind: 'stock', symbol: 'TSLA' })).json().error.message).toBe('Fără o cheie AI, descrierea rămâne în engleză');
     expect((await post('/api/symbols/translate', { kind: 'index', symbol: '^SPX' })).json().error.message).toBe('Nu e nimic de tradus');
     expect((await app.inject({ url: '/api/symbols/profile?kind=bond&symbol=X', headers: H })).statusCode).toBe(400);
+  });
+});
+
+describe('presence API (FD-KEYIDLE)', () => {
+  const beat = (tab: string, here: boolean, headers: Record<string, string> = M) => app.inject({ method: 'POST', url: '/api/presence', headers, payload: { tab, here } });
+
+  it('a tab beats and leaves; bad input and a request without a session are refused', async () => {
+    expect((await beat('tab-12345678', true)).json()).toEqual({ ok: true });
+    expect(await ctx.presence.activeUsers()).toEqual(new Set([1]));
+    expect((await beat('tab-12345678', false)).json()).toEqual({ ok: true });
+    expect(await ctx.presence.activeUsers()).toEqual(new Set());
+    expect((await beat('short', true)).statusCode).toBe(400);
+    expect((await beat('tab with spaces!', true)).statusCode).toBe(400);
+    expect((await app.inject({ method: 'POST', url: '/api/presence', headers: M, payload: { tab: 'tab-12345678' } })).statusCode).toBe(400);
+    const { cookie: _cookie, ...signedOut } = M;
+    expect((await beat('tab-12345678', true, signedOut)).statusCode).toBe(401);
+    expect(await ctx.presence.activeUsers()).toEqual(new Set());
+    // Signing out ends the tab's presence at once.
+    await beat('tab-12345678', true);
+    await app.inject({ method: 'POST', url: '/api/auth/logout', headers: M, payload: {} });
+    expect(await ctx.presence.activeUsers()).toEqual(new Set());
+  });
+
+  it('the health page counts, of the users with their own AI or Twelve Data key, those in the app now', async () => {
+    await ctx.settings.setAiKey(1, 'gemini', 'AIzaSyD-test-key-0123456789abcdef');
+    await ctx.settings.updateFor(1, true, { ai: { provider: 'gemini', scoring: true } });
+    ctx.ai.forget(1);
+    await ctx.settings.setTwelveDataKey(1, 'a'.repeat(32));
+    const health = async () => (await app.inject({ method: 'GET', url: '/api/health', headers: H })).json();
+    expect((await health()).sentiment).toMatchObject({ aiUsers: 1, aiActive: 0 });
+    expect((await health()).twelveData).toMatchObject({ users: 1, active: 0 });
+    await beat('tab-12345678', true);
+    expect((await health()).sentiment).toMatchObject({ aiUsers: 1, aiActive: 1 });
+    expect((await health()).twelveData).toMatchObject({ users: 1, active: 1 });
+  });
+
+  it('the Twelve Data plan is read only for a user in the app, at most every 6 hours', async () => {
+    registerJobs(ctx);
+    let reads = 0;
+    setFetchImpl((async (input: string | URL | Request) => {
+      const u = new URL(String(input));
+      if (u.pathname === '/api_usage') {
+        reads++;
+        return new Response(JSON.stringify({ current_usage: 0, plan_limit: 8, plan_daily_limit: 800, plan_category: 'basic', timestamp: 'x' }));
+      }
+      throw new Error(`unexpected request ${u}`);
+    }) as typeof fetch);
+    await ctx.settings.setTwelveDataKey(1, 'a'.repeat(32));
+    await ctx.scheduler.trigger(TD_PLAN_JOB);
+    expect(reads).toBe(0);
+    await beat('tab-12345678', true);
+    await ctx.scheduler.trigger(TD_PLAN_JOB);
+    expect(reads).toBe(1);
+    // Read a moment ago: not again.
+    await ctx.scheduler.trigger(TD_PLAN_JOB);
+    expect(reads).toBe(1);
+    // The plan read six hours ago (as the other instance would see it): not while gone from the app; again once back.
+    await ctx.db.run("UPDATE market_cache SET value = JSON_MODIFY(value, '$.at', ?) WHERE [key] = N'td:plan:1'", [Date.now() - TD_PLAN_EVERY_MS - 60_000]);
+    await beat('tab-12345678', false);
+    await ctx.scheduler.trigger(TD_PLAN_JOB);
+    expect(reads).toBe(1);
+    await beat('tab-12345678', true);
+    await ctx.scheduler.trigger(TD_PLAN_JOB);
+    expect(reads).toBe(2);
   });
 });

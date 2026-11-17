@@ -6,7 +6,7 @@ import type { CalendarEvent, CalendarResponse } from '../../shared/api-types.ts'
 import { CALENDAR_CURRENCIES, IMPACTS, type SettingsView } from '../../shared/settings.ts';
 import { addDays, dayBounds, dayKey, zonedTimeToUtc } from '../../shared/time.ts';
 import { api, errorMessage, qs } from '../api.ts';
-import { fmtCountdown, fmtTime, fmtWeekday } from '../format.ts';
+import { fmtCountdown, fmtTime, fmtUsd, fmtWeekday } from '../format.ts';
 import { useNow, useSettings, useTz } from '../hooks.ts';
 import { ErrorNote, ImpactMark, Loading, Warning } from '../components/ui.tsx';
 import { EventIcon } from '../components/icons.tsx';
@@ -23,6 +23,30 @@ function Deviation({ e }: { e: CalendarEvent }) {
   if (e.deviation === null) return null;
   if (e.deviation === 0) return <span className="text-muted">= așteptări</span>;
   return <span className={e.deviation > 0 ? 'text-link' : 'text-warn'}>{e.deviation > 0 ? '▲ peste așteptări' : '▼ sub așteptări'}</span>;
+}
+
+/** FD-CALACTUAL §2: the value announced, by how it compares with the forecast (none, or equal: the text's colour). */
+const actualTone = (d: number | null) => (d === null || d === 0 ? 'bg-text/10 text-text' : d > 0 ? 'bg-link/12 text-link' : 'bg-warn/12 text-warn');
+/** FD-CALACTUALBIG: an amount shortened, with the currency's symbol so it fits a day's column: "18,52 mld. $". */
+function revenueText(v: number, currency: string | null): string {
+  try {
+    return new Intl.NumberFormat('ro-RO', { style: 'currency', currency: currency ?? 'USD', currencyDisplay: 'narrowSymbol', notation: 'compact', maximumFractionDigits: 2 }).format(v);
+  } catch {
+    return fmtUsd(v, true);
+  }
+}
+
+/**
+ * FD-CALACTUALBIG: a value announced as one element, its label and the value at the same size, coloured by the
+ * surprise; a long one ("Venituri 18,52 mld. $" in a narrow day) breaks only between the two, inside the label.
+ */
+function Announced({ label, value, delta, title }: { label: string; value: string; delta: number | null; title: string }) {
+  return (
+    <span className={clsx('num inline-flex max-w-full flex-wrap items-baseline gap-x-1.5 self-start rounded-md px-1.5 text-[15px] leading-6 font-bold', actualTone(delta))} title={title}>
+      <span>{label}</span>
+      <span>{value}</span>
+    </span>
+  );
 }
 
 function CustomEventForm({ tz, onDone }: { tz: string; onDone: () => void }) {
@@ -125,18 +149,42 @@ function EventCard({ e, now, tz, next, onDelete }: { e: CalendarEvent; now: numb
             {e.source === 'custom' && <span className="tag ml-1.5 align-middle font-normal">personal</span>}
           </span>
         </span>
-        {(e.actual || e.forecast || e.previous) && (
-          <span className="num flex w-full flex-wrap justify-between gap-x-2 text-[11.5px] text-muted">
+        {/* FD-CALACTUAL §2, FD-CALACTUALBIG: the value announced as one large label ("Act." and the value); the forecast and
+            the previous value under it, small. A company's results: EPS and revenue, each with its forecast under it. */}
+        {e.results && e.actual ? (
+          <>
+            <Announced label="EPS" value={e.actual} delta={e.deviation} title="EPS-ul raportat" />
+            {e.forecast && <span className="num text-[11.5px] text-muted" title="Prognoză">Prog. {e.forecast}</span>}
+            {e.results.revenue !== null && (
+              <>
+                <Announced
+                  label="Venituri"
+                  value={revenueText(e.results.revenue, e.results.currency)}
+                  delta={e.results.revenueForecast !== null ? e.results.revenue - e.results.revenueForecast : null}
+                  title="Veniturile raportate"
+                />
+                {e.results.revenueForecast !== null && (
+                  <span className="num text-[11.5px] text-muted" title="Prognoză">
+                    Prog. {revenueText(e.results.revenueForecast, e.results.currency)}
+                  </span>
+                )}
+              </>
+            )}
+          </>
+        ) : (
+          <>
             {e.actual ? (
-              <span className={clsx('font-semibold', e.deviation === null ? 'text-text' : e.deviation > 0 ? 'text-link' : e.deviation < 0 ? 'text-warn' : 'text-text')} title="Actual">
-                Act. {e.actual}
-              </span>
+              <Announced label="Act." value={e.actual} delta={e.deviation} title="Valoarea anunțată" />
             ) : past && e.forecast && now - e.ts < 15 * 60_000 ? (
-              <span className="text-faint">în așteptare</span>
+              <span className="text-[11.5px] text-faint">în așteptare</span>
             ) : null}
-            {e.forecast && <span title="Prognoză">Prog. {e.forecast}</span>}
-            {e.previous && <span title="Anterior">Ant. {e.previous}</span>}
-          </span>
+            {(e.forecast || e.previous) && (
+              <span className="num flex w-full flex-wrap justify-between gap-x-2 text-[11.5px] text-muted">
+                {e.forecast && <span title="Prognoză">Prog. {e.forecast}</span>}
+                {e.previous && <span title="Anterior">Ant. {e.previous}</span>}
+              </span>
+            )}
+          </>
         )}
         {next && !past && <span className="num text-[12px] font-semibold text-accent">în {fmtCountdown(e.ts, now)}</span>}
       </Summary>
@@ -216,14 +264,15 @@ export default function CalendarPage() {
       <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
         <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
           <h1 className="page-title">Calendar economic</h1>
-          <div className="flex items-center gap-1.5">
-            <button className="btn w-[38px] px-0" aria-label="Săptămâna anterioară" onClick={() => setWeek(addDays(week, -7))}>
+          {/* FD-MOBILESYM §4: on a phone across the width, the middle button stretching between the arrows. */}
+          <div className="flex items-center gap-1.5 max-sm:w-full">
+            <button className="btn w-[38px] shrink-0 px-0" aria-label="Săptămâna anterioară" onClick={() => setWeek(addDays(week, -7))}>
               <ChevronLeft size={16} aria-hidden />
             </button>
-            <button className="btn" onClick={() => setWeek(weekStart(todayKey))}>
+            <button className="btn max-sm:flex-1" onClick={() => setWeek(weekStart(todayKey))}>
               Săptămâna curentă
             </button>
-            <button className="btn w-[38px] px-0" aria-label="Săptămâna următoare" onClick={() => setWeek(addDays(week, 7))}>
+            <button className="btn w-[38px] shrink-0 px-0" aria-label="Săptămâna următoare" onClick={() => setWeek(addDays(week, 7))}>
               <ChevronRight size={16} aria-hidden />
             </button>
           </div>
@@ -243,8 +292,9 @@ export default function CalendarPage() {
         )}
       </div>
 
-      <div role="toolbar" aria-label="Filtre" className="panel flex flex-wrap items-center gap-x-5 gap-y-2.5 rounded-[14px] px-3 py-2.5">
-        <div role="group" aria-label="Impact" className="flex flex-wrap items-center gap-1.5">
+      {/* FD-MOBILESYM §4: on a phone each group on its own row, scrolling sideways; the two buttons a pair. */}
+      <div role="toolbar" aria-label="Filtre" className="panel flex flex-wrap items-center gap-x-5 gap-y-2.5 rounded-[14px] px-3 py-2.5 max-sm:flex-col max-sm:items-stretch">
+        <div role="group" aria-label="Impact" className="flex flex-wrap items-center gap-1.5 max-sm:row-fill">
           {IMPACTS.map((i) => (
             <button key={i} type="button" className="chip" aria-pressed={impacts.includes(i)} onClick={() => saveFilters.mutate({ impacts: toggle(impacts, i), currencies, earnings })}>
               {IMPACT_RO[i]}
@@ -252,7 +302,7 @@ export default function CalendarPage() {
           ))}
         </div>
         <span className="h-5 w-px bg-line-strong max-sm:hidden" aria-hidden />
-        <div role="group" aria-label="Valute" className="flex flex-wrap items-center gap-1.5">
+        <div role="group" aria-label="Valute" className="flex flex-wrap items-center gap-1.5 max-sm:row-fill">
           {CALENDAR_CURRENCIES.map((c) => (
             <button key={c} type="button" className="chip" aria-pressed={currencies.includes(c)} onClick={() => saveFilters.mutate({ impacts, currencies: toggle(currencies, c), earnings })}>
               {c === 'ALL' ? 'Global' : c}
@@ -260,18 +310,20 @@ export default function CalendarPage() {
           ))}
         </div>
         <span className="h-5 w-px bg-line-strong max-sm:hidden" aria-hidden />
-        <button
-          type="button"
-          className="chip gap-1.5"
-          aria-pressed={earnings}
-          title="Rezultatele trimestriale ale acțiunilor din listele tale de urmărire (Nasdaq; data confirmată de la TradingView)"
-          onClick={() => saveFilters.mutate({ impacts, currencies, earnings: !earnings })}
-        >
-          <Building2 size={14} aria-hidden /> Rezultate companii
-        </button>
-        <button className="btn ml-auto" onClick={() => setAdding((a) => !a)} aria-expanded={adding}>
-          <Plus size={16} aria-hidden /> Eveniment personal
-        </button>
+        <div className="grid grid-cols-2 gap-2 sm:contents">
+          <button
+            type="button"
+            className="chip gap-1.5 max-sm:min-h-11 max-sm:justify-center"
+            aria-pressed={earnings}
+            title="Rezultatele trimestriale ale acțiunilor din listele tale de urmărire (Nasdaq; data confirmată de la TradingView)"
+            onClick={() => saveFilters.mutate({ impacts, currencies, earnings: !earnings })}
+          >
+            <Building2 size={14} aria-hidden /> Rezultate companii
+          </button>
+          <button className="btn ml-auto max-sm:ml-0 max-sm:min-h-11 max-sm:px-2.5 max-sm:text-[12.5px]" onClick={() => setAdding((a) => !a)} aria-expanded={adding}>
+            <Plus size={16} aria-hidden /> Eveniment personal
+          </button>
+        </div>
         {adding && (
           <div className="w-full border-t border-line pt-3">
             <CustomEventForm tz={tz} onDone={() => setAdding(false)} />

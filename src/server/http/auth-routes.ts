@@ -15,7 +15,7 @@ import { tdPlanKey, tdUsageKey } from '../market/stocks.ts';
 import { scorerStateKey } from '../sentiment/service.ts';
 import { syncStockSources } from '../news/sources.ts';
 import { formatIssues, isDevMail, ValidationError } from '../settings.ts';
-import { isActive, me, sessionToken } from './auth.ts';
+import { isActive, isNativeClient, me, sessionToken } from './auth.ts';
 import { readCookie, setCookie } from './cookies.ts';
 import { hostnameOf, isLoopback } from './security.ts';
 import { NotFoundError } from './errors.ts';
@@ -85,8 +85,11 @@ export async function registerAuthRoutes(app: FastifyInstance, ctx: AppContext):
     await sessions.destroy(sessionToken(req));
     const token = await sessions.create(u.id, 'full', { ip: req.clientIp, userAgent: String(req.headers['user-agent'] ?? '') });
     await users.touchLogin(u.id);
+    const user = await users.publicUser((await users.byId(u.id)) as UserRow);
+    // FD-MOBILEAUTH: the native app gets its token in the body (for the Keychain), never as a cookie.
+    if (isNativeClient(req)) return { status: 'ok' as const, user, token };
     setCookie(req, reply, SESSION_COOKIE, token, { maxAgeMs: FULL_SESSION_MS });
-    return { status: 'ok' as const, user: await users.publicUser((await users.byId(u.id)) as UserRow) };
+    return { status: 'ok' as const, user };
   };
 
   const lockedReply = (ms: number) => fail(429, 'TOO_MANY_ATTEMPTS', `Prea multe încercări. Mai încearcă peste ${minutes(ms)} minute.`);
@@ -211,6 +214,8 @@ export async function registerAuthRoutes(app: FastifyInstance, ctx: AppContext):
         // The password was right, but the budget is shared with the code (Serento): it resets only at the end.
         await sessions.destroy(sessionToken(req));
         const token = await sessions.create(r.user.id, 'pending', { ip: req.clientIp, userAgent: String(req.headers['user-agent'] ?? '') });
+        // FD-MOBILEAUTH: the native app sends the pending session back as Bearer at the code step.
+        if (isNativeClient(req)) return { status: '2fa' as const, ticket: token };
         setCookie(req, reply, SESSION_COOKIE, token, { maxAgeMs: PENDING_SESSION_MS });
         return { status: '2fa' as const };
       }
@@ -285,15 +290,19 @@ export async function registerAuthRoutes(app: FastifyInstance, ctx: AppContext):
 
   app.post('/api/auth/passkey/options', async (req, reply) => {
     const { options, challengeId } = await passkeys.authenticationOptions(relyingParty(req));
+    // FD-PASSKEYAPP: the native app has no cookies: the challenge's id comes back in the body, as the code's ticket.
+    if (isNativeClient(req)) return { options, challengeId };
     setCookie(req, reply, WEBAUTHN_COOKIE, challengeId, { maxAgeMs: CHALLENGE_TTL_MS, path: '/api' });
     return options;
   });
 
   app.post('/api/auth/passkey', async (req, reply) => {
-    const b = parse(z.object({ response: z.record(z.string(), z.unknown()) }), req.body);
+    const b = parse(z.object({ response: z.record(z.string(), z.unknown()), challengeId: z.string().regex(/^[A-Za-z0-9_-]{16,64}$/).optional() }), req.body);
     const rp = relyingParty(req);
-    const challengeId = readCookie(req, WEBAUTHN_COOKIE);
-    setCookie(req, reply, WEBAUTHN_COOKIE, null, { path: '/api' });
+    // The cookie (a browser), cleared; without it, and only for the native app, the id it was given (FD-PASSKEYAPP).
+    const fromCookie = readCookie(req, WEBAUTHN_COOKIE);
+    if (fromCookie) setCookie(req, reply, WEBAUTHN_COOKIE, null, { path: '/api' });
+    const challengeId = fromCookie ?? (isNativeClient(req) ? b.challengeId : undefined);
     const userId = await passkeys.completeAuthentication(challengeId, b.response, rp);
     const u = await users.byId(userId);
     if (!u || u.disabled_at !== null) throw fail(403, 'ACCOUNT_DISABLED', 'Contul este dezactivat. Vorbește cu adminul.');

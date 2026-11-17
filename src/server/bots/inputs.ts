@@ -2,7 +2,7 @@
 // the symbol's own news, the high-impact events ahead; and the AI's look at all of it, when the user wants it.
 import { z } from 'zod';
 import type { BotAiVerdict, BotArea, BotScore, BotSide } from '../../shared/bot.ts';
-import { WEIGHT_RO } from '../../shared/bot.ts';
+import { isUsdQuote, WEIGHT_RO } from '../../shared/bot.ts';
 import type { Timeframe } from '../../shared/time.ts';
 import type { AiService } from '../ai/service.ts';
 import { aiErrorLine, describeAiError } from '../ai/types.ts';
@@ -69,23 +69,32 @@ const verdictSchema = z.object({
   confidence: z.number().int().min(0).max(100),
   reason: z.string().min(1).max(600),
   risks: z.array(z.string().max(200)).max(5),
+  /**
+   * FIX-BOTBUDGET: the trade's amount (its margin), within the bounds given; the bot brings it within them. Required:
+   * OpenAI's strict structured output takes no optional field.
+   */
+  amount: z.number().nonnegative(),
 });
 
-const SYSTEM = `Ești gestionarul de risc al unui bot de tranzacționare. Botul a primit un semnal Slingshot și regulile lui l-au aprobat. Tu decizi dacă intră acum sau nu.
+const SYSTEM = `Ești gestionarul de risc al unui bot de tranzacționare. Botul a primit un semnal Slingshot (confirmat sau încă în formare) și regulile lui l-au aprobat. Tu decizi dacă intră acum sau nu.
 
 Reguli:
 - Răspunzi doar „enter” (intră) sau „skip” (nu intra), cu încrederea 0–100.
 - Un motiv concret pentru „skip”: știrile simbolului contrazic semnalul, un eveniment important e foarte aproape, sentimentul s-a întors brusc.
+- Un semnal încă în formare nu e, în sine, un motiv de „skip”: utilizatorul vrea intrarea devreme, ca să nu piardă mișcarea până la confirmare.
 - Nu judeca stop loss-ul, take profit-ul sau raportul risc / câștig: le stabilește strategia.
 - Fără un motiv concret, lași regulile să decidă: „enter”.
 - „reason”: o singură frază în română, despre acest semnal.
 - „risks”: cel mult 5 riscuri scurte, în română.
+- „amount”: suma tranzacției (marja, fără levier), aleasă în intervalul primit. Pornește de la propunerea botului, care împarte bugetul liber între tranzacțiile care se mai pot deschide. Mai mult pentru un semnal mai sigur, mai puțin pentru unul mai slab. Niciodată sub minim: sub el, tranzacția n-ar aduce profitul minim la take profit.
 - Nu inventa date: folosește doar ce primești.`;
 
 export interface AiAsk {
   symbol: string;
   side: BotSide;
   tf: Timeframe;
+  /** FIX-BOTSHORTS: a setup still forming (its levels move to the signal's at the confirmation), or a confirmed signal. */
+  stage: 'setup' | 'signal';
   price: number;
   sl: number;
   tp: number;
@@ -99,13 +108,25 @@ export interface AiAsk {
   events: CalendarEvent[];
   /** The bot's last results, in percent of the amount used (no sums: FD-AICLARITY). */
   recent: number[];
+  /**
+   * FIX-BOTBUDGET: the trade's amount (its margin): the least that brings the minimum profit at the take profit, the most
+   * allowed, the bot's proposal (the free budget shared among the trades still to open), the free budget, those trades,
+   * the leverage and the currency.
+   */
+  alloc?: { min: number; max: number; suggested: number; free: number; slots: number; lev: number; currency: string };
 }
 
 const fmt = (v: number) => (Math.abs(v) >= 1000 ? v.toFixed(2) : Math.abs(v) >= 1 ? v.toFixed(4) : v.toPrecision(5));
 
+/** FIX-BOTBUDGET: a sum for the AI: two decimals in dollars, six significant digits in a coin. */
+const sum = (v: number, currency: string): string => (isUsdQuote(currency) ? v.toFixed(2) : String(Number(v.toPrecision(6))));
+
 export function aiPrompt(x: AiAsk, now: number): string {
   const lines = [
     `Simbol: ${x.symbol}, timeframe ${x.tf}, semnal ${x.side.toUpperCase()}.`,
+    x.stage === 'setup'
+      ? `Semnalul e încă în formare (setup-ul Slingshot, la închiderea unei lumânări): confirmarea vine când stocasticul iese din ${x.side === 'long' ? 'supravânzare' : 'supracumpărare'}. Botul intră acum, înainte de confirmare${x.levels === 'slingshot' ? `; stop loss-ul e la ${x.side === 'short' ? 'maximul' : 'minimul'} V1, unde Slingshot anulează setup-ul; la confirmare, stop loss-ul și take profit-ul se mută la cele ale semnalului` : ''}.`
+      : 'Semnalul e confirmat.',
     `Preț acum: ${fmt(x.price)}. Stop loss: ${fmt(x.sl)}. Take profit: ${fmt(x.tp)} (${x.levels === 'slingshot' ? 'ale semnalului Slingshot' : 'procentele utilizatorului de la intrare'}).`,
     `Trend (EMA): ${x.trend === 'up' ? 'în sus' : 'în jos'}. Structura pieței: ${x.structure}.`,
     // FD-BOTDIR: the market's score; the side's threshold says which way the bot reads it.
@@ -118,6 +139,11 @@ export function aiPrompt(x: AiAsk, now: number): string {
     `Evenimente cu impact mare (USD) în următoarele 24 h:`,
     ...(x.events.length ? x.events.map((e) => `- peste ${Math.max(0, Math.round((e.ts - now) / 60_000))} min: ${e.title}`) : ['- niciunul']),
     `Ultimele rezultate ale botului (% din suma folosită): ${x.recent.length ? x.recent.map((r) => `${r >= 0 ? '+' : ''}${r.toFixed(1)}%`).join(', ') : 'niciunul'}.`,
+    ...(x.alloc
+      ? [
+          `Suma tranzacției (marja, fără levier; poziția = suma × ${x.alloc.lev}): între ${sum(x.alloc.min, x.alloc.currency)} și ${sum(x.alloc.max, x.alloc.currency)} ${x.alloc.currency}. Propunerea botului: ${sum(x.alloc.suggested, x.alloc.currency)} ${x.alloc.currency} (bugetul liber ${sum(x.alloc.free, x.alloc.currency)} ${x.alloc.currency}, împărțit la ${x.alloc.slots} ${x.alloc.slots === 1 ? 'tranzacție care se mai poate deschide' : 'tranzacții care se mai pot deschide'}).`,
+        ]
+      : []),
   ];
   return lines.join('\n');
 }

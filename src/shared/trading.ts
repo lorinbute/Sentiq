@@ -83,6 +83,8 @@ export interface PlatformTrading {
   etoro?: true;
   /** Alpaca: TP / SL as a bracket order (whole shares), extended hours (limit orders). */
   alpaca?: true;
+  /** FD-PAPER: Sentiq's Paper Trading: shares long and short at 1×, TP / SL on any position; never real. */
+  paper?: true;
   /** How to make a key that can trade but never withdraw, step by step. */
   tradeSteps: string[];
 }
@@ -208,6 +210,16 @@ export const TRADING: Record<ProviderId, PlatformTrading> = {
     tif: [],
     tradeSteps: [],
   },
+  paper: {
+    supported: true,
+    markets: ['spot', 'futures', 'stock'],
+    kinds: { spot: CRYPTO_SPOT, futures: CRYPTO_SPOT, stock: CRYPTO_SPOT },
+    amountIn: ['base', 'quote'],
+    tif: ['gtc'],
+    futures: { marginModes: ['isolated', 'cross'], tpsl: 'attached', maxLeverage: 125 },
+    paper: true,
+    tradeSteps: [],
+  },
   alpaca: {
     supported: true,
     markets: ['stock'],
@@ -251,9 +263,16 @@ export const orderTicketSchema = z
     };
     need(!['limit', 'stop_limit', 'limit_ioc'].includes(t.kind) || t.price !== undefined, 'price', 'Prețul limită lipsește');
     need(!['stop', 'stop_limit', 'mit'].includes(t.kind) || t.triggerPrice !== undefined, 'triggerPrice', 'Prețul de declanșare lipsește');
-    need(t.market === 'futures' || (t.marginMode === undefined && t.reduceOnly !== true), 'marginMode', 'Marja și reduce-only sunt doar pentru futures');
-    need(t.leverage === undefined || t.market !== 'spot', 'leverage', 'Levierul nu se aplică pe spot');
+    // FIX-PAPERLEV: the leverage, the margin and reduce-only off futures depend on the account (a Paper Trading profile
+    // takes them on every market): the trading service says them (`ticketRules`).
   });
+
+/** FIX-PAPERLEV: what a platform's account (not a Paper Trading profile) refuses off futures; null when fine. */
+export function ticketRules(t: Pick<OrderTicket, 'market' | 'leverage' | 'marginMode' | 'reduceOnly'>): string | null {
+  if (t.market !== 'futures' && (t.marginMode !== undefined || t.reduceOnly === true)) return 'Marja și reduce-only sunt doar pentru futures.';
+  if (t.market === 'spot' && t.leverage !== undefined) return 'Levierul nu se aplică pe spot.';
+  return null;
+}
 export type OrderTicket = z.infer<typeof orderTicketSchema>;
 
 // ---------------- FD-ORDEREDIT: changing an open order, or a position's stop loss / take profit ----------------
@@ -531,6 +550,11 @@ export interface InstrumentInfo {
   positionMode?: PositionMode;
   /** Hedge mode: the long and the short kept apart on this instrument (either may be missing). */
   hedgePositions?: { long: HeldPosition | null; short: HeldPosition | null };
+  /**
+   * FIX-BOTMARGIN, futures: the margin modes this account takes from Sentiq (KuCoin's and Bitget's unified accounts: cross
+   * only); null: the account's own (Bybit).
+   */
+  marginModes?: MarginMode[] | null;
 }
 
 /** One way: one position per symbol; hedge: a long and a short side by side (FD-KUCOINHEDGE, FD-HEDGEALL). */
@@ -594,6 +618,8 @@ export interface OrderResult {
   orderId: string | null;
   message: string | null;
   followUps: OrderFollowUp[];
+  /** FD-PAPER: the execution itself, where the platform knows it at once (Paper Trading): a bot books it as it was. */
+  fill?: { price: number; qty: number; fee: number };
 }
 
 /** One line of "Ordinele trimise din Sentiq". */

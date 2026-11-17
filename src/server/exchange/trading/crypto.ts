@@ -9,6 +9,7 @@ import {
   TRADING,
   type HeldPosition,
   type InstrumentInfo,
+  type MarginMode,
   type ModifyHow,
   type ModifyPreview,
   type ModifyResult,
@@ -91,8 +92,18 @@ const protectionDir = (role: 'sl' | 'tp', closing: 'buy' | 'sell'): 'up' | 'down
 const values = (v: Partial<ModifyValues> = {}): ModifyValues => ({ price: v.price ?? null, triggerPrice: v.triggerPrice ?? null, amount: v.amount ?? null, takeProfit: v.takeProfit ?? null, stopLoss: v.stopLoss ?? null });
 const infoOf = (o: Order) => (o.info ?? {}) as Record<string, unknown>;
 
+/** FIX-KUCOINTPSL: KuCoin's TP / SL endpoint documents no entry trigger, and ccxt drops the TP / SL of a stop order. */
+const KUCOIN_STOP_TPSL = 'La KuCoin, TP / SL nu se atașează unui ordin stop: pune-le pe poziție după ce se execută.';
 const KUCOIN_UTA_HEDGE =
   'Pe contul unificat KuCoin (UTA), API-ul KuCoin primește ordine futures doar în modul one-way. Schimbă modul pozițiilor în KuCoin (Futures → Preferințe → Mod poziție, fără poziții deschise), sau tranzacționează din aplicația KuCoin.';
+/**
+ * FIX-KUCOINMARGIN: KuCoin's classic futures keep the margin mode per pair, and refuse an order in the other one (330005,
+ * "The order's margin mode does not match the selected one"). The modes as the order form names them.
+ */
+const MARGIN_LABEL = { cross: 'Cross', isolated: 'Isolated' } as const;
+const KUCOIN_MARGIN_MISMATCH =
+  'KuCoin a refuzat ordinul: perechea e pe cealaltă marjă (cross / isolated) în contul KuCoin. Nu s-a executat nimic. Trimite-l din nou; dacă se repetă, alege marja pe care e perechea în KuCoin.';
+const kucoinMarginMismatch = (raw: string) => /^kucoin\w*\s/i.test(raw) && /\b330005\b|margin mode does not match/i.test(raw);
 const modeChanged = (name: string) => `Modul pozițiilor (one-way / hedge) s-a schimbat pe ${name}: ordinul n-a fost primit. Trimite-l din nou.`;
 /**
  * An exchange's answer to an order sent in the other position mode (FD-HEDGEALL): KuCoin 330012 ("Your order is in
@@ -114,6 +125,7 @@ export function tradingErrorOf(err: unknown, sent: boolean): TradingError {
   if (binanceDenied || err instanceof ccxt.PermissionDenied || err instanceof ccxt.AuthenticationError || err instanceof ccxt.AccountSuspended) {
     return new TradingError('PERMISSION', `Cheia nu are permisiunea de tranzacționare sau nu mai e validă (${msg})`);
   }
+  if (kucoinMarginMismatch(raw)) return new TradingError('REJECTED', KUCOIN_MARGIN_MISMATCH);
   if (err instanceof ccxt.OrderNotFound) return new TradingError('NOT_FOUND', 'Ordinul nu mai e deschis (poate s-a executat sau a fost anulat).');
   if (err instanceof ccxt.RateLimitExceeded || err instanceof ccxt.DDoSProtection) return new TradingError('RATE_LIMIT', `Exchange-ul limitează cererile acum; încearcă din nou peste un minut (${msg})`);
   if (err instanceof ccxt.InvalidOrder) return new TradingError('REJECTED', `Ordin refuzat de exchange: ${msg}`);
@@ -163,6 +175,41 @@ export class CcxtTrader implements Trader {
       }
     }
     return this.uta;
+  }
+
+  /**
+   * FIX-KUCOINMARGIN: the margin mode chosen in KuCoin for the pair (classic futures), or null when it cannot be read.
+   * Taken from KuCoin's own field: ccxt calls anything but "ISOLATED" cross, a missing field included.
+   */
+  private async kucoinPairMargin(ex: Exchange, m: Market): Promise<'cross' | 'isolated' | null> {
+    try {
+      const r = (await ex.fetchMarginMode(m.symbol)) as { info?: { marginMode?: unknown } } | undefined;
+      return marginModeOf(r?.info?.marginMode);
+    } catch (err) {
+      this.log.warn(`trading: kucoin margin mode of ${m.symbol} not read (${tradingErrorOf(err, false).message})`);
+      return null;
+    }
+  }
+
+  /**
+   * FIX-KUCOINMARGIN: the pair moved to the margin mode of the order. KuCoin refuses while the pair has a position or open
+   * orders: then nothing is sent, and the message says why.
+   */
+  private async switchKucoinMargin(ex: Exchange, m: Market, from: 'cross' | 'isolated', to: 'cross' | 'isolated'): Promise<void> {
+    try {
+      await ex.setMarginMode(to, m.symbol);
+    } catch (err) {
+      if (alreadySet(err)) return;
+      const e = tradingErrorOf(err, false);
+      // No answer, a key without the right, the request limit: said as such. Any other answer is KuCoin's refusal.
+      if (err instanceof ccxt.NetworkError || e.code === 'PERMISSION' || e.code === 'RATE_LIMIT') throw e;
+      const msg = (err instanceof Error ? err.message : String(err)).replace(/\s+/g, ' ').slice(0, 300);
+      throw new TradingError(
+        'REJECTED',
+        `KuCoin n-a trecut ${m.symbol} de pe marja ${MARGIN_LABEL[from]} pe ${MARGIN_LABEL[to]} (${msg}). Ordinul n-a fost trimis. Alege „${MARGIN_LABEL[from]}”, sau închide poziția și anulează ordinele de pe pereche.`,
+      );
+    }
+    this.log.info(`trading: kucoin ${m.symbol} margin ${from} → ${to}`);
   }
 
   /**
@@ -310,7 +357,19 @@ export class CcxtTrader implements Trader {
       maxLeverage: market === 'futures' ? (num(m.limits?.leverage?.max) ?? this.platform.futures?.maxLeverage ?? null) : null,
       ...avail,
       ...(hedged !== null ? { positionMode: hedged ? 'hedge' : 'one-way' } : {}),
+      ...(market === 'futures' ? { marginModes: await this.marginModes(ex) } : {}),
     };
+  }
+
+  /**
+   * FIX-BOTMARGIN: the futures margin modes Sentiq can send on this account. The unified accounts of KuCoin and Bitget take
+   * cross only (the checks of `normalize`); Bybit's is the account's own (null).
+   */
+  private async marginModes(ex: Exchange): Promise<MarginMode[] | null> {
+    const modes = this.platform.futures?.marginModes ?? null;
+    if (modes === null) return null;
+    const uta = this.exchange === 'kucoin' ? await this.isUta().catch(() => false) : this.exchange === 'bitget' ? await this.bitgetMode(ex).then((b) => b.uta, () => false) : false;
+    return uta ? ['cross'] : [...modes];
   }
 
   async normalize(t: OrderTicket): Promise<OrderPreview> {
@@ -342,9 +401,25 @@ export class CcxtTrader implements Trader {
     if (futures && (t.takeProfit !== undefined || t.stopLoss !== undefined)) {
       if (p.futures?.tpsl === 'none') errors.push('TP / SL nu se pot atașa aici.');
       if (p.futures?.tpsl === 'after-market' && t.kind !== 'market') errors.push('Pe acest exchange TP / SL se trimit după o intrare la piață: pentru alt tip de ordin, pune-le după ce se execută.');
+      if ((t.kind === 'stop' || t.kind === 'stop_limit') && this.exchange === 'kucoin' && !(await this.isUta())) errors.push(KUCOIN_STOP_TPSL);
     }
 
     const [{ last, bid, ask }, avail] = await Promise.all([this.lastPrice(ex, t.symbol), this.availability(ex, t.market, m, hedged === true)]);
+    // FIX-KUCOINMARGIN: KuCoin's classic futures keep the margin mode per pair. Another one than chosen is switched before
+    // the order, which KuCoin does only while the pair holds no position and no open orders.
+    if (futures && this.exchange === 'kucoin' && !t.reduceOnly && t.marginMode && !(await this.isUta())) {
+      const pair = await this.kucoinPairMargin(ex, m);
+      if (pair !== null && pair !== t.marginMode) {
+        const held = !!(avail.position || avail.hedgePositions?.long || avail.hedgePositions?.short);
+        // Open orders unread: the switch is tried when sending, and KuCoin's refusal said then.
+        const orders = !held && (await this.openOrdersOn(ex, m, 'futures').then((r) => r.orders.length > 0, () => false));
+        const why = `Pe KuCoin, ${t.symbol} e pe marjă ${MARGIN_LABEL[pair]}`;
+        const rule = 'KuCoin schimbă marja unei perechi doar fără poziție și fără ordine';
+        if (held) errors.push(`${why} și are o poziție deschisă; ${rule}. Alege „${MARGIN_LABEL[pair]}”, sau închide poziția întâi.`);
+        else if (orders) errors.push(`${why} și are ordine deschise; ${rule}. Alege „${MARGIN_LABEL[pair]}”, sau anulează ordinele întâi.`);
+        else warnings.push(`${why}: Sentiq o trece pe ${MARGIN_LABEL[t.marginMode]}, cum ai ales, înainte de ordin.`);
+      }
+    }
     const touch = t.side === 'buy' ? (ask ?? last) : (bid ?? last);
     const ref = t.price ?? t.triggerPrice ?? touch;
     if (ref === null) errors.push('Prețul de acum nu se poate citi: încearcă din nou.');
@@ -480,18 +555,24 @@ export class CcxtTrader implements Trader {
   /**
    * Leverage and margin mode before the order, where the exchange keeps them per symbol. A reduce-only order (closing)
    * changes neither: it only names the position's margin mode where the exchange asks for it with every order.
+   * `switchPair` false (a replacement or a position's SL / TP, FD-ORDEREDIT): KuCoin's pair keeps its margin mode, and the
+   * order takes it.
    */
-  private async prepareFutures(ex: Exchange, m: Market, t: OrderTicket, params: Record<string, unknown>, hedged: boolean): Promise<void> {
+  private async prepareFutures(ex: Exchange, m: Market, t: OrderTicket, params: Record<string, unknown>, hedged: boolean, switchPair = true): Promise<void> {
     const lev = t.leverage ?? 1;
     const mode = t.marginMode;
     // Hedge mode, isolated margin: OKX and classic Bitget keep a leverage per side, set on the side the order opens.
     const side = t.side === 'buy' ? 'long' : 'short';
     // Bitget's unified account names the margin modes "crossed" / "isolated", and ccxt passes them on as given.
     const bitgetUta = this.exchange === 'bitget' && (await this.bitgetMode(ex)).uta;
+    // FIX-KUCOINMARGIN: KuCoin's classic futures keep the margin mode per pair, read before every order.
+    const kucoinClassic = this.exchange === 'kucoin' && !(await this.isUta());
     if (t.reduceOnly) {
       if (bitgetUta) params.marginMode = mode === 'isolated' ? 'isolated' : 'crossed';
       else if (this.exchange === 'okx' || this.exchange === 'bitget') params.marginMode = mode ?? 'cross';
-      if (this.exchange === 'kucoin') params.marginMode = mode ?? 'isolated';
+      // A closing order takes the pair's margin mode, which is its position's (KuCoin keeps one per pair): never switched.
+      // Read rather than taken from the position, which ccxt names from a flag its own notes call always false.
+      if (this.exchange === 'kucoin') params.marginMode = (kucoinClassic ? await this.kucoinPairMargin(ex, m) : null) ?? mode ?? 'isolated';
       return;
     }
     const setIgnoring = async (fn: () => Promise<unknown>) => {
@@ -525,7 +606,11 @@ export class CcxtTrader implements Trader {
         params.marginMode = mode ?? 'cross';
         return;
       case 'kucoin': {
-        const m2 = mode ?? 'isolated';
+        // The pair's margin mode, read again now (it may have changed on KuCoin since the check): an order naming none
+        // (a bot's) or replacing one follows it; a new one naming another switches the pair first.
+        const pair = kucoinClassic ? await this.kucoinPairMargin(ex, m) : null;
+        const m2 = switchPair ? (mode ?? pair ?? 'isolated') : (pair ?? mode ?? 'isolated');
+        if (pair !== null && pair !== m2) await this.switchKucoinMargin(ex, m, pair, m2);
         params.marginMode = m2;
         // (Isolated on the unified account is refused by the check: its leverage call takes cross only.)
         if (m2 === 'cross') await setIgnoring(() => ex.setLeverage(lev, m.symbol, { marginMode: m2 }));
@@ -535,6 +620,22 @@ export class CcxtTrader implements Trader {
       default:
         throw new TradingError('UNSUPPORTED', 'Futures nu se pot tranzacționa pe acest exchange din Sentiq.');
     }
+  }
+
+  /**
+   * An entry's attached TP / SL as ccxt takes them. KuCoin's classic futures name them by direction (FIX-KUCOINTPSL):
+   * `triggerStopUpPrice` fires when the price rises to it, `triggerStopDownPrice` when it falls to it, so a long's TP and
+   * SL but a short's SL and TP. ccxt sends `takeProfit` up and `stopLoss` down whatever the side (either one also sends
+   * the order to KuCoin's TP / SL endpoint): a short's go to it swapped. Everywhere else, KuCoin's unified account
+   * included, the exchange takes them by role.
+   */
+  private async attachedTpsl(side: 'buy' | 'sell', stopLoss: number | null | undefined, takeProfit: number | null | undefined): Promise<Record<string, unknown>> {
+    const swap = side === 'sell' && this.exchange === 'kucoin' && !(await this.isUta());
+    const [asStopLoss, asTakeProfit] = swap ? [takeProfit, stopLoss] : [stopLoss, takeProfit];
+    const out: Record<string, unknown> = {};
+    if (asStopLoss != null) out.stopLoss = { triggerPrice: asStopLoss };
+    if (asTakeProfit != null) out.takeProfit = { triggerPrice: asTakeProfit };
+    return out;
   }
 
   /** The stop's direction where the exchange asks for it: a buy stop above the price, a sell stop below. */
@@ -576,10 +677,7 @@ export class CcxtTrader implements Trader {
       if (this.exchange === 'bitget' && !hedged && !(await this.bitgetMode(ex)).uta) params.oneWayMode = true;
       await this.prepareFutures(ex, m, t, params, hedged);
       if (t.reduceOnly) params.reduceOnly = true;
-      if (this.platform.futures?.tpsl === 'attached') {
-        if (t.stopLoss !== undefined) params.stopLoss = { triggerPrice: t.stopLoss };
-        if (t.takeProfit !== undefined) params.takeProfit = { triggerPrice: t.takeProfit };
-      }
+      if (this.platform.futures?.tpsl === 'attached') Object.assign(params, await this.attachedTpsl(t.side, t.stopLoss, t.takeProfit));
     }
     const isLimit = t.kind === 'limit' || t.kind === 'stop_limit';
     if (t.kind === 'stop' || t.kind === 'stop_limit') await this.stopParams(m, t, t.triggerPrice as number, params);
@@ -772,6 +870,9 @@ export class CcxtTrader implements Trader {
         const changesTpsl = after.takeProfit !== before.takeProfit || after.stopLoss !== before.stopLoss;
         if (changesTpsl && !futures) errors.push('TP / SL se pot atașa doar ordinelor futures.');
         else if (changesTpsl && reduceOnly) errors.push('Un ordin care doar închide nu are TP / SL atașate: e el însuși un stop loss sau take profit.');
+        else if (changesTpsl && futures && after.triggerPrice !== null && (after.takeProfit !== null || after.stopLoss !== null) && this.exchange === 'kucoin' && !(await this.isUta())) {
+          errors.push(KUCOIN_STOP_TPSL);
+        }
         // An order that only closes a futures position is replaced new-first (the position is never without it), as its
         // stop loss / take profit would be; any other old-first (it holds funds, or could open twice).
         let how: ModifyHow = mode === 'amend' ? 'amend' : reduceOnly && futures ? 'place-then-cancel' : 'cancel-then-place';
@@ -920,10 +1021,13 @@ export class CcxtTrader implements Trader {
     const p = list.find((x) => x.symbol === m.symbol && (num(x.contracts) ?? 0) > 0 && (positionSideOf(x) ?? 'long') === t.side);
     const size = p ? (num(p.contracts) ?? 0) * (num(p.contractSize) ?? m.contractSize ?? 1) : 0;
     const leverage = p ? Math.min(125, Math.max(1, Math.round(num(p.leverage) ?? 1))) : null;
-    const mode = p ? marginModeOf(p.marginMode) : null;
+    // FIX-KUCOINMARGIN: on KuCoin's classic futures both orders take the pair's margin mode (the position's), read again
+    // when sending; naming the position's here would switch the pair if ccxt misnamed it. The pair's is the one shown.
+    const followPair = this.exchange === 'kucoin' && !(await this.isUta());
+    const mode = p ? ((followPair ? await this.kucoinPairMargin(ex, m) : null) ?? marginModeOf(p.marginMode)) : null;
     const to: 'long' | 'short' = t.side === 'long' ? 'short' : 'long';
     const closing = t.side === 'long' ? 'sell' : 'buy';
-    const base = { accountId: t.accountId, market: 'futures' as const, symbol: t.symbol, side: closing as 'buy' | 'sell', kind: 'market' as const, amountIn: 'base' as const, amount: size > 0 ? size : 1, ...(mode ? { marginMode: mode } : {}) };
+    const base = { accountId: t.accountId, market: 'futures' as const, symbol: t.symbol, side: closing as 'buy' | 'sell', kind: 'market' as const, amountIn: 'base' as const, amount: size > 0 ? size : 1, ...(mode && !followPair ? { marginMode: mode } : {}) };
     if (!p) errors.push('Poziția nu mai e deschisă.');
     // Checked as the two orders they are: the close (reduce-only) and the opposite one (its leverage kept).
     const close = await this.normalize({ ...base, idemKey: subKey(t.idemKey, 1), reduceOnly: true });
@@ -1035,7 +1139,7 @@ export class CcxtTrader implements Trader {
     // A new order that only closes the position at `level` (a stop loss or take profit), sized as the order or position.
     const placeProtection = async (what: 'sl' | 'tp', level: number, contracts: number): Promise<string | null> => {
       const params: Record<string, unknown> = { [what === 'sl' ? 'stopLossPrice' : 'takeProfitPrice']: level, reduceOnly: true, ...hedgeParams() };
-      if (futures) await this.prepareFutures(ex, m, { side: closing, reduceOnly: true, marginMode: step.mode ?? undefined } as OrderTicket, params, it.hedged);
+      if (futures) await this.prepareFutures(ex, m, { side: closing, reduceOnly: true, marginMode: step.mode ?? undefined } as OrderTicket, params, it.hedged, false);
       const n = await ex.createOrder(symbol, 'market', closing, contracts, undefined, params);
       return n.id ? String(n.id) : null;
     };
@@ -1053,11 +1157,8 @@ export class CcxtTrader implements Trader {
         const lev = num(info.leverage) ?? num((o as { leverage?: unknown }).leverage);
         if (!reduce && lev === null) throw new TradingError('REJECTED', 'Levierul ordinului nu se poate citi: ordinul nu se poate înlocui de aici. Anulează-l și pune altul.');
         if (reduce) params.reduceOnly = true;
-        await this.prepareFutures(ex, m, { side, reduceOnly: reduce, marginMode: step.mode ?? undefined, leverage: lev ?? undefined } as OrderTicket, params, it.hedged);
-        if (!reduce && this.platform.futures?.tpsl === 'attached') {
-          if (a.stopLoss !== null) params.stopLoss = { triggerPrice: a.stopLoss };
-          if (a.takeProfit !== null) params.takeProfit = { triggerPrice: a.takeProfit };
-        }
+        await this.prepareFutures(ex, m, { side, reduceOnly: reduce, marginMode: step.mode ?? undefined, leverage: lev ?? undefined } as OrderTicket, params, it.hedged, false);
+        if (!reduce && this.platform.futures?.tpsl === 'attached') Object.assign(params, await this.attachedTpsl(side, a.stopLoss, a.takeProfit));
       }
       if (a.triggerPrice !== null) {
         const dir = step.dir ?? (side === 'buy' ? 'up' : 'down');

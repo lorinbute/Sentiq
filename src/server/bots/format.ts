@@ -1,4 +1,6 @@
 // Numbers in the bots' words (the summary, the journal), as the pages write them: 84.425,3 (FD-BOT §7).
+import { isUsdQuote } from '../../shared/bot.ts';
+
 const formats = new Map<string, Intl.NumberFormat>();
 
 /** A number with at most `max` decimals (at least `min`), in Romanian. */
@@ -17,6 +19,9 @@ export const price = (v: number): string => {
   const a = Math.abs(v);
   return num(v, a >= 1000 ? 2 : a >= 1 ? 4 : a >= 0.01 ? 6 : 8);
 };
+
+/** FIX-BOTBUDGET: a sum in a bot's currency: two decimals in dollars, up to 8 in a coin (0,0005 BTC). */
+export const money = (v: number, currency: string): string => (isUsdQuote(currency) ? num(v, 2, 2) : num(v, 8));
 
 /** An amount of an asset (up to 8 decimals). */
 export const qty = (v: number): string => num(v, 8);

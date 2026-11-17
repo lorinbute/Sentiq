@@ -21,6 +21,16 @@ describe('the schema', () => {
     expect(await schemaVersion(db)).toBe(MIGRATIONS.length);
   });
 
+  it('FIX-SOURCES: migration 15 turns the built-in FXStreet off (refused from Azure), and only it', async () => {
+    const db = await testDb();
+    await db.run("INSERT INTO sources(id, name, url, category, enabled, weight, builtin) VALUES ('fxstreet', 'FXStreet', 'https://www.fxstreet.com/rss/news', 'macro', 1, 0.8, 1), ('fed', 'Federal Reserve', 'https://www.federalreserve.gov/feeds/press_all.xml', 'macro', 1, 1.3, 1)");
+    for (const batch of MIGRATIONS[14]!) await db.run(batch);
+    expect(await db.all('SELECT id, enabled FROM sources ORDER BY id')).toEqual([
+      { id: 'fed', enabled: 1 },
+      { id: 'fxstreet', enabled: 0 },
+    ]);
+  });
+
   it('TABLES names every table of the schema', async () => {
     const db = await testDb();
     const names = (await db.all<{ name: string }>('SELECT name FROM sys.tables WHERE schema_id = SCHEMA_ID() ORDER BY name')).map((r) => r.name);

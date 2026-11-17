@@ -14,7 +14,8 @@ import { chartStyleSchema } from './chart-style.ts';
 export const MARKET_EXCHANGES = ['kucoin', 'binance', 'bybit', 'okx', 'bitget'] as const;
 export type MarketExchange = (typeof MARKET_EXCHANGES)[number];
 /** The timeframes of the Slingshot signals on Today (FD-MARKETSRC §2): every price exchange has them. */
-export const SCANNER_TFS = ['15m', '1h', '4h', '1d'] as const;
+// FD-MOBILESYM §6: as many as fit a phone's row (nine at 390 px).
+export const SCANNER_TFS = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '1d'] as const;
 export const IMPACTS = ['High', 'Medium', 'Low', 'Holiday'] as const;
 export type Impact = (typeof IMPACTS)[number];
 export const CALENDAR_CURRENCIES = ['USD', 'EUR', 'GBP', 'JPY', 'CNY', 'CAD', 'AUD', 'NZD', 'CHF', 'ALL'] as const;
@@ -76,6 +77,8 @@ export const settingsSchema = z.object({
       /** On the chart but not drawn, hidden with the legend's eye (FD-PREMIUMHIDE). */
       slingshotHidden: z.boolean().default(false),
       lmaHidden: z.boolean().default(false),
+      /** The price pane's list of indicators folded under the status line; they stay drawn (FD-LEGENDCOLLAPSE). */
+      legendCollapsed: z.boolean().default(false),
       /** Share of the chart height given to the LMA pane. */
       lmaPane: z.number().min(0.1).max(0.7).default(0.25),
       /** The price scale is logarithmic ("L" under it, FD-CHARTTV §4). */

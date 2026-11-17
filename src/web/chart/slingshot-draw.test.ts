@@ -5,7 +5,7 @@ import { buildSegments, markerState, SIGNAL_SIZES, slingshotShapes, textPx } fro
 
 const p = DEFAULT_SLINGSHOT_PARAMS;
 const candle = (h: number, l: number): Candle => ({ t: 0, o: l, h, l, c: h, v: 1 });
-const result = (atr: SlingshotResult['atr'], atrShort: SlingshotResult['atrShort'] = null): SlingshotResult => ({ emaFast: [], emaSlow: [], uptrend: [], markers: [], signals: [], alerts: [], atr, atrShort, ms: null, last: null, warnings: [] });
+const result = (atr: SlingshotResult['atr'], atrShort: SlingshotResult['atrShort'] = null): SlingshotResult => ({ emaFast: [], emaSlow: [], uptrend: [], markers: [], signals: [], setups: [], alerts: [], atr, atrShort, ms: null, last: null, warnings: [] });
 const atr = (side: 'long' | 'short', tp: number, sl: number) => ({ side, tp, sl, fromBar: 1, toBarTp: 50, toBarSl: 50, labelBar: 5, showLines: true, showLabels: true });
 
 describe('Slingshot drawing (FD-SLINGSHOT34)', () => {

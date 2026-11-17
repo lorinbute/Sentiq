@@ -1,6 +1,7 @@
 // Scores the news. The local model scores every item for everyone (the common score, on the news row: pending while
 // sentiment_engine IS NULL); since FD-AIKEYS a user who chose so has their own AI score the last days' news too, with
-// their key, kept apart (news_ai_scores) and used for them alone in place of the common score.
+// their key, kept apart (news_ai_scores) and used for them alone in place of the common score; since FD-KEYIDLE only
+// while they use Sentiq.
 import { createHash } from 'node:crypto';
 import type { Db } from '../db/database.ts';
 import { BIN } from '../db/schema.ts';
@@ -57,12 +58,17 @@ export class SentimentService {
   private readonly ai: AiService;
   private readonly nli: NliScorer;
   private readonly log: Logger;
+  /** FD-KEYIDLE: the users using Sentiq now (only their AI scores); absent, everyone (tests). */
+  private readonly present: (() => Promise<Set<number>>) | null;
+  /** FIX-KEYIDLE2: the scoring users who were in Sentiq at the last round (their comings and goings are logged). */
+  private lastHere = new Set<number>();
 
-  constructor(db: Db, ai: AiService, nli: NliScorer, log: Logger) {
+  constructor(db: Db, ai: AiService, nli: NliScorer, log: Logger, present: (() => Promise<Set<number>>) | null = null) {
     this.db = db;
     this.ai = ai;
     this.nli = nli;
     this.log = log;
+    this.present = present;
     this.local = new LocalEngine(nli);
     nli.onReady(() => {
       // Items scored by the rules-only fallback get a proper score now.
@@ -203,13 +209,16 @@ export class SentimentService {
 
   /**
    * Each scoring user's AI scores up to `AI_PER_RUN` of the last days' news it has not scored yet, newest first; a few
-   * users at a time, so that one's slow provider does not hold the others up (FD-AISLOW §3). Returns how many were
-   * scored in all; one user's failure is thrown once the others are done.
+   * users at a time, so that one's slow provider does not hold the others up (FD-AISLOW §3). Only the users using
+   * Sentiq now (FD-KEYIDLE): the others' keys wait, and their news are scored when they come back. Returns how many
+   * were scored in all; one user's failure is thrown once the others are done.
    */
   async scoreUsers(signal?: AbortSignal, now = Date.now()): Promise<number> {
     const users = await this.ai.scoringUsers();
     for (const id of this.scorers.keys()) if (!users.includes(id)) this.scorers.delete(id);
-    const queue = [...users];
+    const here = this.present ? await this.present() : null;
+    const queue = here ? users.filter((id) => here.has(id)) : [...users];
+    if (here) this.logComings(queue, here);
     let total = 0;
     const errors: unknown[] = [];
     const worker = async () => {
@@ -228,6 +237,21 @@ export class SentimentService {
     await Promise.all(this.stateWrites.values());
     if (errors.length > 0) throw errors[0];
     return total;
+  }
+
+  /**
+   * FIX-KEYIDLE2: says in the log when a user's AI starts or stops working because they came to Sentiq or left it, so
+   * when their key worked can be checked afterwards.
+   */
+  private logComings(scoring: number[], present: Set<number>): void {
+    const now = new Set(scoring);
+    for (const id of now) if (!this.lastHere.has(id)) this.log.info(`ai: user ${id} is in Sentiq: their AI scores`);
+    for (const id of this.lastHere) {
+      if (now.has(id)) continue;
+      // Still here, but no longer scoring with their own AI (the local model chosen, the key removed).
+      this.log.info(present.has(id) ? `ai: user ${id} no longer scores with their own AI` : `ai: user ${id} left Sentiq: their AI waits`);
+    }
+    this.lastHere = now;
   }
 
   /** One user's turn: up to `AI_PER_RUN` news their AI has not scored yet. Returns how many it scored. */

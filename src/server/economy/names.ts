@@ -261,6 +261,9 @@ export const RO_NAMES: Record<string, string> = {
   'cushing crude oil stocks': 'Stocurile de țiței de la Cushing',
 };
 
+/** Whether the page has a Romanian name, an explanation or an "essential" mark for this (lower-case) name. */
+export const knownName = (n: string): boolean => n in RO_NAMES || n in RO_EXPLAIN || ESSENTIAL.has(n);
+
 /** Short Romanian explanations the Calendar's glossary does not have. */
 export const RO_EXPLAIN: Record<string, string> = {
   'manufacturing pmi': 'Indicele managerilor de achiziții din industrie: peste 50 = expansiune, sub 50 = contracție.',

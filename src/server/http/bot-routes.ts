@@ -1,7 +1,7 @@
 // The trading bots' API (FD-BOT, TD-BOT §5): each user's own bots only (anybody else's are "not found").
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { botEditSchema, botInputSchema, botStopSchema } from '../../shared/bot.ts';
+import { botEditSchema, botInputSchema, botLevelMoveSchema, botPatchSchema, botStopSchema } from '../../shared/bot.ts';
 import type { AppContext } from '../context.ts';
 import { formatIssues, ValidationError } from '../settings.ts';
 import { me } from './auth.ts';
@@ -17,12 +17,19 @@ function parse<T extends z.ZodType>(schema: T, data: unknown): z.infer<T> {
 export async function registerBotRoutes(app: FastifyInstance, ctx: AppContext): Promise<void> {
   const bots = ctx.bots;
   app.get('/api/bots', async (req) => bots.list(me(req).id));
+  // FIX-BOTLEVELS: the levels the real bots keep for their open positions (the chart draws them).
+  app.get('/api/bots/levels', async (req) => bots.levels(me(req).id));
   app.get('/api/bots/:id', async (req) => bots.detail(me(req).id, parse(idParam, req.params).id));
   app.post('/api/bots/check', async (req) => bots.check(me(req).id, parse(botInputSchema, req.body)));
   app.post('/api/bots', async (req) => bots.create(me(req).id, parse(botInputSchema, req.body)));
-  app.put('/api/bots/:id', async (req) => bots.edit(me(req).id, parse(idParam, req.params).id, parse(botEditSchema, req.body)));
+  // FD-BOTEDIT: every setting ({ input, positions }); a page from before it sends the old patch (no `input`).
+  const editBody = (body: unknown) => (body && typeof body === 'object' && 'input' in body ? parse(botEditSchema, body) : parse(botPatchSchema, body));
+  app.post('/api/bots/:id/check', async (req) => bots.checkEdit(me(req).id, parse(idParam, req.params).id, parse(botEditSchema, req.body)));
+  app.put('/api/bots/:id', async (req) => bots.edit(me(req).id, parse(idParam, req.params).id, editBody(req.body)));
   app.post('/api/bots/:id/pause', async (req) => bots.pause(me(req).id, parse(idParam, req.params).id));
   app.post('/api/bots/:id/resume', async (req) => bots.resume(me(req).id, parse(idParam, req.params).id));
+  // FIX-BOTDRAG: a stop loss / take profit of the bot's position dragged on the chart.
+  app.post('/api/bots/:id/levels', async (req) => bots.moveLevel(me(req).id, parse(idParam, req.params).id, parse(botLevelMoveSchema, req.body)));
   app.post('/api/bots/:id/stop', async (req) => bots.stop(me(req).id, parse(idParam, req.params).id, parse(botStopSchema, req.body).action));
   app.delete('/api/bots/:id', async (req) => {
     await bots.remove(me(req).id, parse(idParam, req.params).id);

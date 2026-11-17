@@ -11,6 +11,7 @@ import { SERVER_IPS, SERVER_IPS_TEXT } from '../../shared/server-ips.ts';
 import { TRADING } from '../../shared/trading.ts';
 import { api, errorMessage } from '../api.ts';
 import { ProviderLogo } from './ProviderLogo.tsx';
+import { PaperForm } from './PaperDialogs.tsx';
 import { invalidatePriceSource } from '../hooks.ts';
 import { useScrollLock } from '../scroll-lock.ts';
 import { useVisibleArea } from '../visible-area.ts';
@@ -87,10 +88,10 @@ function ProviderCard({ p, onPick }: { p: ProviderDef; onPick: (p: ProviderDef) 
         <ProviderLogo id={p.id} size={30} />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-[14px] font-semibold text-text">{p.name}</span>
-          <span className="block text-[11.5px] text-faint">{KIND_RO[p.kind]}</span>
+          <span className="block text-[11.5px] text-faint">{p.paper ? 'Crypto sau acțiuni' : KIND_RO[p.kind]}</span>
         </span>
       </span>
-      <span className="text-[12px] leading-[1.45] text-muted">Citește {p.reads}.</span>
+      <span className="text-[12px] leading-[1.45] text-muted">{p.paper ? 'Tranzacții fără bani reali, ca la TradingView: buget, comision, ordine și SL / TP.' : `Citește ${p.reads}.`}</span>
     </button>
   );
 }
@@ -258,7 +259,9 @@ export function AccountWizard({ onClose, onDone }: { onClose: () => void; onDone
   const titleId = useId();
   const list = useMemo(() => {
     const f = q.trim().toLowerCase();
-    return PROVIDERS.filter((p) => (filter === 'all' || p.kind === filter) && (!f || p.name.toLowerCase().includes(f)));
+    // FD-PAPER: Paper Trading first, in every filter (a profile is crypto or shares, chosen in its form).
+    const all = [...PROVIDERS.filter((p) => p.paper), ...PROVIDERS.filter((p) => !p.paper)];
+    return all.filter((p) => (filter === 'all' || p.paper || p.kind === filter) && (!f || p.name.toLowerCase().includes(f)));
   }, [filter, q]);
 
   useEffect(() => {
@@ -306,7 +309,7 @@ export function AccountWizard({ onClose, onDone }: { onClose: () => void; onDone
         <header className="flex items-center gap-3 border-b border-line px-5 py-4">
           {picked && !done && <ProviderLogo id={picked.id} size={28} />}
           <h2 id={titleId} className="flex min-w-0 flex-1 items-center text-[16px] font-semibold">
-            {done ? 'Cont conectat' : picked ? `Conectează ${picked.name}` : 'Adaugă un cont'}
+            {done ? (done.exchange === 'paper' ? 'Profil creat' : 'Cont conectat') : picked ? (picked.paper ? 'Profil Paper Trading' : `Conectează ${picked.name}`) : 'Adaugă un cont'}
           </h2>
           <span className="hidden text-[12px] text-faint sm:inline">{done ? '' : picked ? 'Pasul 2 din 2' : 'Pasul 1 din 2'}</span>
           <button className="btn w-[38px] px-0" onClick={onClose} aria-label="Închide">
@@ -320,8 +323,12 @@ export function AccountWizard({ onClose, onDone }: { onClose: () => void; onDone
                 <Check size={24} aria-hidden />
               </span>
               <ProviderLogo id={done.exchange} size={40} />
-              <p className="text-[15px] font-semibold">„{done.label}” e conectat.</p>
-              <p className="max-w-[48ch] text-[13px] text-muted">Pozițiile, ordinele și tranzacțiile apar în Tranzacții și, pe grafice, la „Pozițiile mele”.</p>
+              <p className="text-[15px] font-semibold">„{done.label}” e {done.exchange === 'paper' ? 'gata' : 'conectat'}.</p>
+              <p className="max-w-[48ch] text-[13px] text-muted">
+                {done.exchange === 'paper'
+                  ? 'Îl alegi în biletul de ordin („Tranzacționează”, „Ordin nou”) și la boți. Pozițiile, ordinele și istoricul lui apar în Tranzacții și, pe grafice, la „Pozițiile mele”.'
+                  : 'Pozițiile, ordinele și tranzacțiile apar în Tranzacții și, pe grafice, la „Pozițiile mele”.'}
+              </p>
               <button
                 className="btn btn-primary mt-2"
                 onClick={() => {
@@ -332,6 +339,8 @@ export function AccountWizard({ onClose, onDone }: { onClose: () => void; onDone
                 Gata
               </button>
             </div>
+          ) : picked?.paper ? (
+            <PaperForm onBack={() => setPicked(null)} onCreated={setDone} />
           ) : picked ? (
             <KeyForm p={picked} onBack={() => setPicked(null)} onConnected={setDone} />
           ) : (

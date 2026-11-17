@@ -13,17 +13,37 @@ import type { ParsedItem } from './parser.ts';
 import type { SourceRow } from './sources.ts';
 
 export const CLUSTER_WINDOW_MS = 36 * 3_600_000;
+/**
+ * FIX-DBSTUCK: the news read for the clustering before the write lock; under it, those another import added since: by
+ * `fetched_at` (each import's start, its `now`), from this long before this import's start.
+ */
+export const INGEST_MARGIN_MS = 10 * 60_000;
+/** FIX-DBSTUCK: a long tagging lets the process answer (requests, reads, the jobs' lease) every this many news. */
+const YIELD_EVERY = 100;
+
+const tick = () => new Promise<void>((r) => setImmediate(r));
+
+/** `items.map(fn)`, letting the process answer every YIELD_EVERY items (FIX-DBSTUCK). */
+export async function mapYielding<T, R>(items: readonly T[], fn: (item: T) => R, every = YIELD_EVERY): Promise<R[]> {
+  const out: R[] = [];
+  for (let i = 0; i < items.length; i++) {
+    if (i > 0 && i % every === 0) await tick();
+    out.push(fn(items[i] as T));
+  }
+  return out;
+}
 
 export const newsId = (sourceId: string, item: Pick<ParsedItem, 'guid' | 'link' | 'title'>): string =>
   createHash('sha1')
     .update(`${sourceId}|${item.guid || canonicalUrl(item.link) || item.title}`)
     .digest('hex');
 
-async function loadCandidates(db: Db, now: number): Promise<ClusterCandidate[]> {
+/** The news of the clustering window; FIX-DBSTUCK: `since`, only those fetched from then on. */
+async function loadCandidates(db: Db, now: number, since: number | null = null): Promise<ClusterCandidate[]> {
   const rows = await db.all<{ id: string; cluster_id: string; title: string; coins: string | null }>(
     `SELECT n.id, n.cluster_id, n.title, (SELECT STRING_AGG(coin, ',') FROM news_coins c WHERE c.news_id = n.id AND c.coin NOT LIKE N'#%') AS coins
-     FROM news n WHERE n.published_at >= ? ORDER BY n.published_at, n.id`,
-    [now - CLUSTER_WINDOW_MS],
+     FROM news n WHERE n.published_at >= ?${since === null ? '' : ' AND n.fetched_at >= ?'} ORDER BY n.published_at, n.id`,
+    since === null ? [now - CLUSTER_WINDOW_MS] : [now - CLUSTER_WINDOW_MS, since],
   );
   return rows.map((r) => ({ id: r.id, clusterId: r.cluster_id, tokens: titleTokens(r.title), coins: r.coins ? r.coins.split(',') : [] }));
 }
@@ -129,8 +149,19 @@ export async function ingestItems(
     seenInBatch.add(id);
     batch.push({ item, id });
   }
+  // FIX-DBSTUCK: what needs no lock is done before it: the window's news (the largest read) and each item's tags,
+  // category and title words. Under the lock, only the news another import added since, the duplicates and the writes.
+  const prepared = new Map(
+    batch.map(({ item, id }) => {
+      const coins = detectCoins(detector, item.title, item.summary);
+      return [id, { coins, cls: weigh(item.title, item.summary, coins), tokens: titleTokens(item.title), canonical: canonicalUrl(item.link), publishedAt: effectivePublishedAt(item.publishedAt, now) }] as const;
+    }),
+  );
+  const base = await loadCandidates(db, now);
   await db.tx(async () => {
-    const candidates = await loadCandidates(db, now);
+    // `fetched_at` is each import's `now` (its start, as this one's): those that started up to the margin before it.
+    const seen = new Set(base.map((c) => c.id));
+    const candidates = [...base, ...(await loadCandidates(db, now, now - INGEST_MARGIN_MS)).filter((c) => !seen.has(c.id))];
     const existing = new Map(
       (await db.all<{ id: string; title: string }>(`SELECT id, title FROM news WHERE id IN (SELECT value COLLATE ${BIN} FROM OPENJSON(?))`, [JSON.stringify(batch.map((b) => b.id))])).map((r) => [
         r.id,
@@ -138,7 +169,7 @@ export async function ingestItems(
       ]),
     );
     // Duplicates across sources: the same canonical address already stored (found through its hash, TD-AZURE §3).
-    const wanted = [...new Set(batch.filter((b) => !existing.has(b.id)).map((b) => canonicalUrl(b.item.link)).filter((c): c is string => !!c))];
+    const wanted = [...new Set(batch.filter((b) => !existing.has(b.id)).map((b) => prepared.get(b.id)!.canonical).filter((c): c is string => !!c))];
     const canonicals = new Set(
       wanted.length
         ? (
@@ -152,12 +183,12 @@ export async function ingestItems(
     const inserts: NewsInsert[] = [];
     const insertCoins: { news_id: string; coin: string }[] = [];
     for (const { item, id } of batch) {
-      const canonical = canonicalUrl(item.link);
+      const pre = prepared.get(id)!;
+      const canonical = pre.canonical;
       const title = existing.get(id);
       if (title !== undefined) {
         if (title !== item.title) {
-          const coins = detectCoins(detector, item.title, item.summary);
-          const cls = weigh(item.title, item.summary, coins);
+          const { coins, cls } = pre;
           // A new title may be about another category (FD-MULTICAT); one category: the source's, as before.
           await db.run(
             `UPDATE news SET title = ?, summary = ?, category = ?, relevance = ?, impact = ?, flags = ?,
@@ -178,14 +209,12 @@ export async function ingestItems(
         res.skipped++;
         continue;
       }
-      const publishedAt = effectivePublishedAt(item.publishedAt, now);
+      const publishedAt = pre.publishedAt;
       if (publishedAt === null) {
         res.skipped++;
         continue;
       }
-      const coins = detectCoins(detector, item.title, item.summary);
-      const cls = weigh(item.title, item.summary, coins);
-      const tokens = titleTokens(item.title);
+      const { coins, cls, tokens } = pre;
       // The same story by its words and its tickers, not by the index tags (FD-INDEXNEWS: "#CO", "#SPX").
       const named = coins.filter((c) => !c.startsWith('#'));
       const clusterId = findCluster(tokens, named, candidates) ?? id;
@@ -223,7 +252,7 @@ export async function ingestItems(
 export async function retagCoins(db: Db, detector: CoinDetector, from: number, to: number): Promise<number> {
   const rows = await db.all<{ id: string; title: string; summary: string }>('SELECT id, title, summary FROM news WHERE published_at >= ? AND published_at < ?', [from, to]);
   if (!rows.length) return 0;
-  const tagged = rows.map((r) => ({ id: r.id, coins: detectCoins(detector, r.title, r.summary) }));
+  const tagged = await mapYielding(rows, (r) => ({ id: r.id, coins: detectCoins(detector, r.title, r.summary) }));
   await db.tx(() =>
     writeNewsCoins(
       db,
@@ -267,7 +296,7 @@ async function reclassifyRows(
   classifier: CoinDetector,
   rows: { id: string; title: string; summary: string; category: SourceRow['category']; categories: string | null }[],
 ): Promise<void> {
-  const updates = rows.map((r) => {
+  const updates = await mapYielding(rows, (r) => {
     const coins = detectCoins(detector, r.title, r.summary);
     const cls = weighItem({ category: r.category, categories: r.categories }, r.title, r.summary, coins, classifier === detector ? coins : detectCoins(classifier, r.title, r.summary), detector);
     return { id: r.id, category: cls.category, relevance: cls.relevance, impact: cls.impact, flags: JSON.stringify(cls.flags), coins };
@@ -286,8 +315,11 @@ async function reclassifyRows(
   });
 }
 
-/** FD-MACRORULES: the version of the rules the stored news were classified with (kept in the daily job's data). */
-export const CLASSIFY_VERSION = 2;
+/**
+ * FD-MACRORULES: the version of the rules the stored news were classified with (kept in the daily job's data). 3 =
+ * FIX-SENTWEIGHT: the energy and AI themes (their importance, relevance and category).
+ */
+export const CLASSIFY_VERSION = 3;
 
 /**
  * Once after an update that changes how news are classified: every stored item classified again, before the history is

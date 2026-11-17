@@ -110,6 +110,8 @@ const slingshotObject = z.object({
   atrLineLengthSL: z.number().int().min(0).max(500).default(50),
   showLabels: z.boolean().default(true),
   showLines: z.boolean().default(true),
+  // FD-SSTABLE: the TAKE PROFIT / STOP LOSS table in the bottom-right corner (display only; signals and levels unchanged)
+  showTable: z.boolean().default(true),
   hideAtrOnTP: z.boolean().default(true),
   hideAtrOnStop: z.boolean().default(true),
   // FD-STYLEUNIFY: each side's take profit and stop loss level: its line (colour, width, style) and its label's size

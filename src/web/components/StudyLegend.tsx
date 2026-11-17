@@ -3,7 +3,7 @@
 // The buttons come before the values (FD-CHARTSTEADY §2): values change with the cursor and must not move them.
 import type { ReactNode } from 'react';
 import { clsx } from 'clsx';
-import { Eye, EyeOff, Settings2, X } from 'lucide-react';
+import { ChevronDown, ChevronUp, Eye, EyeOff, Settings2, X } from 'lucide-react';
 import type { Study } from '../../shared/studies.ts';
 import type { StudyModule } from '../indicators/catalog.ts';
 import { fmtStudyValue, plotShown } from '../indicators/compute.ts';
@@ -37,6 +37,27 @@ export function LegendButtons({ name, hidden, onToggle, onSettings, onRemove }: 
  */
 export function LegendRow({ children, dim }: { children: ReactNode; dim?: boolean }) {
   return <div className={clsx('flex max-w-full flex-wrap items-center gap-x-2 gap-y-0.5 rounded-md bg-[color-mix(in_srgb,var(--color-chart)_var(--legend-bg,75%),transparent)] px-1.5 text-[12px] leading-5', dim && 'opacity-60')}>{children}</div>;
+}
+
+/**
+ * FD-LEGENDCOLLAPSE: TradingView's button under the price pane's indicators: ⌃ folds the list, ⌄ unfolds it. The same size
+ * and left edge in both states (in line with the rows' text); shown whatever "Butoane → Panou" says, or a folded list could
+ * not be opened again.
+ */
+export function LegendCollapse({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
+  const label = collapsed ? 'Arată lista indicatorilor' : 'Ascunde lista indicatorilor';
+  return (
+    <button
+      type="button"
+      className="pointer-events-auto mt-1 ml-1.5 inline-flex h-5 w-7 items-center justify-center rounded-md border border-line-strong bg-chart text-muted transition-colors hover:bg-hover hover:text-text"
+      onClick={onToggle}
+      aria-expanded={!collapsed}
+      aria-label={label}
+      title={label}
+    >
+      {collapsed ? <ChevronDown size={14} aria-hidden /> : <ChevronUp size={14} aria-hidden />}
+    </button>
+  );
 }
 
 /** FD-CHARTSETTINGS: an indicator's title, its inputs and its values, each shown as the status line's settings say. */

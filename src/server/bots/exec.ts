@@ -1,7 +1,7 @@
-// How a bot's order is carried out (TD-BOT §4): in a simulation at the price of the look, with the fee of the settings;
-// for real through the trading service (the same checks, journal and key as the order form), rounded to the platform's
+// How a bot's order is carried out (TD-BOT §4): through the trading service on the bot's account (the same checks,
+// journal and key as the order form; FD-PAPER: a Paper Trading profile's engine fills it), rounded to the platform's
 // step first. Every real order's key is saved before it leaves, so a restart sends it again with the same key.
-import { perpetualOf, type BotMarket, type BotSide } from '../../shared/bot.ts';
+import { perpetualOf, type BotMarginMode, type BotMarket, type BotSide } from '../../shared/bot.ts';
 import type { ClosablePosition, InstrumentInfo, OrderTicket } from '../../shared/trading.ts';
 import type { TradingService } from '../exchange/trading/service.ts';
 import { TradingError } from '../exchange/trading/types.ts';
@@ -16,7 +16,12 @@ export interface BotOrder {
   /** Closing what the bot holds (reduce-only on futures; at eToro, the bot's own positions). */
   reduce: boolean;
   lev: number;
-  /** The price of the look: the fill of a simulation, the estimate of a real one. */
+  /**
+   * FIX-BOTMARGIN, futures: the margin it goes with (an opening: the settings'; what adds to or closes a position: the
+   * position's). Absent: none named, the pair's (a position from before FIX-BOTMARGIN).
+   */
+  mm?: BotMarginMode;
+  /** The price of the look: the order's estimate (its fill when the platform does not say one). */
   price: number;
   /** eToro: the stop loss a short opens with (the platform asks for one, FD-BOT §10). */
   sl?: number | null;
@@ -44,19 +49,6 @@ export interface Executor {
   order(o: BotOrder, key: string, ready?: (qty: number) => Promise<void>, again?: boolean): Promise<ExecResult>;
 }
 
-/** A simulation: everything fills at the look's price. */
-export class PaperExec implements Executor {
-  private readonly feePct: number;
-
-  constructor(feePct: number) {
-    this.feePct = feePct;
-  }
-
-  async order(o: BotOrder): Promise<ExecResult> {
-    return { ok: true, fill: { qty: o.qty, price: o.price, fee: (o.qty * o.price * this.feePct) / 100 } };
-  }
-}
-
 const RETRY = new Set(['RATE_LIMIT', 'IN_PROGRESS']);
 const REFUSED = new Set(['INVALID', 'MIN_SIZE', 'INSUFFICIENT', 'REJECTED', 'MARKET_CLOSED']);
 const INSTRUMENT_TTL_MS = 60 * 60_000;
@@ -73,10 +65,14 @@ function outcomeOf(err: unknown): ExecResult {
   return { ok: false, kind: 'retry', message: (err as Error).message };
 }
 
-/** Rounds down to the platform's step (a step of 0.001 keeps 0.0019 as 0.001). */
+/**
+ * Rounds down to the platform's step (a step of 0.001 keeps 0.0019 as 0.001). A whole number of steps stays whole: the
+ * tolerance is relative, since 3 × 2.56410256 / 1e-8 is 769230767.9999999 in floating point, not 769230768.
+ */
 export function floorToStep(qty: number, step: number | null): number {
   if (step === null || !(step > 0)) return qty;
-  const n = Math.floor(qty / step + 1e-9);
+  const x = qty / step;
+  const n = Math.floor(x + Math.max(1e-9, Math.abs(x) * 1e-12));
   return Number((n * step).toFixed(12));
 }
 
@@ -87,6 +83,8 @@ export interface RealExecDeps {
   market: BotMarket;
   /** The account's platform: eToro closes by position (FD-BOT §10). */
   etoro: boolean;
+  /** FIX-PAPERLEV: a Paper Trading profile: every market takes leverage, margin and reduce-only, as futures. */
+  paper?: boolean;
   /** eToro: the bot's positions (the engine's state, changed here) and the openings still to find. */
   refs: Record<string, BrokerRefs>;
   refsWait: Record<string, RefsWait>;
@@ -173,6 +171,7 @@ export class RealExec implements Executor {
     }
     const symbol = this.tradeSymbol(o.symbol);
     const futures = this.d.market === 'futures';
+    const margined = futures || this.d.paper === true;
     let qty = o.qty;
     try {
       if (!again) {
@@ -184,7 +183,7 @@ export class RealExec implements Executor {
         if (info.minCost !== null && qty * o.price < info.minCost) return { ok: false, kind: 'refused', message: `Ordinul (${(qty * o.price).toFixed(2)} ${info.currency}) e sub minimul platformei pe ${symbol} (${info.minCost} ${info.currency}).` };
         await ready?.(qty);
       }
-      await this.d.trading.place(this.d.userId, {
+      const result = await this.d.trading.place(this.d.userId, {
         accountId: this.d.accountId,
         idemKey: key,
         market: this.d.market,
@@ -193,9 +192,12 @@ export class RealExec implements Executor {
         kind: 'market',
         amount: qty,
         amountIn: 'base',
-        ...(futures && !o.reduce ? { leverage: Math.max(1, Math.min(125, Math.round(o.lev))) } : {}),
-        ...(futures && o.reduce ? { reduceOnly: true } : {}),
+        ...(margined && !o.reduce ? { leverage: Math.max(1, Math.min(125, Math.round(o.lev))) } : {}),
+        ...(margined && o.reduce ? { reduceOnly: true } : {}),
+        ...(margined && o.mm ? { marginMode: o.mm } : {}),
       });
+      // FD-PAPER: a Paper Trading profile says the execution itself (its price, its commission).
+      if (result.fill) return { ok: true, fill: { qty: result.fill.qty, price: result.fill.price, fee: result.fill.fee } };
       return { ok: true, fill: { qty, price: o.price, fee: (qty * o.price * this.d.feePct) / 100 } };
     } catch (err) {
       return outcomeOf(err);

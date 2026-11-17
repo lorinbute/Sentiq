@@ -20,6 +20,9 @@ import { SummaryCooldownError, SummaryFailedError, SummaryUnavailableError } fro
 import { DbUnavailableError } from '../db/database.ts';
 import { TradingError } from '../exchange/trading/types.ts';
 
+/** FD-IOSLINKS: the site's pages the iOS app has, which a universal link opens in it (`*`: any path below). */
+export const IOS_APP_LINKS = ['/', '/news', '/calendar', '/economy', '/charts', '/charts/*', '/trades', '/watchlists', '/settings', '/settings/*', '/security', '/health', '/users'];
+
 export async function buildApp(ctx: AppContext): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, bodyLimit: 256 * 1024, trustProxy: false });
   registerSecurity(app, new HostAllowlist(ctx.config.allowedHosts), { proxy: ctx.config.proxy });
@@ -80,6 +83,20 @@ export async function buildApp(ctx: AppContext): Promise<FastifyInstance> {
   await registerAuthRoutes(app, ctx);
   await registerRoutes(app, ctx);
   await registerBotRoutes(app, ctx);
+
+  // FD-PASSKEYAPP: Apple's link between this domain and the iOS app, so the app may use the site's passkeys. Public (no
+  // session: it is outside /api), JSON, never a redirect.
+  // FD-PASSKEYAPP: the app may use the site's passkeys; FD-IOSLINKS: a link to one of its pages (from Mail, Messages…)
+  // opens in the app. Only those: sign-in links, the API and the site's files stay in the browser.
+  app.get('/.well-known/apple-app-site-association', (_req, reply) =>
+    reply
+      .header('Cache-Control', 'public, max-age=3600')
+      .type('application/json')
+      .send({
+        applinks: { details: [{ appIDs: ctx.config.iosAppIds, components: IOS_APP_LINKS.map((p) => ({ '/': p })) }] },
+        webcredentials: { apps: ctx.config.iosAppIds },
+      }),
+  );
 
   const webDist = ctx.config.webDist;
   const hasWeb = existsSync(path.join(webDist, 'index.html'));

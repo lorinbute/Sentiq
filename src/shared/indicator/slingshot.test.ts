@@ -141,6 +141,19 @@ describe('Slingshot state machine', () => {
     expect(r.last).toMatchObject({ liveSignal: true, waitingLongTP: false });
   });
 
+  it('FIX-BOTSHORTS: lists the setup forming on each bar: its start kept while its V2 moves, the levels the chart shows then; none on the confirmation bar', () => {
+    const r = run(bars(SETUP), upSeries(SETUP_K));
+    expect(r.setups).toEqual([
+      { side: 'long', bar: 3, time: 3 * H, startBar: 3, startTime: 3 * H, v2Bar: 3, v2Time: 3 * H, entry: 107, sl: 105, tp: 132, v1Bar: 0, v1Time: 0, v1: 105, provisional: false },
+      { side: 'long', bar: 4, time: 4 * H, startBar: 3, startTime: 3 * H, v2Bar: 4, v2Time: 4 * H, entry: 106, sl: 104, tp: 132, v1Bar: 0, v1Time: 0, v1: 105, provisional: false },
+    ]);
+    expect(r.signals[0]).toMatchObject({ bar: 4, confirmBar: 5 });
+    // On the last bar, the levels are the chart's (the live TP/SL box); on a forming candle, provisional.
+    const forming = runSlingshot({ candles: bars(SETUP.slice(0, 5)), series: upSeries(SETUP_K.slice(0, 5)), chartTfSec: 3600, msTfSec: 3600, params: params(), nowMs: 4 * H + 1 });
+    expect(forming.setups.at(-1)).toMatchObject({ bar: 4, sl: forming.atr!.sl, tp: forming.atr!.tp, provisional: true });
+    expect(forming.setups[0]?.provisional).toBe(false);
+  });
+
   it('marks markers/alerts on a still-forming last candle as provisional', () => {
     const candles = bars(SETUP);
     const r = runSlingshot({ candles, series: upSeries(SETUP_K), chartTfSec: 3600, msTfSec: 3600, params: params(), nowMs: 5 * H + 1 });
@@ -170,6 +183,18 @@ describe('FD-SS34LIVE — live invalidation', () => {
   const k = [...SETUP_K, 85, 15, 12, 15, 40];
   const upTo = (n: number) => run(candles.slice(0, n), upSeries(k.slice(0, n)));
   const looks = (r: ReturnType<typeof run>) => r.markers.map((m) => [m.bar, m.kind, m.color]);
+
+  it('FIX-BOTSHORTS: a cancelled search ends its setup; the next one has its own start; FIX-BOTV1STOP: the V1 that cancels it', () => {
+    const r = upTo(11);
+    expect(r.setups.map((x) => [x.bar, x.startBar, x.v1Bar, x.v1])).toEqual([
+      [3, 3, 0, 105],
+      [4, 3, 0, 105],
+      [7, 7, 4, 106],
+      [9, 9, 4, 106],
+    ]);
+    // Bar 8 cancels the search at bar 7: its low reaches the V1 low (105 ≤ 106).
+    expect(candles[8]!.l).toBeLessThanOrEqual(r.setups[2]!.v1);
+  });
 
   it('the old LONG shows as invalidated while a new one forms, valid again when it goes away, for good once it confirms', () => {
     expect(looks(upTo(7))).toEqual([[4, 'long', 'signal']]);
@@ -500,6 +525,14 @@ describe('v3.4 — SHORT signals (FD-SLINGSHOT34)', () => {
     expect(r.atrShort).toMatchObject({ side: 'short', tp: 78, sl: 106, fromBar: 4 });
     expect(r.atr).toBeNull();
     expect(r.last).toMatchObject({ waitingShortTP: true, waitingLongTP: false, liveShortSignal: false });
+  });
+
+  it('FIX-BOTSHORTS: the SHORT setup forming, mirrored: SL over its V2 high, TP under the lowest low', () => {
+    const r = run(bars([...SHORT_SETUP, [102, 98]]), downSeries(SHORT_K), shortOnly);
+    expect(r.setups.map((x) => [x.side, x.bar, x.startBar, x.v2Bar, x.entry, x.sl, x.tp, x.v1Bar, x.v1])).toEqual([
+      ['short', 3, 3, 3, 103, 105, 78, 0, 105],
+      ['short', 4, 3, 4, 104, 106, 78, 0, 105],
+    ]);
   });
 
   it('only the LONG rules, reversed: the confirming close can be anywhere (above the cloud too)', () => {

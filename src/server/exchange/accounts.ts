@@ -1,7 +1,7 @@
 // Exchange accounts (keys encrypted at rest) and portfolio snapshots (FD §6, TD §10).
 // This module only READS from exchanges: orders are sent only by exchange/trading/ (FD-TRADING), on accounts where
 // trading was switched on, and nothing anywhere moves funds.
-import ccxt, { type Exchange } from 'ccxt';
+import ccxt, { type Exchange, type Position } from 'ccxt';
 import { accountSchemaFor, providerById, type ProviderDef } from '../../shared/providers.ts';
 import type { Db } from '../db/database.ts';
 import type { Logger } from '../log.ts';
@@ -12,8 +12,12 @@ import { costBasis, STABLES, type FillLike } from './cost-basis.ts';
 import { fetchClosedPositions, HISTORY, historyFetch, periodStart, settleCoins, summarizeClosed, summarizeResults, type StatsPeriod } from './trade-stats.ts';
 import { isRateLimitError, isTransientError, withRetry } from './retry.ts';
 import { BROKER_IDS, BrokerError, brokerAdapter, type BrokerAdapter, type BrokerId, type BrokerOptions, type ClosedTrades } from './brokers.ts';
+import { brokerRow, positionRow, type TradeHistory, type TradeHistoryRow } from './trade-history.ts';
 import { TRADING, type TradeMarket } from '../../shared/trading.ts';
 import { tradeRights } from './trading/rights.ts';
+import { isPaperExchange } from '../../shared/providers.ts';
+import type { PaperProfile } from '../../shared/paper.ts';
+import type { PaperService } from '../paper/service.ts';
 
 /** Exchanges read through ccxt (the rest are the stock brokers in brokers.ts). */
 export const CCXT_PROVIDERS = ['kucoin', 'binance', 'bybit', 'okx', 'kraken', 'coinbase', 'bitget'] as const;
@@ -38,6 +42,8 @@ export interface AccountView {
   fundsRisk: boolean;
   /** FD-TRADING: whether the platform trades through Sentiq, and whether trading is on for this account. */
   trading: { supported: boolean; enabled: boolean; markets: TradeMarket[]; reason: string | null };
+  /** FD-PAPER: a Paper Trading profile's market, budget, money and commission. */
+  paper?: PaperProfile;
 }
 
 export type ErrorCode = 'AUTH' | 'PERMISSION' | 'RATE_LIMIT' | 'NETWORK' | 'MAINTENANCE' | 'EXCHANGE';
@@ -101,8 +107,27 @@ export interface PositionRow {
   leverage: number | null;
   marginMode: string | null;
   notional: number | null;
+  /** FIX-POSAMOUNT: the money it holds from the account, without leverage (its margin); null when unknown. */
+  margin?: number | null;
   /** FD-TRADING: the platform's own handles for closing it. */
   ref?: TradeRef;
+}
+
+/**
+ * FIX-POSAMOUNT: what a position took from the account, without leverage: the platform's initial margin (KuCoin's
+ * `posInit`), else its value at entry / its leverage (a linear contract only: an inverse one's value is in its coin);
+ * null when neither can be told.
+ */
+export function positionMargin(p: { symbol?: unknown; initialMargin?: unknown; contracts?: unknown; contractSize?: unknown; entryPrice?: unknown; leverage?: unknown }): number | null {
+  const im = num(p.initialMargin);
+  if (im !== null && im > 0) return im;
+  const [pair, settle] = String(p.symbol ?? '').split(':');
+  if (settle && settle !== pair?.split('/')[1]) return null;
+  const contracts = num(p.contracts);
+  const entry = num(p.entryPrice);
+  const lev = num(p.leverage);
+  if (contracts === null || entry === null || lev === null || !(lev > 0)) return null;
+  return (Math.abs(contracts) * (num(p.contractSize) ?? 1) * entry) / lev;
 }
 
 export interface OrderRow {
@@ -297,6 +322,16 @@ export interface TradeStats {
   fetchedAt: number;
 }
 const STATS_TTL_MS = 5 * 60_000;
+
+/** FD-TRADES: the closed positions read for a period, and the span asked for. */
+interface ClosedRead {
+  positions: Position[];
+  from: number;
+  to: number;
+}
+
+/** FD-TRADES: an account's own rows and how they were read; the route adds the bots' (`truncated` is theirs together). */
+export type AccountHistory = Omit<TradeHistory, 'truncated'> & { exchange: string; broker: boolean };
 /** FD-BROKERSTATS: a broker's history is read once for the longest period and serves all of them. */
 const BROKER_HISTORY_MS = 90 * 86_400_000;
 
@@ -349,7 +384,18 @@ interface AccountRow {
   user_id: number;
   trading_enabled_at: number | null;
   trading_markets: string | null;
+  /** FD-PAPER: a profile's market; and its settings (read with the account). */
+  kind?: string | null;
+  paper_budget?: number | null;
+  paper_cash?: number | null;
+  paper_commission_type?: string | null;
+  paper_commission_value?: number | null;
+  paper_reset_at?: number | null;
 }
+
+/** FD-PAPER: the accounts with their Paper Trading settings, where they are profiles. */
+const ACCOUNT_SELECT = `SELECT a.*, p.budget AS paper_budget, p.cash AS paper_cash, p.commission_type AS paper_commission_type, p.commission_value AS paper_commission_value, p.reset_at AS paper_reset_at
+  FROM exchange_accounts a LEFT JOIN paper_accounts p ON p.account_id = a.id`;
 
 /** The provider's fields as entered (crypto: apiKey, secret and, where needed, password). */
 export type Credentials = Record<string, string>;
@@ -491,6 +537,9 @@ export class AccountsService {
   private readonly gone = new Map<number, Map<string, number>>();
   private readonly stats = new Map<string, { data: TradeStats; at: number }>();
   private readonly statsInflight = new Map<string, Promise<TradeStats>>();
+  /** FD-TRADES: a crypto account's closed positions per (account, period, zone), for the stats and the history. */
+  private readonly closed = new Map<string, { data: ClosedRead; at: number }>();
+  private readonly closedInflight = new Map<string, Promise<ClosedRead>>();
   private readonly brokerHistory = new Map<number, { data: ClosedTrades; at: number }>();
   private readonly brokerHistoryInflight = new Map<number, Promise<ClosedTrades>>();
   /** Last successful data per section, shown (marked stale) when a later refresh of that section fails. */
@@ -507,6 +556,8 @@ export class AccountsService {
   /** Extra order reads skipped for a while (FD-TRADING §4): `account|params` → until when. */
   private readonly skippedReads = new Map<string, number>();
   private readonly brokerFactory: BrokerFactory;
+  /** FD-PAPER: the Paper Trading profiles' engine (set by the context). */
+  private paper: PaperService | null = null;
 
   constructor(db: Db, box: SecretBox, log: Logger, factory: ClientFactory, opts: { retryDelaysMs?: readonly number[]; brokerFactory?: BrokerFactory } = {}) {
     this.db = db;
@@ -539,14 +590,25 @@ export class AccountsService {
     await this.retry(() => ex.loadMarkets(true)).catch(() => undefined);
   }
 
+  /** FD-PAPER: the Paper Trading engine, for the profiles' portfolio, history and stats. */
+  attachPaper(paper: PaperService): void {
+    this.paper = paper;
+  }
+
+  private paperOf(id: number): PaperService {
+    if (!this.paper) throw new ValidationError(`Paper Trading nu e disponibil (contul ${id}).`);
+    return this.paper;
+  }
+
   private toView(r: AccountRow): AccountView {
     const platform = TRADING[r.exchange as keyof typeof TRADING];
     const enabledMarkets = (r.trading_markets ?? '').split(',').filter((m): m is TradeMarket => m === 'spot' || m === 'futures' || m === 'stock');
+    const paper = isPaperExchange(r.exchange);
     return {
       id: r.id,
       exchange: r.exchange,
-      kind: providerById(r.exchange)?.kind ?? 'crypto',
-      env: r.env ?? 'live',
+      kind: paper && (r.kind === 'crypto' || r.kind === 'stocks') ? r.kind : (providerById(r.exchange)?.kind ?? 'crypto'),
+      env: paper ? 'paper' : (r.env ?? 'live'),
       label: r.label,
       keyHint: r.key_hint,
       createdAt: r.created_at,
@@ -561,6 +623,18 @@ export class AccountsService {
         markets: r.trading_enabled_at !== null ? enabledMarkets : [],
         reason: platform?.supported === false ? (platform.reason ?? null) : null,
       },
+      ...(paper && r.paper_budget != null
+        ? {
+            paper: {
+              kind: r.kind === 'stocks' ? 'stocks' : 'crypto',
+              budget: r.paper_budget,
+              cash: r.paper_cash ?? 0,
+              commissionType: r.paper_commission_type === 'fixed' ? 'fixed' : 'percent',
+              commissionValue: r.paper_commission_value ?? 0,
+              resetAt: r.paper_reset_at ?? 0,
+            } satisfies PaperProfile,
+          }
+        : {}),
     };
   }
 
@@ -572,6 +646,8 @@ export class AccountsService {
     id: number;
     userId: number;
     exchange: string;
+    /** Crypto or stocks (FD-PAPER: a profile's market). */
+    kind: 'crypto' | 'stocks';
     env: string;
     label: string;
     permissions: string | null;
@@ -583,17 +659,19 @@ export class AccountsService {
     const row = await this.row(id);
     if (!row) return null;
     const view = this.toView(row);
+    const paper = isPaperExchange(row.exchange);
     return {
       id,
       userId: row.user_id,
       exchange: row.exchange,
-      env: row.env ?? 'live',
+      kind: view.kind,
+      env: view.env,
       label: row.label,
       permissions: row.permissions,
       enabled: view.trading.enabled,
       markets: view.trading.markets,
-      clients: isBroker(row.exchange) ? null : this.clientsFor(id, row),
-      creds: isBroker(row.exchange) ? this.credsOf(row) : null,
+      clients: paper || isBroker(row.exchange) ? null : this.clientsFor(id, row),
+      creds: !paper && isBroker(row.exchange) ? this.credsOf(row) : null,
     };
   }
 
@@ -603,7 +681,7 @@ export class AccountsService {
    */
   async refreshPermissions(id: number): Promise<string | null> {
     const row = await this.row(id);
-    if (!row || isBroker(row.exchange)) return null;
+    if (!row || isBroker(row.exchange) || isPaperExchange(row.exchange)) return null;
     const { spot } = this.clientsFor(id, row);
     const permissions = await keyPermissions(row.exchange, spot);
     if (permissions === null) return row.permissions;
@@ -655,14 +733,33 @@ export class AccountsService {
   private forgetStats(id: number): void {
     this.brokerHistory.delete(id);
     for (const key of this.stats.keys()) if (key.startsWith(`${id}|`)) this.stats.delete(key);
+    for (const key of this.closed.keys()) if (key.startsWith(`${id}|`)) this.closed.delete(key);
   }
 
   /** A user's own accounts (FD-USERS §2: nobody sees anybody else's). */
   async list(userId: number): Promise<AccountView[]> {
-    return (await this.db.all<AccountRow>('SELECT * FROM exchange_accounts WHERE user_id = ? ORDER BY id', [userId])).map((r) => this.toView(r));
+    return (await this.db.all<AccountRow>(`${ACCOUNT_SELECT} WHERE a.user_id = ? ORDER BY a.id`, [userId])).map((r) => this.toView(r));
+  }
+
+  /** FD-PAPER: one account as the pages see it. */
+  async view(id: number): Promise<AccountView | null> {
+    const row = await this.row(id);
+    return row ? this.toView(row) : null;
   }
 
   /** Is account `id` this user's? Every route that names an account asks first (anybody else's is "not found"). */
+  /** FD-PAPER: whether an account is a Paper Trading profile (its exchange, cached: it never changes). */
+  private readonly paperIds = new Map<number, boolean>();
+  async isPaper(id: number): Promise<boolean> {
+    const known = this.paperIds.get(id);
+    if (known !== undefined) return known;
+    const row = await this.db.get<{ exchange: string }>('SELECT exchange FROM exchange_accounts WHERE id = ?', [id]);
+    if (!row) return false;
+    const v = isPaperExchange(row.exchange);
+    this.paperIds.set(id, v);
+    return v;
+  }
+
   async owns(userId: number, id: number): Promise<boolean> {
     return (await this.db.get('SELECT 1 AS x FROM exchange_accounts WHERE id = ? AND user_id = ?', [id, userId])) !== undefined;
   }
@@ -675,6 +772,7 @@ export class AccountsService {
     const raw = (typeof input === 'object' && input !== null ? input : {}) as Record<string, unknown>;
     const provider: ProviderDef | undefined = typeof raw.exchange === 'string' ? providerById(raw.exchange) : undefined;
     if (!provider) throw new ValidationError(`Platformă necunoscută: ${String(raw.exchange ?? '')}`);
+    if (provider.paper) throw new ValidationError('Un profil Paper Trading se face din formularul lui (Adaugă un cont → Paper Trading).');
     const body =
       raw.credentials === undefined && (raw.apiKey !== undefined || raw.secret !== undefined)
         ? { ...raw, credentials: { apiKey: raw.apiKey, secret: raw.secret, ...(raw.password !== undefined ? { password: raw.password } : {}) } }
@@ -742,6 +840,7 @@ export class AccountsService {
   }
 
   async delete(id: number): Promise<boolean> {
+    this.paperIds.delete(id);
     this.forgetSkippedReads(id);
     this.clients.delete(id);
     this.brokers.delete(id);
@@ -752,7 +851,7 @@ export class AccountsService {
   }
 
   private row(id: number): Promise<AccountRow | undefined> {
-    return this.db.get<AccountRow>('SELECT * FROM exchange_accounts WHERE id = ?', [id]);
+    return this.db.get<AccountRow>(`${ACCOUNT_SELECT} WHERE a.id = ?`, [id]);
   }
 
   private clientsFor(id: number, row: AccountRow): ExchangeClients {
@@ -767,6 +866,8 @@ export class AccountsService {
   async test(id: number): Promise<AccountView> {
     const row = await this.row(id);
     if (!row) throw new ValidationError(`Contul ${id} nu există`);
+    // FD-PAPER: a profile has no key to test.
+    if (isPaperExchange(row.exchange)) return this.toView(row);
     if (isBroker(row.exchange)) {
       try {
         await this.brokerFor(id, row as AccountRow & { exchange: BrokerId }).test();
@@ -798,7 +899,10 @@ export class AccountsService {
   }
 
   async setCostBasis(accountId: number, asset: string, avgPrice: number | null): Promise<void> {
-    if (!(await this.row(accountId))) throw new ValidationError(`Contul ${accountId} nu există`);
+    const row = await this.row(accountId);
+    if (!row) throw new ValidationError(`Contul ${accountId} nu există`);
+    // FD-PAPER: a profile's average price is its own fills', exact.
+    if (isPaperExchange(row.exchange)) throw new ValidationError('Un profil Paper Trading își știe prețul mediu din execuții.');
     const a = asset.trim().toUpperCase();
     if (!/^[A-Z0-9][A-Z0-9.-]{0,19}$/.test(a)) throw new ValidationError('Activ invalid');
     if (avgPrice === null) {
@@ -814,6 +918,9 @@ export class AccountsService {
   }
 
   async portfolio(id: number, force = false): Promise<Portfolio> {
+    // FD-PAPER: read from the database each time (nothing to wait for). An account already known is told apart at once,
+    // so a platform's read starts before anything else can run (a trading action's `invalidate` comes after it, FIX-SLTPDUP).
+    if (this.paperIds.get(id) ?? (await this.isPaper(id))) return this.paperOf(id).portfolio(id);
     const now = Date.now();
     const ttl = (this.settling.get(id) ?? 0) > now ? SETTLE_TTL_MS : PORTFOLIO_TTL_MS;
     const cached = this.portfolios.get(id);
@@ -829,6 +936,7 @@ export class AccountsService {
 
   /** FD-TRADESTATS, FD-BROKERSTATS: closed trades of one period, kept 5 minutes per account and period. */
   async tradeStats(id: number, period: StatsPeriod, tz: string, force = false): Promise<TradeStats> {
+    if (await this.isPaper(id)) return this.paperOf(id).stats(id, period, tz);
     const key = `${id}|${period}|${tz}`;
     const cached = this.stats.get(key);
     if (!force && cached && Date.now() - cached.at < STATS_TTL_MS) return cached.data;
@@ -855,8 +963,8 @@ export class AccountsService {
     const { spot } = this.clientsFor(id, row);
     const retry = <T>(fn: () => Promise<T>) => this.retryOn(spot, fn);
     try {
-      await this.ensureMarkets(spot);
-      const closed = await fetchClosedPositions(row.exchange, historyFetch(spot, retry), from, now);
+      const read = await this.closedFor(id, row, period, tz, force);
+      const closed = read.positions;
       // Results settled in a coin (BTC-margined contracts) are turned into dollars at today's price.
       const prices = new Map<string, number | null>();
       for (const coin of settleCoins(closed)) {
@@ -867,6 +975,66 @@ export class AccountsService {
       const error = mapExchangeError(err);
       this.log.warn(`trade stats ${id} (${period}): ${error.code}`);
       return { ...base, supported: true, error };
+    }
+  }
+
+  /**
+   * FD-TRADES: the futures positions a crypto account closed in the period, read once for its stats and its history:
+   * kept 5 minutes per (account, period, zone), one read at a time (a forced read joins one under way). An error is
+   * thrown, never kept.
+   */
+  private closedFor(id: number, row: AccountRow, period: StatsPeriod, tz: string, force: boolean): Promise<ClosedRead> {
+    const key = `${id}|${period}|${tz}`;
+    const cached = this.closed.get(key);
+    if (!force && cached && Date.now() - cached.at < STATS_TTL_MS) return Promise.resolve(cached.data);
+    const pending = this.closedInflight.get(key);
+    if (pending) return pending;
+    const { spot } = this.clientsFor(id, row);
+    const retry = <T>(fn: () => Promise<T>) => this.retryOn(spot, fn);
+    const p = (async (): Promise<ClosedRead> => {
+      const to = Date.now();
+      const from = periodStart(period, to, tz);
+      await this.ensureMarkets(spot);
+      return { positions: await fetchClosedPositions(row.exchange, historyFetch(spot, retry), from, to), from, to };
+    })()
+      .then((data) => {
+        this.closed.set(key, { data, at: Date.now() });
+        return data;
+      })
+      .finally(() => this.closedInflight.delete(key));
+    this.closedInflight.set(key, p);
+    return p;
+  }
+
+  /**
+   * FD-TRADES: the account's own history of closed trades, as rows (the bots' are added by the route): a crypto
+   * account's futures positions of the period, a broker's trades of its 90 days (the route keeps the period's). Where
+   * the platform gives none, `supported` is false; a read that fails is `error` (the bots' rows are listed all the same).
+   */
+  async tradeHistory(id: number, period: StatsPeriod, tz: string, force = false): Promise<AccountHistory> {
+    const row = await this.row(id);
+    if (!row) throw new ValidationError(`Contul ${id} nu există`);
+    if (isPaperExchange(row.exchange)) return this.paperOf(id).history(id, period, tz);
+    const now = Date.now();
+    const from = periodStart(period, now, tz);
+    const broker = isBroker(row.exchange);
+    const base: AccountHistory = { exchange: row.exchange, broker, period, from, to: now, rows: [], supported: true, error: null, limited: false, asOf: null, fetchedAt: now };
+    try {
+      if (broker) {
+        const adapter = this.brokerFor(id, row as AccountRow & { exchange: BrokerId });
+        const read = adapter.closedTrades?.bind(adapter);
+        if (!read) return { ...base, supported: false };
+        const h = await this.brokerClosed(id, read, now, force);
+        const currency = h.currency ?? (await this.portfolio(id).then((p) => p.currency, () => null)) ?? 'USD';
+        return { ...base, rows: h.trades.map((t) => brokerRow(t, currency)), limited: from < h.coveredFrom, asOf: h.asOf };
+      }
+      if (!HISTORY[row.exchange]) return { ...base, supported: false };
+      const read = await this.closedFor(id, row, period, tz, force);
+      return { ...base, from: read.from, rows: read.positions.map((p) => positionRow(row.exchange, p)).filter((r): r is TradeHistoryRow => r !== null) };
+    } catch (err) {
+      const error = mapExchangeError(err);
+      this.log.warn(`trade history ${id} (${period}): ${error.code}`);
+      return { ...base, error };
     }
   }
 
@@ -1201,6 +1369,7 @@ export class AccountsService {
         leverage: num(p.leverage),
         marginMode: p.marginMode ?? null,
         notional: num(p.notional),
+        margin: positionMargin(p),
       }));
 
     const orders: OrderRow[] = ordersRaw.map(({ o, market }) => ({

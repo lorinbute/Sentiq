@@ -1,21 +1,20 @@
 // FD-TRADING §1, §4: switching trading on for an account (password and code again, the key's permissions read again)
-// or off, cancelling an order, and the journal of what Sentiq sent.
+// or off, and cancelling an order. FD-TRADES: the journal of what Sentiq sent is no longer shown (it stays in the database).
 import { useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { browserSupportsWebAuthn, startAuthentication } from '@simplewebauthn/browser';
-import { Fingerprint, Loader2, ScrollText, ShieldAlert, X } from 'lucide-react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import type { startAuthentication } from '@simplewebauthn/browser';
+import { passkeyAuthenticate, supportsPasskeys } from '../webauthn.ts';
+import { Fingerprint, Loader2, ShieldAlert, X } from 'lucide-react';
 import type { AccountView, OrderRow } from '../../shared/api-types.ts';
-import { ORDER_KIND_RO, TRADING, isDemoEnv, type OrderKind, type OrderResult, type TradeLogRow } from '../../shared/trading.ts';
+import { TRADING, isDemoEnv, type OrderResult } from '../../shared/trading.ts';
 import { providerById } from '../../shared/providers.ts';
 import { api, errorMessage } from '../api.ts';
-import { fmtDateTime, fmtNum } from '../format.ts';
-import { useAccountInfo, useTz } from '../hooks.ts';
+import { useAccountInfo } from '../hooks.ts';
 import { passkeyMessage } from '../passkey.ts';
 import { Modal } from './Modal.tsx';
 import { TRADING_KEY, TRADING_LOG_KEY } from './OrderTicket.tsx';
-import { Panel } from './ui.tsx';
 
-/** After switching: the accounts, what each can trade and the journal are read again. */
+/** After switching: the accounts and what each can trade are read again. */
 function useAfterSwitch() {
   const qc = useQueryClient();
   return () => {
@@ -31,7 +30,7 @@ export function EnableTradingDialog({ account, onClose }: { account: AccountView
   const platform = TRADING[account.exchange as keyof typeof TRADING];
   const name = providerById(account.exchange)?.name ?? account.exchange;
   // FD-TRADEUNLOCK: a passkey answers for both factors, as at sign-in, when the account has one this browser can use.
-  const canPasskey = browserSupportsWebAuthn();
+  const canPasskey = supportsPasskeys();
   const me = useAccountInfo(canPasskey);
   const withPasskey = canPasskey && Boolean(me.data?.passkeysHere) && (me.data?.passkeys.length ?? 0) > 0;
   const switchOn = (body: Record<string, unknown>) => api.post<AccountView>(`/api/accounts/${account.id}/trading`, { enabled: true, ...body });
@@ -45,7 +44,7 @@ export function EnableTradingDialog({ account, onClose }: { account: AccountView
       const options = await api.post<Parameters<typeof startAuthentication>[0]['optionsJSON']>('/api/trading/passkey/options');
       let response;
       try {
-        response = await startAuthentication({ optionsJSON: options });
+        response = await passkeyAuthenticate(options);
       } catch (err) {
         throw new Error(passkeyMessage(err));
       }
@@ -167,53 +166,6 @@ export function CancelOrderButton({ account, order }: { account: AccountView; or
       </button>
       {cancel.error && <span className="max-w-[28ch] text-[11.5px] text-bear">{errorMessage(cancel.error)}</span>}
     </span>
-  );
-}
-
-const STATUS_RO: Record<TradeLogRow['status'], string> = { pending: 'în curs', sent: 'trimis', rejected: 'refuzat', error: 'eroare', unknown: 'necunoscut' };
-const ACTION_RO: Record<TradeLogRow['action'], string> = { order: 'Ordin', cancel: 'Anulare', modify: 'Modificare', reverse: 'Întoarcere poziție', enable: 'Tranzacționare pornită', disable: 'Tranzacționare oprită' };
-
-/** "Ordinele trimise din Sentiq" for one account (the last 50 of the user, this account's). */
-export function TradeJournal({ account }: { account: AccountView }) {
-  const tz = useTz();
-  const q = useQuery({ queryKey: TRADING_LOG_KEY, queryFn: () => api.get<TradeLogRow[]>('/api/trading/log'), staleTime: 10_000 });
-  const rows = (q.data ?? []).filter((r) => r.accountId === account.id);
-  if (rows.length === 0) return null;
-  return (
-    <Panel title="Ordinele trimise din Sentiq" icon={ScrollText} flush>
-      <table className="table">
-        <thead>
-          <tr>
-            <th>Data</th>
-            <th>Acțiune</th>
-            <th>Simbol</th>
-            <th>Direcție</th>
-            <th>Tip</th>
-            <th className="text-right">Cantitate</th>
-            <th className="text-right">Preț</th>
-            <th>Rezultat</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr key={r.id}>
-              <td className="num text-[12px] text-muted">{fmtDateTime(r.createdAt, tz)}</td>
-              <td>{ACTION_RO[r.action]}</td>
-              <td className="num">{r.symbol ?? '—'}</td>
-              <td className={r.side === 'buy' ? 'text-bull' : r.side === 'sell' ? 'text-bear' : ''}>{r.side === 'buy' ? 'Cumpărare' : r.side === 'sell' ? 'Vânzare' : '—'}</td>
-              <td className="text-muted">{r.kind ? (ORDER_KIND_RO[r.kind as OrderKind] ?? r.kind) : '—'}</td>
-              <td className="num text-right">{fmtNum(r.amount, 8)}</td>
-              <td className="num text-right">{fmtNum(r.price ?? r.triggerPrice, 8)}</td>
-              <td className="text-[12.5px]">
-                <span className={r.status === 'sent' ? 'text-bull' : r.status === 'pending' ? 'text-muted' : r.status === 'unknown' ? 'text-warn' : 'text-bear'}>{STATUS_RO[r.status]}</span>
-                {r.orderId && <span className="text-faint"> · {r.orderId}</span>}
-                {r.message && <div className="max-w-[48ch] text-[11.5px] text-faint">{r.message}</div>}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </Panel>
   );
 }
 

@@ -36,6 +36,13 @@ export const SCORE_SYSTEM = [
   'Think like a macro-aware trader: rate cuts, cooling inflation, ETF inflows, approvals and adoption are bullish;',
   'rate hikes, hot inflation, rising yields, a strong dollar, hacks, liquidations, lawsuits, bans, war and tariffs are bearish;',
   'educational pieces, scheduled events without new information and routine announcements are neutral (0).',
+  // FIX-SENTWEIGHT: energy and AI are this decade's market drivers: their importance, and energy prices' direction.
+  'Energy and AI are the biggest market drivers of this decade. News about oil, gasoline, diesel, natural gas, electricity,',
+  'energy production or energy prices, and news about AI (the leading AI companies and their leaders, AI chips, data centers,',
+  'AI spending) get a higher impact: at least 2, and 3 when they move prices or supply or shake a leading AI company.',
+  'Rising oil, fuel, gas or electricity prices are bearish for risk assets; falling ones are bullish.',
+  'Turmoil at a leading AI company (its CEO ousted, a scandal), a collapse in AI spending or new chip export curbs are strongly bearish;',
+  'strong AI demand and AI investment are bullish.',
   'For each headline, also give the reason for its score in Romanian: one short plain sentence (at most 120 characters).',
   'Return one result for every headline number.',
 ].join(' ');

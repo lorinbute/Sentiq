@@ -1,6 +1,7 @@
 // FD-ORDEREDIT: the chart's trade lines that can be dragged, the drafts (lines dragged, not yet sent) and the changes
 // they make: a position's stop losses / take profits, or one order's price, trigger and attached TP / SL.
 import type { AccountView, OrderRow, Portfolio } from '../../shared/api-types.ts';
+import type { BotLevelMove } from '../../shared/bot.ts';
 import { orderEditMode, type ModifyChange, type ModifyResult, type ModifyTicket, type TradeMarket } from '../../shared/trading.ts';
 import type { LineAction } from '../components/LineActionDialog.tsx';
 import { stepImpact } from '../components/modify-seeds.ts';
@@ -23,17 +24,33 @@ const DRAGGABLE_ROLES = new Set<TradeLine['role']>(['sl', 'tp', 'order', 'order-
 
 /**
  * Whether a line can be dragged: an order's level (a position's SL / TP, an order's price or trigger, its attached TP /
- * SL), on an account trading that market, where the platform changes (or replaces) the order.
+ * SL), on an account trading that market, where the platform changes (or replaces) the order. FIX-BOTDRAG: a bot's SL /
+ * TP (the bot changes it: no order leaves).
  */
 export function isDraggable(l: TradeLine, account: AccountView): boolean {
+  if (l.bot) return l.role === 'sl' || l.role === 'tp';
   if (!account.trading.enabled || !l.order || !DRAGGABLE_ROLES.has(l.role)) return false;
   if ((l.role === 'sl' || l.role === 'tp') && !l.position) return false;
   if (!account.trading.markets.includes(orderMarket(account, l.order))) return false;
   return orderEditMode(account.exchange, l.order) !== null;
 }
 
-/** The line Confirm / Discard sit on: the position's entry, or the order's own line. */
-export const anchorOf = <L extends TradeLine>(group: string, lines: readonly L[]): L | undefined => lines.find((l) => l.group === group && (l.role === 'entry' || l.role === 'order'));
+/**
+ * The line Confirm / Discard sit on: the position's entry, or the order's own line; FIX-BOTDRAG: a bot's position has
+ * none of its own, its first line dragged (the stop loss when both are).
+ */
+export const anchorOf = <L extends TradeLine>(group: string, lines: readonly L[], drafts: Drafts = {}): L | undefined =>
+  lines.find((l) => l.group === group && (l.role === 'entry' || l.role === 'order')) ?? lines.find((l) => l.group === group && l.bot && drafts[l.id] !== undefined);
+
+/** FIX-BOTDRAG: what a bot's group's drafts change: its position's new stop loss / take profit. Null when nothing is dragged. */
+export function botDraftOf(lines: readonly TradeLine[], drafts: Drafts, group: string): { botId: number; move: BotLevelMove } | null {
+  const dragged = lines.filter((l) => l.group === group && l.bot && drafts[l.id] !== undefined && (l.role === 'sl' || l.role === 'tp'));
+  const b = dragged[0]?.bot;
+  if (!b) return null;
+  const move: BotLevelMove = { symbol: b.symbol, side: b.side, openedAt: b.openedAt };
+  for (const l of dragged) move[l.role as 'sl' | 'tp'] = drafts[l.id] as number;
+  return { botId: b.id, move };
+}
 
 /** A line's title at another level: its label and the PnL there (an order's TP / SL: from the order's new price). */
 export function titleAt(l: TradeLine, price: number, entry?: number): string {

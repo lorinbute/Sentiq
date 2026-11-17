@@ -18,11 +18,13 @@ const JOB_RO: Record<string, string> = {
   'calendar.ff': 'Calendar ForexFactory',
   'calendar.tv': 'Calendar TradingView',
   'calendar.earnings': 'Rezultate companii (Nasdaq)',
+  'calendar.results': 'Rezultate raportate (TradingView)',
   'econ.history': 'Indicatori economici (istoric, program)',
   'market.context': 'Context piață',
   'stocks.market': 'Bursa SUA și indici',
   scanner: 'Scanner Slingshot',
   bots: 'Boți de tranzacționare',
+  'paper.match': 'Paper Trading (ordine, SL / TP)',
   maintenance: 'Întreținere',
 };
 const MODEL_RO: Record<string, string> = { idle: 'neîncărcat', loading: 'se descarcă / se încarcă', ready: 'gata', failed: 'indisponibil' };
@@ -53,9 +55,12 @@ export default function HealthPage() {
           </div>
           {typeof h.sentiment.aiUsers === 'number' && (
             <div>
-              {/* FD-AIKEYS: their own AI, on their own key; how it goes each sees in their settings. */}
+              {/* FD-AIKEYS: their own AI, on their own key; how it goes each sees in their settings. FD-KEYIDLE: only theirs who use Sentiq now work. */}
               <dt className="text-faint">Scor cu AI-ul propriu</dt>
-              <dd>{h.sentiment.aiUsers === 0 ? 'niciun utilizator' : `${h.sentiment.aiUsers} ${h.sentiment.aiUsers === 1 ? 'utilizator' : 'utilizatori'}`}</dd>
+              <dd>
+                {h.sentiment.aiUsers === 0 ? 'niciun utilizator' : `${h.sentiment.aiUsers} ${h.sentiment.aiUsers === 1 ? 'utilizator' : 'utilizatori'}`}
+                {h.sentiment.aiUsers > 0 && typeof h.sentiment.aiActive === 'number' && ` · ${h.sentiment.aiActive} în aplicație acum`}
+              </dd>
             </div>
           )}
           <div>
@@ -112,7 +117,10 @@ export default function HealthPage() {
             <div>
               {/* FD-TDKEYS: each user's own key; their credits are in their settings. */}
               <dt className="text-faint">Twelve Data (acțiuni)</dt>
-              <dd>{h.twelveData.users === 0 ? 'nimeni nu are cheie: acțiunile pe 1d și 1w (Nasdaq)' : `${h.twelveData.users} ${h.twelveData.users === 1 ? 'utilizator cu cheie' : 'utilizatori cu cheie'}`}</dd>
+              <dd>
+                {h.twelveData.users === 0 ? 'nimeni nu are cheie: acțiunile pe 1d și 1w (Nasdaq)' : `${h.twelveData.users} ${h.twelveData.users === 1 ? 'utilizator cu cheie' : 'utilizatori cu cheie'}`}
+                {h.twelveData.users > 0 && typeof h.twelveData.active === 'number' && ` · ${h.twelveData.active} în aplicație acum`}
+              </dd>
             </div>
           )}
         </dl>

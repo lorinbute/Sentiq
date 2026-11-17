@@ -1128,3 +1128,148 @@ describe('local network (FD-USERS §9)', () => {
     expect((await same.post('/api/auth/login', { email: ADMIN.email, password: 'Wrong-password-1' })).statusCode).toBe(400);
   });
 });
+
+/** FD-MOBILEAUTH: the native app: its token in the body and back as Bearer, never a cookie. */
+function iosApp(opts: { host?: string; ip?: string } = {}) {
+  let token: string | null = null;
+  const host = opts.host ?? 'localhost:4317';
+  const call = async (method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, body?: unknown, bearer = token): Promise<LightMyRequestResponse> => {
+    const headers: Record<string, string> = { host, 'x-sentiq-client': 'ios/1.0', 'user-agent': 'Sentiq iOS/1.0 (iPhone18,1; iOS 27.3)' };
+    if (method !== 'GET') headers['x-sentiq'] = '1';
+    if (body !== undefined) headers['content-type'] = 'application/json';
+    if (bearer) headers.authorization = `Bearer ${bearer}`;
+    return app.inject({ method, url, headers, payload: body === undefined ? undefined : JSON.stringify(body), remoteAddress: opts.ip ?? '127.0.0.1' });
+  };
+  return {
+    setToken: (t: string | null) => void (token = t),
+    token: () => token,
+    get: (url: string, bearer?: string | null) => call('GET', url, undefined, bearer === undefined ? token : bearer),
+    post: (url: string, body: unknown = {}, bearer?: string | null) => call('POST', url, body, bearer === undefined ? token : bearer),
+  };
+}
+
+describe('FD-MOBILEAUTH: the native app signs in with a token kept in the Keychain', () => {
+  it('password, then the code with the ticket: a token in the body, never a cookie; Bearer opens the API; logout ends it', async () => {
+    await adminBrowser();
+    const a = iosApp();
+    const first = await a.post('/api/auth/login', { email: ADMIN.email, password: ADMIN.password });
+    expect(first.headers['set-cookie']).toBeUndefined();
+    const { status, ticket } = first.json();
+    expect(status).toBe('2fa');
+    expect(ticket).toMatch(/^[A-Za-z0-9_-]{40,}$/);
+    // The pending ticket opens nothing but the code step.
+    expect((await a.get('/api/account', ticket)).statusCode).toBe(401);
+    const done = await a.post('/api/auth/login/2fa', { code: await codeNow(ADMIN.email) }, ticket);
+    expect(done.headers['set-cookie']).toBeUndefined();
+    const body = done.json();
+    expect(body).toMatchObject({ status: 'ok', user: { email: ADMIN.email } });
+    expect(body.token).toMatch(/^[A-Za-z0-9_-]{40,}$/);
+    expect(body.token).not.toBe(ticket);
+    a.setToken(body.token);
+    // Only its hash is stored, with the app's user agent.
+    const row = await ctx.db.get<{ kind: string; user_agent: string }>('SELECT kind, user_agent FROM sessions WHERE id_hash = ?', [(await import('./auth/sessions.ts')).hashToken(body.token)]);
+    expect(row).toEqual({ kind: 'full', user_agent: 'Sentiq iOS/1.0 (iPhone18,1; iOS 27.3)' });
+    expect((await a.get('/api/account')).json()).toMatchObject({ user: { email: ADMIN.email } });
+    // A sliding session never sets a cookie for the app.
+    expect((await a.get('/api/account')).headers['set-cookie']).toBeUndefined();
+    // The ticket was used up.
+    expect((await a.post('/api/auth/login/2fa', { code: await codeNow(ADMIN.email) }, ticket)).json().error.code).toBe('LOGIN_EXPIRED');
+    expect((await a.post('/api/auth/logout')).statusCode).toBe(200);
+    expect((await a.get('/api/account')).statusCode).toBe(401);
+  });
+
+  it('a wrong or unknown token, a malformed header, a token over plain HTTP off this Mac: 401; the cookie wins over Bearer', async () => {
+    const b = await adminBrowser();
+    const a = iosApp();
+    expect((await a.get('/api/account', 'not-a-real-token-0123456789')).statusCode).toBe(401);
+    const bad = await app.inject({ method: 'GET', url: '/api/account', headers: { host: 'localhost:4317', authorization: 'Bearer a b' } });
+    expect(bad.statusCode).toBe(401);
+    // A real token, sent over HTTP to a network name (not this Mac): ignored.
+    const login = (await a.post('/api/auth/login', { email: ADMIN.email, password: ADMIN.password })).json();
+    const token = (await a.post('/api/auth/login/2fa', { code: await codeNow(ADMIN.email) }, login.ticket)).json().token as string;
+    const lan = iosApp({ host: 'sentiq.lan:4317', ip: '192.168.1.40' });
+    expect((await lan.get('/api/account', token)).statusCode).toBe(401);
+    // A browser with its cookie and someone else's Bearer: the cookie's session is the one used.
+    const both = await app.inject({ method: 'GET', url: '/api/account', headers: { host: 'localhost:4317', cookie: [...b.jar].map(([k, v]) => `${k}=${v}`).join('; '), authorization: 'Bearer not-a-real-token-0123456789' } });
+    expect(both.statusCode).toBe(200);
+  });
+
+  it("a browser still gets its cookie (no token in the body); „log out everywhere” ends the app's session too", async () => {
+    const b = await adminBrowser();
+    expect(b.jar.get('sentiq_session')).toBeTruthy();
+    const a = iosApp();
+    const login = (await a.post('/api/auth/login', { email: ADMIN.email, password: ADMIN.password })).json();
+    a.setToken((await a.post('/api/auth/login/2fa', { code: await codeNow(ADMIN.email) }, login.ticket)).json().token);
+    expect((await a.get('/api/account')).statusCode).toBe(200);
+    // The browser's own sign-in answer has no token.
+    const web = browser();
+    expect((await web.post('/api/auth/login', { email: ADMIN.email, password: ADMIN.password })).json()).toEqual({ status: '2fa' });
+    const ok = (await web.post('/api/auth/login/2fa', { code: await codeNow(ADMIN.email) })).json();
+    expect(ok).not.toHaveProperty('token');
+    expect((await b.post('/api/account/logout-all')).statusCode).toBe(200);
+    expect((await a.get('/api/account')).statusCode).toBe(401);
+  });
+
+  it('a wrong password counts towards the same lock (3, then 15 minutes), the app included', async () => {
+    await adminBrowser();
+    const a = iosApp({ ip: '10.0.0.7' });
+    for (let i = 0; i < 2; i++) expect((await a.post('/api/auth/login', { email: ADMIN.email, password: 'Wrong-password-9' })).json().error.code).toBe('INVALID_CREDENTIALS');
+    expect((await a.post('/api/auth/login', { email: ADMIN.email, password: 'Wrong-password-9' })).json().error.code).toBe('TOO_MANY_ATTEMPTS');
+    expect((await a.post('/api/auth/login', { email: ADMIN.email, password: ADMIN.password })).json().error.code).toBe('TOO_MANY_ATTEMPTS');
+  });
+});
+
+describe('FD-PASSKEYAPP: the native app signs in with a passkey', () => {
+  it('the challenge in the body (no cookie), the token back; the challenge spent; a body challenge ignored for a browser', async () => {
+    const ana = await anaBrowser();
+    const device = softAuthenticator('localhost', 'http://localhost:4317');
+    const regOptions = (await ana.post('/api/account/passkeys/options')).json();
+    expect((await ana.post('/api/account/passkeys', { response: device.create(regOptions), name: 'iPhone' })).statusCode).toBe(200);
+
+    const a = iosApp();
+    const first = await a.post('/api/auth/passkey/options');
+    expect(first.headers['set-cookie']).toBeUndefined();
+    const { options, challengeId } = first.json();
+    expect(challengeId).toMatch(/^[A-Za-z0-9_-]{16,64}$/);
+    expect(options.userVerification).toBe('required');
+    const assertion = device.get(options);
+    const done = await a.post('/api/auth/passkey', { response: assertion, challengeId });
+    expect(done.headers['set-cookie']).toBeUndefined();
+    const body = done.json();
+    // A passkey proves both factors: no code, a full session for the app.
+    expect(body).toMatchObject({ status: 'ok', user: { email: ANA.email } });
+    expect(body.token).toMatch(/^[A-Za-z0-9_-]{40,}$/);
+    a.setToken(body.token);
+    expect((await a.get('/api/account')).json()).toMatchObject({ user: { email: ANA.email } });
+    // The challenge was spent.
+    expect((await iosApp().post('/api/auth/passkey', { response: assertion, challengeId })).statusCode).toBe(400);
+    // Without a challenge: refused.
+    const again = iosApp();
+    const o2 = (await again.post('/api/auth/passkey/options')).json();
+    expect((await again.post('/api/auth/passkey', { response: device.get(o2.options) })).statusCode).toBe(400);
+    // A malformed challenge id: a validation error.
+    expect((await again.post('/api/auth/passkey', { response: device.get(o2.options), challengeId: 'x y' })).json().error.code).toBe('VALIDATION');
+    // A browser is answered as before (the cookie), and a challenge id in its body is ignored.
+    const b = browser();
+    const ob = (await b.post('/api/auth/passkey/options')).json();
+    expect(ob.challengeId).toBeUndefined();
+    expect(b.jar.has('sentiq_webauthn')).toBe(true);
+    const native = (await iosApp().post('/api/auth/passkey/options')).json();
+    const stranger = browser();
+    expect((await stranger.post('/api/auth/passkey', { response: device.get(native.options), challengeId: native.challengeId })).statusCode).toBe(400);
+  });
+
+  it("serves Apple's association file: public, JSON, the app's id; its pages as universal links (FD-IOSLINKS), never sign-in links; the other /.well-known addresses stay 404", async () => {
+    const r = await app.inject({ method: 'GET', url: '/.well-known/apple-app-site-association', headers: { host: 'localhost:4317' } });
+    expect(r.statusCode).toBe(200);
+    expect(r.headers['content-type']).toMatch(/^application\/json/);
+    const body = r.json();
+    expect(body.webcredentials).toEqual({ apps: ['25H945694A.com.dustyenterprise.sentiq'] });
+    expect(body.applinks.details).toHaveLength(1);
+    expect(body.applinks.details[0].appIDs).toEqual(['25H945694A.com.dustyenterprise.sentiq']);
+    const paths = body.applinks.details[0].components.map((c: Record<string, string>) => c['/']);
+    expect(paths).toEqual(expect.arrayContaining(['/', '/news', '/charts/*', '/trades', '/settings/*', '/users']));
+    for (const p of ['/activate', '/reset-password', '/login', '/setup', '/api/*', '/audio/*', '/*']) expect(paths).not.toContain(p);
+    expect((await app.inject({ method: 'GET', url: '/.well-known/oauth-authorization-server', headers: { host: 'localhost:4317' } })).statusCode).toBe(404);
+  });
+});

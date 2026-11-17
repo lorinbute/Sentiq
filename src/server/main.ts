@@ -8,6 +8,7 @@ import { Db } from './db/database.ts';
 import { buildApp } from './http/app.ts';
 import { registerJobs } from './jobs/register.ts';
 import { createLogger } from './log.ts';
+import { watchEventLoop } from './loop-watch.ts';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -41,6 +42,8 @@ async function main(): Promise<void> {
     await ctx.scheduler.start();
     ctx.nli.warmUp();
   }
+  // FIX-DBSTUCK: a blocked process is written in the log, with the jobs that were running.
+  const stopWatch = watchEventLoop(log, () => ctx.scheduler.runningJobs());
 
   let closing = false;
   const shutdown = async (signal: string) => {
@@ -52,6 +55,7 @@ async function main(): Promise<void> {
       log.warn('shutdown took over 15 s: exiting now');
       process.exit(0);
     }, 15_000).unref();
+    stopWatch();
     try {
       await app.close();
       await ctx.scheduler.stop();

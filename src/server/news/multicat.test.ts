@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { testDb } from '../test/db.ts';
 import { CoinDetector } from './coins.ts';
 import { categorize, encodeCategories, normalizeCategories, sourceCategories, subjectOf } from './categorize.ts';
-import { ingestItems, reclassifySource, retagRecent, upgradeClassification } from './ingest.ts';
+import { CLASSIFY_VERSION, ingestItems, reclassifySource, retagRecent, upgradeClassification } from './ingest.ts';
 import type { ParsedItem } from './parser.ts';
 import type { SourceCategory } from './sources.ts';
 
@@ -161,7 +161,7 @@ describe('a general source, stored', () => {
     expect((await stored(db)).map((r) => r.category)).toEqual(['other', 'macro']);
     expect(await upgradeClassification(db, det, det, 'sentiment.daily')).toBe(false);
     // The job's other data is kept.
-    expect(JSON.parse((await db.get<{ data: string }>("SELECT data FROM job_state WHERE name = 'sentiment.daily'"))!.data)).toEqual({ indexVersion: 2, classifyVersion: 2 });
+    expect(JSON.parse((await db.get<{ data: string }>("SELECT data FROM job_state WHERE name = 'sentiment.daily'"))!.data)).toEqual({ indexVersion: 2, classifyVersion: CLASSIFY_VERSION });
   });
 
   it('other categories for the source: its stored items classified again', async () => {

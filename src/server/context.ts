@@ -31,9 +31,11 @@ import { SentimentService } from './sentiment/service.ts';
 import { publishPublicInstance, SettingsService } from './settings.ts';
 import { Mailer } from './auth/email.ts';
 import { PasskeyService } from './auth/passkeys.ts';
+import { Presence } from './auth/presence.ts';
 import { Sessions } from './auth/sessions.ts';
 import { Throttle } from './auth/throttle.ts';
 import { UserService } from './auth/users.ts';
+import { PaperService } from './paper/service.ts';
 
 export interface AppContext {
   config: AppConfig;
@@ -58,6 +60,8 @@ export interface AppContext {
   accounts: AccountsService;
   /** FD-TRADING: orders on the accounts where trading was switched on. */
   trading: TradingService;
+  /** FD-PAPER: the Paper Trading profiles and their engine (the `paper.match` job). */
+  paper: PaperService;
   /** FD-BOT: the trading bots (the engine runs them in the `bots` job). */
   botEngine: BotEngine;
   bots: BotService;
@@ -69,6 +73,8 @@ export interface AppContext {
   /** FD-USERS. */
   users: UserService;
   sessions: Sessions;
+  /** FD-KEYIDLE: who is using Sentiq now (only their keys work). */
+  presence: Presence;
   passkeys: PasskeyService;
   mailer: Mailer;
   throttle: Throttle;
@@ -169,7 +175,10 @@ export async function createContext(config: AppConfig, log: Logger, overrides: C
   const indexMembers = new IndexMembersService(db);
   const coins = new CoinRegistry(db, Date.now, indexMembers);
   const nli = overrides.nli ?? new TransformersNli(config.modelsDir, log);
-  const sentiment = new SentimentService(db, ai, nli, log);
+  // FD-KEYIDLE: the users' own keys work only while they use Sentiq.
+  const presence = new Presence(db);
+  const present = () => presence.activeUsers();
+  const sentiment = new SentimentService(db, ai, nli, log, present);
   // FD-INDEXNEWS: a user's own index also when only their stock news are limited to indices.
   const daily = new DailySentimentService(db, settings, ai, (userId) => stockScopeFor(db, settings, userId));
   const calendar = new CalendarService(db, log);
@@ -178,9 +187,11 @@ export async function createContext(config: AppConfig, log: Logger, overrides: C
   // FD-TDKEYS: each user's Twelve Data key.
   const stocks = overrides.stocks ?? new StockData({ db, key: (userId) => settings.getTwelveDataKey(userId) });
   const marketSource = new MarketSource(db, settings, market);
-  const scanner = new Scanner(db, settings, market, log, stocks, marketSource);
+  const scanner = new Scanner(db, settings, market, log, stocks, marketSource, present);
   const accounts = new AccountsService(db, box, log, overrides.clientFactory ?? defaultClientFactory(proxy), { retryDelaysMs: overrides.retryDelaysMs, brokerFactory: overrides.brokerFactory });
-  const trading = new TradingService({ db, accounts, log, traderFactory: overrides.traderFactory });
+  const paper = new PaperService({ db, quotes: { market, stocks, source: marketSource }, log });
+  accounts.attachPaper(paper);
+  const trading = new TradingService({ db, accounts, log, traderFactory: overrides.traderFactory, paper });
   const scheduler = new Scheduler(db, log);
   const botEngine = new BotEngine({ db, log, settings, market, stocks, source: marketSource, daily, calendar, ai, trading, accounts });
   const bots = new BotService(db, botEngine);
@@ -213,11 +224,13 @@ export async function createContext(config: AppConfig, log: Logger, overrides: C
     scanner,
     accounts,
     trading,
+    paper,
     botEngine,
     bots,
     scheduler,
     users,
     sessions,
+    presence,
     passkeys,
     mailer,
     throttle,

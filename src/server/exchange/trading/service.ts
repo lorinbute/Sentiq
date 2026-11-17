@@ -6,13 +6,17 @@ import type { Logger } from '../../log.ts';
 import type { StepUp } from '../../auth/users.ts';
 import type { AccountsService, AccountView } from '../accounts.ts';
 import { providerById } from '../../../shared/providers.ts';
-import { TRADING, type InstrumentInfo, type ModifyPreview, type ModifyResult, type ModifyTicket, type OrderPreview, type OrderResult, type OrderTicket, type ReversePreview, type ReverseTicket, type TradeLogRow, type TradeMarket, type TradeSymbol, type TradingCaps } from '../../../shared/trading.ts';
+import { ticketRules, TRADING, type InstrumentInfo, type ModifyPreview, type ModifyResult, type ModifyTicket, type OrderPreview, type OrderResult, type OrderTicket, type ReversePreview, type ReverseTicket, type TradeLogRow, type TradeMarket, type TradeSymbol, type TradingCaps } from '../../../shared/trading.ts';
 import { AlpacaTrader } from './alpaca.ts';
 import { CcxtTrader } from './crypto.ts';
 import { EtoroTrader } from './etoro.ts';
 import { tradeRights } from './rights.ts';
+import { journalEntry, type JournalEntry, type JournalRow } from '../trade-history.ts';
 import { Trading212Trader } from './trading212.ts';
 import { TradingError, type CancelInput, type Trader } from './types.ts';
+import { isPaperExchange } from '../../../shared/providers.ts';
+import type { PaperService } from '../../paper/service.ts';
+import { PaperTrader } from '../../paper/trader.ts';
 
 /** Actions (orders, cancellations) one user may send per minute: a stuck tab or a loop cannot send dozens. */
 export const TRADE_ACTIONS_PER_MINUTE = 20;
@@ -89,7 +93,16 @@ export interface TradingDeps {
   accounts: AccountsService;
   log: Logger;
   traderFactory?: TraderFactory;
+  /** FD-PAPER: the Paper Trading engine (a profile's orders go there). */
+  paper?: PaperService;
   now?: () => number;
+}
+
+/** The market an action on an existing order or position is on: a broker's or a stocks profile's one market, a perpetual's futures. */
+function actionMarket(a: TradingAccess, symbol: string, market: TradeMarket): TradeMarket {
+  // FIX-PAPERLEV: a profile's spot positions and orders are on spot (a pair without settlement), whatever row they show in.
+  if (isPaperExchange(a.exchange)) return a.kind === 'stocks' ? 'stock' : symbol.includes(':') ? 'futures' : 'spot';
+  return !a.clients ? 'stock' : symbol.includes(':') ? 'futures' : market;
 }
 
 export class TradingService {
@@ -97,6 +110,7 @@ export class TradingService {
   private readonly accounts: AccountsService;
   private readonly log: Logger;
   private readonly factory: TraderFactory;
+  private readonly paper: PaperService | null;
   private readonly now: () => number;
   /** One trader per account, rebuilt when the account's clients are (they hold the exchange's market list). */
   private readonly traders = new Map<number, { trader: Trader; clients: unknown; creds: unknown }>();
@@ -107,6 +121,7 @@ export class TradingService {
     this.accounts = deps.accounts;
     this.log = deps.log;
     this.factory = deps.traderFactory ?? defaultTraderFactory;
+    this.paper = deps.paper ?? null;
     this.now = deps.now ?? Date.now;
   }
 
@@ -142,6 +157,11 @@ export class TradingService {
   }
 
   private trader(a: TradingAccess): Trader {
+    // FD-PAPER: a profile's orders go to the paper engine, never to a platform.
+    if (isPaperExchange(a.exchange)) {
+      if (!this.paper) throw new TradingError('UNSUPPORTED', 'Paper Trading nu e disponibil.');
+      return new PaperTrader(this.paper, a.id);
+    }
     const cached = this.traders.get(a.id);
     if (cached && cached.clients === a.clients && JSON.stringify(cached.creds) === JSON.stringify(a.creds)) return cached.trader;
     const trader = this.factory(a, this.log);
@@ -223,6 +243,7 @@ export class TradingService {
    */
   async enable(userId: number, accountId: number, confirm: () => Promise<StepUp>): Promise<AccountView> {
     const a = await this.access(userId, accountId, false);
+    if (isPaperExchange(a.exchange)) throw new TradingError('UNSUPPORTED', 'Tranzacționarea unui profil Paper Trading e mereu pornită.');
     const platform = TRADING[a.exchange as keyof typeof TRADING];
     if (!platform?.supported) throw new TradingError('UNSUPPORTED', platform?.reason ?? 'Platforma nu primește ordine prin Sentiq.');
     let markets: TradeMarket[] = [...platform.markets];
@@ -264,6 +285,7 @@ export class TradingService {
 
   async disable(userId: number, accountId: number): Promise<AccountView> {
     const a = await this.access(userId, accountId, false);
+    if (isPaperExchange(a.exchange)) throw new TradingError('UNSUPPORTED', 'Tranzacționarea unui profil Paper Trading e mereu pornită.');
     const view = await this.accounts.setTrading(accountId, null);
     await this.journal(userId, a, { action: 'disable', status: 'sent', message: 'Tranzacționare oprită' });
     this.log.info(`trading: user ${userId} switched trading off for account ${accountId}`);
@@ -280,8 +302,15 @@ export class TradingService {
     return this.trader(a).instrument(market, symbol);
   }
 
+  /** FIX-PAPERLEV: a platform's account takes leverage, margin and reduce-only as before; a profile on every market. */
+  private rules(a: TradingAccess, t: OrderTicket): void {
+    const bad = isPaperExchange(a.exchange) ? null : ticketRules(t);
+    if (bad) throw new TradingError('INVALID', bad);
+  }
+
   async preview(userId: number, ticket: OrderTicket): Promise<OrderPreview> {
     const a = await this.access(userId, ticket.accountId, true, ticket.market);
+    this.rules(a, ticket);
     const p = await this.trader(a).normalize(ticket);
     return { ...p, env: a.env };
   }
@@ -329,6 +358,7 @@ export class TradingService {
   /** Sends an order once (FD-TRADING §3, §6). */
   async place(userId: number, ticket: OrderTicket): Promise<OrderResult> {
     const a = await this.access(userId, ticket.accountId, true, ticket.market);
+    this.rules(a, ticket);
     this.throttle(userId);
     const claimed = await this.claim(userId, a, ticket);
     if ('existing' in claimed) return this.fromLog(claimed.existing);
@@ -366,7 +396,7 @@ export class TradingService {
     const probe = await this.access(userId, accountId, false);
     // A broker's orders are on its one market (`stock`), whatever row they show in; a perpetual's (BTC/USDT:USDT) are
     // futures, even where the account lists them with the spot ones (KuCoin's unified account).
-    const market: TradeMarket = !probe.clients ? 'stock' : input.symbol.includes(':') ? 'futures' : input.market;
+    const market: TradeMarket = actionMarket(probe, input.symbol, input.market);
     const a = await this.access(userId, accountId, true, market);
     input = { ...input, market };
     this.throttle(userId);
@@ -390,7 +420,7 @@ export class TradingService {
   /** A broker's orders are on its one market (`stock`); a perpetual's are futures wherever it is listed. */
   private async modifyAccess(userId: number, t: ModifyTicket): Promise<{ a: TradingAccess; ticket: ModifyTicket }> {
     const probe = await this.access(userId, t.accountId, false);
-    const market: TradeMarket = !probe.clients ? 'stock' : t.symbol.includes(':') ? 'futures' : t.market;
+    const market: TradeMarket = actionMarket(probe, t.symbol, t.market);
     return { a: await this.access(userId, t.accountId, true, market), ticket: { ...t, market } };
   }
 
@@ -473,7 +503,10 @@ export class TradingService {
 
   /** A reversal is of a futures position, where the platform can (crypto). */
   private async reverseAccess(userId: number, t: ReverseTicket): Promise<{ a: TradingAccess; trader: Trader & Required<Pick<Trader, 'normalizeReverse' | 'reverse'>> }> {
-    const a = await this.access(userId, t.accountId, true, 'futures');
+    // FD-PAPER: a profile turns its positions on every market (FIX-PAPERLEV: spot too).
+    const probe = await this.access(userId, t.accountId, false);
+    const market: TradeMarket = isPaperExchange(probe.exchange) ? actionMarket(probe, t.symbol, 'spot') : 'futures';
+    const a = await this.access(userId, t.accountId, true, market);
     const trader = this.trader(a);
     if (!trader.normalizeReverse || !trader.reverse) throw new TradingError('UNSUPPORTED', 'Întoarcerea poziției se face doar pe futures crypto.');
     return { a, trader: trader as Trader & Required<Pick<Trader, 'normalizeReverse' | 'reverse'>> };
@@ -522,5 +555,17 @@ export class TradingService {
 
   async journalOf(userId: number): Promise<TradeLogRow[]> {
     return (await this.db.all<LogRow>(`SELECT TOP (${LOG_LIMIT}) * FROM trade_log WHERE user_id = ? ORDER BY created_at DESC, id DESC`, [userId])).map(toLogRow);
+  }
+
+  /**
+   * FIX-TRADESOLD: the orders and the SL / TP changes sent from Sentiq on one of the user's accounts since `since` and
+   * accepted, oldest first (at most 5000), for the trade history.
+   */
+  async sentFor(userId: number, accountId: number, since: number): Promise<JournalEntry[]> {
+    const rows = await this.db.all<JournalRow>(
+      "SELECT TOP (5000) action, created_at, symbol, market, side, leverage, detail FROM trade_log WHERE user_id = ? AND account_id = ? AND status = N'sent' AND action IN (N'order', N'modify') AND created_at >= ? ORDER BY created_at, id",
+      [userId, accountId, since],
+    );
+    return rows.map(journalEntry).filter((e): e is JournalEntry => e !== null);
   }
 }

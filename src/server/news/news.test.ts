@@ -195,6 +195,36 @@ describe('classify', () => {
   });
 });
 
+describe('FIX-DBSTUCK: the first-word filter of the tagging', () => {
+  it('finds what every name tried finds: edges, punctuation, case, Kelvin and long s, names that are not ASCII', () => {
+    const d = new CoinDetector(
+      [
+        { symbol: 'BCH', names: ['Bitcoin Cash'] },
+        { symbol: 'SHIB', names: ['Shiba Inu'] },
+        { symbol: 'LDO', names: ['Lido DAO'] },
+        { symbol: 'KAS', names: ['Kaspa Network'] },
+        { symbol: 'SOC', names: ['Société Générale Coin'] },
+      ],
+      { SOL: [] },
+      { MMM: ['3M'], MCD: ["McDonald's"], KO: ['Coca-Cola'], NVDA: ['NVIDIA'] },
+      { '^SPX': ['S&P 500'] },
+    );
+    const texts = [
+      'Bitcoin Cash rallies while Bitcoin stalls',
+      'bitcoin cash, shiba inu and LIDO DAO move',
+      'xBitcoin Cash is not a word; Shiba-Inu is not the name',
+      '3M and McDonald’s and McDonald\'s report; Coca-Cola (NYSE: KO) gains; Nvidia and NVIDIA up',
+      'The S&P 500 slips; s&p 500 in lower case',
+      '\u212Aaspa Network and ſhiba Inu written with old letters',
+      'Société Générale Coin listed; Societe Generale Coin without accents',
+      'JUST IN: SHIBA INU AND BITCOIN CASH SURGE',
+      '',
+    ];
+    for (const t of texts) expect(d.detect(t), t).toEqual(d.detectUnfiltered(t));
+    expect(d.detect('bitcoin cash, shiba inu and LIDO DAO move')).toEqual(expect.arrayContaining(['BCH', 'SHIB', 'LDO']));
+  });
+});
+
 describe('ingest', () => {
   const det = new CoinDetector([]);
   const mk = (title: string, link: string, publishedAt: number | null = Date.parse('2026-10-12T10:00:00Z'), guid: string | null = null): ParsedItem => ({
@@ -212,6 +242,16 @@ describe('ingest', () => {
     return db;
   }
 
+  it('FIX-SOURCES: a new database has FXStreet off (refused from Azure); a choice made later stays', async () => {
+    const db = await setup();
+    expect(await db.get("SELECT enabled, builtin FROM sources WHERE id = 'fxstreet'")).toEqual({ enabled: 0, builtin: 1 });
+    expect(await db.get("SELECT enabled FROM sources WHERE id = 'fed'")).toEqual({ enabled: 1 });
+    // Turned on by the user: the next seeding keeps it on.
+    await db.run("UPDATE sources SET enabled = 1 WHERE id = 'fxstreet'");
+    await seedSources(db);
+    expect(await db.get("SELECT enabled FROM sources WHERE id = 'fxstreet'")).toEqual({ enabled: 1 });
+  });
+
   it('inserts, dedups by id and canonical URL, tags coins and clusters stories', async () => {
     const db = await setup();
     const r1 = await ingestItems(db, { id: 'coindesk', category: 'crypto' }, [mk('Bitcoin surges past $80,000 as ETF inflows hit record', 'https://a.com/1?utm_source=x')], det, now);
@@ -227,6 +267,25 @@ describe('ingest', () => {
     expect(rows).toHaveLength(2);
     expect(rows[0]!.cluster_id).toBe(rows[1]!.cluster_id);
     expect(await db.all('SELECT coin FROM news_coins ORDER BY news_id, coin')).toEqual([{ coin: 'BTC' }, { coin: 'BTC' }]);
+  });
+
+  it('FIX-DBSTUCK: a story another import adds between the read before the lock and the lock is clustered with', async () => {
+    const db = await setup();
+    // The other outlet's import writes right before this one takes the lock (after its read of the window).
+    const tx = db.tx.bind(db);
+    let once = true;
+    (db as unknown as { tx: typeof db.tx }).tx = async (fn) => {
+      if (once) {
+        once = false;
+        (db as unknown as { tx: typeof db.tx }).tx = tx;
+        await ingestItems(db, { id: 'decrypt', category: 'crypto' }, [mk('Bitcoin Surges Past $80,000 on Record ETF Inflows', 'https://b.com/2')], det, now);
+      }
+      return tx(fn);
+    };
+    await ingestItems(db, { id: 'coindesk', category: 'crypto' }, [mk('Bitcoin surges past $80,000 as ETF inflows hit record', 'https://a.com/1')], det, now);
+    const rows = await db.all<{ cluster_id: string; source_id: string }>('SELECT cluster_id, source_id FROM news ORDER BY source_id');
+    expect(rows.map((r) => r.source_id)).toEqual(['coindesk', 'decrypt']);
+    expect(rows[0]!.cluster_id).toBe(rows[1]!.cluster_id);
   });
 
   it('a changed title resets the sentiment for rescoring', async () => {

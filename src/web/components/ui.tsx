@@ -95,9 +95,21 @@ export function Warning({ children }: { children: ReactNode }) {
   );
 }
 
-export function Seg<T extends string>({ value, options, onChange, label }: { value: T; options: { value: T; label: string }[]; onChange: (v: T) => void; label: string }) {
+export function Seg<T extends string>({
+  value,
+  options,
+  onChange,
+  label,
+  className,
+}: {
+  value: T;
+  options: { value: T; label: string }[];
+  onChange: (v: T) => void;
+  label: string;
+  className?: string;
+}) {
   return (
-    <div className="seg" role="group" aria-label={label}>
+    <div className={clsx('seg', className)} role="group" aria-label={label}>
       {options.map((o) => (
         <button key={o.value} type="button" aria-pressed={o.value === value} onClick={() => onChange(o.value)}>
           {o.label}
@@ -116,14 +128,15 @@ export function fmtScore(score: number): string {
 }
 
 /** A −1…+1 score as its value over a thin meter centred on zero. */
-export function ScoreBar({ score, width = 90 }: { score: number | null; width?: number }) {
-  if (score === null) return <span className="text-[12px] text-faint">în analiză</span>;
+export function ScoreBar({ score, width = 90, big = false }: { score: number | null; width?: number; big?: boolean }) {
+  if (score === null) return <span className={clsx('text-faint', big ? 'text-[13px]' : 'text-[12px]')}>în analiză</span>;
   const half = width / 2;
   const len = Math.min(half, Math.abs(score) * half);
   const tone = scoreTone(score);
   return (
     <span className="inline-flex flex-col items-end gap-1.5" title={`Sentiment ${score.toFixed(2)}`}>
-      <span className={clsx('num text-[13px]', tone === 'bull' ? 'text-bull' : tone === 'bear' ? 'text-bear' : 'text-muted')}>{fmtScore(score)}</span>
+      {/* FIX-MOBILESYM2: `big` on a phone's news card, where the score has a column of its own. */}
+      <span className={clsx('num', big ? 'text-[17px] leading-tight font-semibold' : 'text-[13px]', tone === 'bull' ? 'text-bull' : tone === 'bear' ? 'text-bear' : 'text-muted')}>{fmtScore(score)}</span>
       <span className="relative inline-block h-1 rounded-sm bg-line" style={{ width }} aria-hidden>
         <span
           className={clsx('absolute top-0 h-1 rounded-sm', tone === 'bull' ? 'bg-bull' : tone === 'bear' ? 'bg-bear' : 'bg-muted')}

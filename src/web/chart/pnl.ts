@@ -171,6 +171,11 @@ export interface TradeLine extends PriceLineSpec {
   name?: string;
   /** The position a SL / TP belongs to (for its change: the side, eToro's position id). */
   position?: { side: 'long' | 'short'; ref?: string; symbol: string; market: 'futures' | 'spot' };
+  /**
+   * FIX-BOTLEVELS: a level a bot keeps (no order at the platform); `tag` is what its box adds ("bot", "bot oprit").
+   * FIX-BOTDRAG: the position it is for (its symbol, side and opening), where a drag sends it.
+   */
+  bot?: { id: number; name: string; tag: string; symbol: string; side: 'long' | 'short'; openedAt: number };
 }
 
 /** The trades' lines: entry, liquidation, SL / TP with their PnL, the PnL now, and the other open orders on the symbol. */

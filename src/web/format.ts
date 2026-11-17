@@ -144,3 +144,23 @@ export function countRo(n: number, one: string, many: string): string {
   const r = n % 100;
   return `${n} ${n < 20 || (r >= 1 && r <= 19) ? '' : 'de '}${many}`;
 }
+
+/**
+ * FD-TRADESMOBILE: the space before an amount's unit ("1.000,00 USD", "70 %") an ordinary one, so on a narrow card only
+ * the unit goes to the next line; the amount itself stays whole.
+ */
+export const breakableUnit = (v: string): string => v.replace(/\u00a0(?=[^\s\u00a0\d.,−+-]+$)/, ' ');
+
+/**
+ * FIX-POSAMOUNT: what a futures position took from the account, without leverage (its margin): in dollars when it
+ * settles in a dollar coin (USDT, USDC, USD), else in its settlement coin (an inverse contract: BTC); a dash when unknown.
+ */
+export function positionAmount(pos: { symbol: string; margin?: number | null }): string {
+  return amountIn(pos.margin, pos.symbol.split(':')[1] ?? pos.symbol.split('/')[1] ?? 'USDT');
+}
+
+/** FIX-HISTAMOUNT: an amount in a settlement currency: in dollars for USDT / USDC / USD, else in its coin; a dash when unknown. */
+export function amountIn(v: number | null | undefined, currency: string): string {
+  if (v === null || v === undefined || !Number.isFinite(v)) return '—';
+  return ['USDT', 'USDC', 'USD'].includes(currency.toUpperCase()) ? fmtUsd(v) : `${fmtNum(v, 8)} ${currency}`;
+}

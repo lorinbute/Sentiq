@@ -20,6 +20,19 @@ export interface CalendarEvent {
   /** True when the Actual came from the TradingView match. */
   matched: boolean;
   note: string | null;
+  /** FD-CALACTUAL §3: an earnings event's reported results (TradingView); absent before them and on other events. */
+  results?: EarnResults;
+}
+
+export interface EarnResults {
+  eps: number;
+  epsForecast: number | null;
+  epsSurprisePct: number | null;
+  revenue: number | null;
+  revenueForecast: number | null;
+  revenueSurprisePct: number | null;
+  /** The revenue's currency (ISO); null: USD. */
+  currency: string | null;
 }
 
 const SYNONYMS: [RegExp, string][] = [

@@ -5,6 +5,13 @@ import { macroVerdict } from './macro.ts';
 const is = (title: string, companies = 0, summary = '') => macroVerdict(title, summary, companies).macro;
 
 describe('macro news by the user\'s rules (FD-MACRORULES)', () => {
+  it("FIX-GASMACRO: a network's gas is not macro; the pump's and natural gas still are", () => {
+    for (const t of ['Ethereum gas prices fall to record lows', 'ETH gas prices spike as memecoin mania returns', 'Network gas prices hit a one-year low'])
+      expect(macroVerdict(t, '', 0).macro, t).toBe(false);
+    for (const t of ['U.S. gas prices fall below $4 for the first time since July', 'European gas prices hit 1-month lows', 'Dutch inflation rises to 3.7% as gas prices climb'])
+      expect(macroVerdict(t, '', 0).macro, t).toBe(true);
+  });
+
   it('takes economy-wide data, policy and structural trends', () => {
     for (const t of [
       'Fed holds rates steady, signals two cuts this year',

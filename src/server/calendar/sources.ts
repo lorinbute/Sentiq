@@ -300,3 +300,80 @@ export async function fetchTvEarnings(symbols: string[]): Promise<Map<string, Tv
   if (names.length === 0) return new Map();
   return parseTvEarnings(await tvScan(names, TV_EARN_COLUMNS));
 }
+
+// ── FD-CALACTUAL §3: the results a company reported, from the same screener ─────────────────────────────────────────
+
+/** The columns asked, in this order: the last publication's day and time, EPS and revenue reported and expected. */
+export const TV_RESULT_COLUMNS = [
+  'name',
+  'is_primary',
+  'type',
+  'earnings_release_trading_date_fq',
+  'earnings_release_date',
+  'earnings_per_share_fq',
+  'earnings_per_share_forecast_fq',
+  'eps_surprise_percent_fq',
+  'revenue_fq',
+  'revenue_forecast_fq',
+  'revenue_surprise_percent_fq',
+  'currency',
+] as const;
+
+/** The last results TradingView knows of a stock: the trading day they came out and the numbers. */
+export interface TvResult {
+  /** YYYY-MM-DD: the trading day of the publication. */
+  day: string;
+  /** When they came out (ms), when TradingView says. */
+  releasedAt: number | null;
+  eps: number | null;
+  /** The analysts' EPS TradingView compared it with. */
+  epsForecast: number | null;
+  epsSurprisePct: number | null;
+  revenue: number | null;
+  revenueForecast: number | null;
+  revenueSurprisePct: number | null;
+  currency: string | null;
+}
+
+/** TradingView's screener answer → each stock's last reported results (FD-CALACTUAL §3). */
+export function parseTvResults(body: string): Map<string, TvResult> {
+  let json: unknown;
+  try {
+    json = JSON.parse(body);
+  } catch {
+    throw new Error('TradingView: răspunsul nu e JSON');
+  }
+  const parsed = tvScanSchema.safeParse(json);
+  if (!parsed.success) throw new Error('TradingView: răspuns neașteptat');
+  const out = new Map<string, TvResult & { rank: number }>();
+  for (const raw of parsed.data.data ?? []) {
+    const row = tvRowSchema.safeParse(raw);
+    if (!row.success) continue;
+    const [name, primary, , day, released, eps, epsForecast, epsSurprise, revenue, revenueForecast, revenueSurprise, currency] = row.data.d;
+    const d = utcDay(day);
+    if (typeof name !== 'string' || !name || !d) continue;
+    const info: TvResult = {
+      day: d,
+      releasedAt: dateOf(released)?.getTime() ?? null,
+      eps: num(eps),
+      epsForecast: num(epsForecast),
+      epsSurprisePct: num(epsSurprise),
+      revenue: num(revenue),
+      revenueForecast: num(revenueForecast),
+      revenueSurprisePct: num(revenueSurprise),
+      currency: typeof currency === 'string' && /^[A-Z]{3}$/.test(currency) ? currency : null,
+    };
+    // The same name on several exchanges: the one with an EPS, then the primary listing.
+    const rank = (info.eps !== null ? 2 : 0) + (primary === true ? 1 : 0);
+    const kept = out.get(name);
+    if (!kept || rank > kept.rank) out.set(name, { ...info, rank });
+  }
+  return new Map([...out].map(([k, { rank: _, ...v }]) => [k, v]));
+}
+
+/** One request for these stocks' last results; none without any (FD-CALACTUAL §3). */
+export async function fetchTvResults(symbols: string[]): Promise<Map<string, TvResult>> {
+  const names = [...new Set(symbols)].filter(isTvSymbol);
+  if (names.length === 0) return new Map();
+  return parseTvResults(await tvScan(names, TV_RESULT_COLUMNS));
+}

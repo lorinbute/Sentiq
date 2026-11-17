@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The build on Azure App Service (deploy-azure.md §3, TD-AZURE §11): Oryx runs it instead of its own `npm install` +
+# The build on Azure App Service (deploy-azure.html §3, TD-AZURE §11): Oryx runs it instead of its own `npm install` +
 # `npm run build`, through the app setting CUSTOM_BUILD_COMMAND="bash scripts/azure-build.sh".
 set -euo pipefail
 

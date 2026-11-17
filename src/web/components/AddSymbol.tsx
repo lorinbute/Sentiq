@@ -58,7 +58,8 @@ export function AddSymbol({ have, onAdd }: { have: ReadonlySet<string>; onAdd: (
   return (
     // One height for the switch and the search field, on every screen (FD-UIPOLISH): the row stretches both.
     <div className="flex flex-wrap items-stretch gap-2.5">
-      <div className="seg" role="group" aria-label="Tipul simbolului">
+      {/* FD-MOBILESYM §2: on a phone the switch and the field each take the whole row. */}
+      <div className="seg max-sm:row-fill" role="group" aria-label="Tipul simbolului">
         {(['crypto', 'stock', 'index'] as const).map((k) => (
           <button
             key={k}
@@ -75,7 +76,7 @@ export function AddSymbol({ have, onAdd }: { have: ReadonlySet<string>; onAdd: (
           </button>
         ))}
       </div>
-      <div className="relative w-80 max-w-full">
+      <div className="relative w-80 max-w-full max-sm:w-full">
         <input
           ref={input}
           aria-label={kind === 'crypto' ? 'Adaugă o monedă' : kind === 'stock' ? 'Adaugă o acțiune' : 'Adaugă un indice'}

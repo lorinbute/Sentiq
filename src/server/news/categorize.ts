@@ -1,6 +1,7 @@
 // FD-MULTICAT: the category of a news item from a source covering several, by what the item is about. FD-MACRORULES: an
 // item is macro only by the user's rules (macro.ts); one that would be macro without them goes to its subject, else to
 // "other".
+import { newsThemes } from './classify.ts';
 import { macroVerdict, type MacroVerdict } from './macro.ts';
 import type { SourceCategory } from './sources.ts';
 
@@ -64,6 +65,8 @@ export function categorySignals(title: string, summary: string, coins: readonly 
   // "#CO" / "#SPX": a company or an index member named; "^SPX": a watchlist index; another symbol not a coin: a stock.
   if (coins.some((s) => isCrypto(s))) out.crypto += ENTITY;
   if (coins.some((s) => s.startsWith('#') || s.startsWith('^') || !isCrypto(s))) out.stocks += ENTITY;
+  // FIX-SENTWEIGHT: AI is the stock market's theme: a story about AI and nothing else is about shares.
+  if (newsThemes(title).includes('ai')) out.stocks += 1;
   return out;
 }
 

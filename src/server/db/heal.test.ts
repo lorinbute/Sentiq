@@ -1,6 +1,6 @@
 // FD-DBHEAL: a stuck Sentiq session holding the write lock is ended; lease renewals and jobs never join a transaction.
 import { describe, expect, it, vi } from 'vitest';
-import { Db, isStuckHolder, STUCK_TX_MS, type LockHolder } from './database.ts';
+import { Db, isStuckHolder, ORPHAN_TX_MS, STUCK_TX_MS, type LockHolder } from './database.ts';
 import { testDb } from '../test/db.ts';
 import { Scheduler } from '../jobs/scheduler.ts';
 import { silentLogger } from '../log.ts';
@@ -36,6 +36,28 @@ describe('a stuck write lock (FD-DBHEAL §2)', () => {
     expect(isStuckHolder(holder({ prog: 'SSMS' }))).toBe(false);
     expect(isStuckHolder(holder({ txAgeS: null }))).toBe(false);
     expect(isStuckHolder(undefined)).toBe(false);
+  });
+
+  it('FIX-DBSTUCK: another container’s session, not reading its result or sending nothing more, counts after a minute', () => {
+    const orphan = (over: Partial<LockHolder> = {}) => holder({ host: 'd009fa4bf5e4', me: '0f0fb08bc850', wait: 'ASYNC_NETWORK_IO', idle: 0, txAgeS: ORPHAN_TX_MS / 1000, ...over });
+    expect(isStuckHolder(orphan())).toBe(true);
+    expect(isStuckHolder(orphan({ wait: null, idle: 1 }))).toBe(true);
+    // Younger than a minute, running something else, the same container, another program: the 5 minutes, as before.
+    expect(isStuckHolder(orphan({ txAgeS: ORPHAN_TX_MS / 1000 - 1 }))).toBe(false);
+    expect(isStuckHolder(orphan({ wait: 'LCK_M_X' }))).toBe(false);
+    expect(isStuckHolder(orphan({ wait: 'PAGEIOLATCH_SH' }))).toBe(false);
+    expect(isStuckHolder(orphan({ me: 'd009fa4bf5e4' }))).toBe(false);
+    expect(isStuckHolder(orphan({ me: null }))).toBe(false);
+    expect(isStuckHolder(orphan({ prog: 'SSMS' }))).toBe(false);
+    expect(isStuckHolder(orphan({ me: 'd009fa4bf5e4', txAgeS: STUCK_TX_MS / 1000 }))).toBe(true);
+  });
+
+  it('FIX-DBSTUCK: ends another container’s orphan at once and says so', async () => {
+    const orphan = holder({ host: 'd009fa4bf5e4', me: '0f0fb08bc850', wait: 'ASYNC_NETWORK_IO', idle: 0, txAgeS: 190, lastSql: 'SELECT n.id, n.cluster_id …' });
+    const { db, queries, warnings } = fakeDb([orphan, orphan]);
+    expect(await db.healStuckLock(1_000_000)).toBe(true);
+    expect(queries).toEqual(['holder', 'holder', 'KILL 78']);
+    expect(warnings[0]).toBe('database: ended a stuck session 78 (d009fa4bf5e4, transaction open 190 s; another container, not reading its result; last: SELECT n.id, n.cluster_id …)');
   });
 
   it('ends the same stuck session after a second look, at most once a minute', async () => {

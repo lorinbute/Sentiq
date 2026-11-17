@@ -10,7 +10,7 @@ import { ErrorNote, Loading } from '../ui.tsx';
 import { BotDetailView } from './BotDetailView.tsx';
 import { BotFormView, BOTS_KEY } from './BotFormView.tsx';
 import { BotTags, Pnl, StatusMark } from './bot-ui.tsx';
-import { formOf, initialForm, type BotForm, type BotSeed } from './bot-form.ts';
+import { editForm, formOf, initialForm, type BotForm, type BotSeed } from './bot-form.ts';
 
 type View = { kind: 'list' } | { kind: 'choose' } | { kind: 'form'; form: BotForm } | { kind: 'detail'; id: number } | { kind: 'edit'; id: number; form: BotForm };
 
@@ -101,7 +101,7 @@ export function BotsDialog({ seed, onClose }: { seed: BotSeed; onClose: () => vo
           <Choice
             icon={Sparkles}
             title="Slingshot + sentimentul Sentiq"
-            text="Intră pe semnalele Slingshot doar când scorul pieței (scorul zilei, aria, sentimentul general, știrile simbolului și structura) e de partea lor: long-urile de la pragul lor în sus, short-urile de la pragul lor în jos; opțional, AI-ul tău confirmă. Ieșirea: SL-ul și TP-ul semnalului, sau ale tale, în procente de la intrare (de exemplu 1% și 2%, adică 1:2)."
+            text="Intră pe setup-urile Slingshot în formare (sau doar pe semnalele confirmate, la alegere), doar când scorul pieței (scorul zilei, aria, sentimentul general, știrile simbolului și structura) e de partea lor: long-urile de la pragul lor în sus, short-urile de la pragul lor în jos; opțional, AI-ul tău confirmă. Ieșirea: SL-ul și TP-ul semnalului, sau ale tale, în procente de la intrare (de exemplu 1% și 2%, adică 1:2)."
             onClick={() => setView({ kind: 'form', form: initialForm(seed, 'premium') })}
           />
         </div>
@@ -123,7 +123,7 @@ export function BotsDialog({ seed, onClose }: { seed: BotSeed; onClose: () => vo
         {back}
         <BotDetailView
           bot={detail.data}
-          onEdit={() => setView({ kind: 'edit', id: view.id, form: formOf(detail.data!.input) })}
+          onEdit={() => setView({ kind: 'edit', id: view.id, form: editForm(detail.data!) })}
           onCopy={() => {
             const form = formOf(detail.data!.input);
             setView({ kind: 'form', form: { ...form, name: `${form.name} (copie)`.slice(0, 60), endsAt: null } });

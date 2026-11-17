@@ -7,11 +7,14 @@ import type { TicketSeed } from './OrderTicket.tsx';
 export function closeSeed(account: AccountView, pos: PositionRow): TicketSeed | null {
   const base = pos.symbol.split('/')[0] ?? pos.symbol;
   if (account.exchange === 'etoro') return pos.ref?.positionIds ? { kind: 'stocks', accountId: account.id, symbol: base, side: 'sell', close: { positionIds: pos.ref.positionIds }, amount: pos.size ?? pos.contracts, title: `Închide poziția ${base}` } : null;
-  if (account.kind === 'stocks') return { kind: 'stocks', accountId: account.id, symbol: base, side: pos.side === 'short' ? 'buy' : 'sell', amount: pos.size ?? pos.contracts, title: `Închide poziția ${base}` };
-  // Only where trading was switched on for futures (a spot-only key shows its positions without the button).
-  if (!account.trading.markets.includes('futures')) return null;
+  // FIX-PAPERLEV: a profile's position closes reduce-only on its own market (a spot pair has no settlement), never turning.
+  const paper = account.exchange === 'paper';
+  if (account.kind === 'stocks') return { kind: 'stocks', accountId: account.id, symbol: base, side: pos.side === 'short' ? 'buy' : 'sell', amount: pos.size ?? pos.contracts, ...(paper ? { reduceOnly: true } : {}), title: `Închide poziția ${base}` };
+  const market = paper && !pos.symbol.includes(':') ? 'spot' : 'futures';
+  // Only where trading was switched on for that market (a spot-only key shows its positions without the button).
+  if (!account.trading.markets.includes(market)) return null;
   const mode = pos.marginMode === 'cross' || pos.marginMode === 'isolated' ? pos.marginMode : undefined;
-  return { kind: 'crypto', accountId: account.id, market: 'futures', symbol: pos.symbol, side: pos.side === 'short' ? 'buy' : 'sell', amount: pos.size ?? pos.contracts, reduceOnly: true, marginMode: mode, title: `Închide ${pos.symbol}` };
+  return { kind: 'crypto', accountId: account.id, market, symbol: pos.symbol, side: pos.side === 'short' ? 'buy' : 'sell', amount: pos.size ?? pos.contracts, reduceOnly: true, marginMode: mode, title: `Închide ${pos.symbol}` };
 }
 
 /** What "Vinde" opens for a holding (eToro: closing its positions; IBKR: nothing). */

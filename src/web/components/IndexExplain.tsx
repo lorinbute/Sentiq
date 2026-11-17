@@ -15,6 +15,8 @@ import { ErrorNote, fmtScore, Loading } from './ui.tsx';
 
 const CAT: Record<string, string> = { crypto: 'Crypto', stocks: 'Acțiuni', macro: 'Macro', geopolitics: 'Geopolitică' };
 const FLAG: Record<string, string> = { sponsored: 'sponsorizat', speculative: 'speculativ', recap: 'rezumat' };
+/** FIX-SENTWEIGHT: the themes that weigh more. */
+const THEME: Record<string, string> = { energy: 'energie', ai: 'AI' };
 const PAGE = 20;
 const SCORE_TEXT = (s: number) => (s > 0.2 ? 'text-bull' : s < -0.2 ? 'text-bear' : 'text-muted');
 /** The index's colours as on the card (neutral in the text colour). */
@@ -147,20 +149,24 @@ function Body({ e, tz }: { e: TodayExplain; tz: string }) {
             )}
           </Step>
           <Step n={2} title="Ponderea fiecărei știri">
-            <Formula>pondere = relevanță × importanță × greutatea sursei × factor × prospețime × poveste × plafon</Formula>
+            <Formula>pondere = relevanță × importanță × greutatea sursei × factor × temă × prospețime × poveste × plafon</Formula>
             <ul className="mt-1.5 list-disc space-y-0.5 pl-5">
               <li>
-                <span className="text-text">relevanța:</span> 1 la crypto; la acțiuni și macro 1 cu termeni de piață, altfel 0,8; la geopolitică 0,8 când e legată de piețe, altfel 0;
+                <span className="text-text">relevanța:</span> 1 la crypto; la acțiuni și macro 1 cu termeni de piață, altfel 0,8; la geopolitică 0,8 când e legată de piețe, de energie sau de AI,
+                altfel 0;
               </li>
               <li>
                 <span className="text-text">importanța</span> 1–3: a AI-ului, unde a dat una; altfel din cuvinte-cheie (3: Fed, dobânzi, inflație, război, tarife, hack, faliment…; 2: ETF, randamente, dolar,
-                BTC / ETH…; 1,5: alte monede din top 10; 1: restul);
+                BTC / ETH…; 1,5: alte monede din top 10; 1: restul). Energia și AI-ul au cel puțin 2, iar 3 la o mișcare mare (sell-off, criză, CEO înlocuit, restricții la cipuri…);
               </li>
               <li>
                 <span className="text-text">greutatea sursei:</span> din Setări → Admin → Surse;
               </li>
               <li>
                 <span className="text-text">factorul:</span> sponsorizat {fmtNum(r.spec.sponsored, 1)}; speculativ sau rezumat {fmtNum(r.spec.speculative, 1)}; altfel 1;
+              </li>
+              <li>
+                <span className="text-text">tema:</span> o știre despre energie (petrol, combustibili, gaz, electricitate, prețurile și producția energiei) sau despre AI cântărește × {fmtNum(r.theme, 1)}; altfel 1;
               </li>
               <li>
                 <span className="text-text">prospețimea:</span> se înjumătățește la fiecare {fmtNum(p.halfLifeH, 1)} ore;
@@ -263,6 +269,7 @@ function Body({ e, tz }: { e: TodayExplain; tz: string }) {
                   `importanță ${n2(it.impact)}${it.why ? (it.why.impactSource === 'ai' ? ' (AI)' : ' (cuvinte-cheie)') : ''}`,
                   `sursă ${n2(it.sourceWeight)}`,
                   ...(it.spec !== 1 ? [`factor ${n2(it.spec)} (${it.flags.map((f) => FLAG[f]).filter(Boolean).join(', ')})`] : []),
+                  ...(it.theme !== 1 ? [`temă ${n2(it.theme)} (${it.flags.map((f) => THEME[f]).filter(Boolean).join(', ')})`] : []),
                   `prospețime ${n2(it.decay)}`,
                   ...(it.clusterN > 1 ? [`poveste ${n2(it.cluster)} (${it.clusterN} surse)`] : []),
                   ...(it.cap < 1 ? [`plafon ${n2(it.cap)}`] : []),
@@ -323,7 +330,7 @@ function Body({ e, tz }: { e: TodayExplain; tz: string }) {
             încrederea: {fmtNum(r.confidence.medium, 0)} / {fmtNum(r.confidence.high, 0)}
           </li>
           <li>
-            factori: sponsorizat {fmtNum(r.spec.sponsored, 1)}, speculativ / rezumat {fmtNum(r.spec.speculative, 1)}
+            factori: sponsorizat {fmtNum(r.spec.sponsored, 1)}, speculativ / rezumat {fmtNum(r.spec.speculative, 1)}; tema energie / AI × {fmtNum(r.theme, 1)}
           </li>
         </ul>
         <p className="text-[12.5px] text-faint">Din aplicație se schimbă greutatea surselor (Setări → Admin → Surse); restul, din cod.</p>

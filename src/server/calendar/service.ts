@@ -9,11 +9,16 @@ import { formatIssues, ValidationError } from '../settings.ts';
 import { addDays, dayBounds, dayKey, zonedTimeToUtc } from '../../shared/time.ts';
 import { explain } from './glossary.ts';
 import { ffWeekRange, mergeCalendar, type CalendarEvent } from './merge.ts';
-import { fetchForexFactory, fetchTradingView, RateLimitedError, type CalImpact, type RawEvent, type TvEarnings } from './sources.ts';
+import { fetchForexFactory, fetchTradingView, RateLimitedError, type CalImpact, type RawEvent, type TvEarnings, type TvResult } from './sources.ts';
 
 export const FF_JOB = 'calendar.ff';
 export const TV_JOB = 'calendar.tv';
 export const EARN_JOB = 'calendar.earnings';
+/** FD-CALACTUAL §3: the results the companies reported, from TradingView. */
+export const RESULTS_JOB = 'calendar.results';
+/** Days back a company's results are still looked for, and how long they are kept. */
+export const RESULTS_LOOKBACK_DAYS = 7;
+export const RESULTS_KEEP_DAYS = 90;
 /** Custom events per user: a person adds a few; the cap keeps one account from filling the database. */
 export const MAX_CUSTOM_EVENTS = 1000;
 /** Weekdays of earnings looked up ahead (one Nasdaq request each). */
@@ -188,6 +193,48 @@ const EARN_WHEN: Record<string, string> = {
   unknown: 'în cursul zilei (compania nu a anunțat ora)',
 };
 
+/** A stock's reported results for one day (FD-CALACTUAL §3), as stored. */
+interface ResultRow {
+  symbol: string;
+  day: string;
+  eps: number | null;
+  eps_forecast: number | null;
+  eps_surprise_pct: number | null;
+  revenue: number | null;
+  revenue_forecast: number | null;
+  revenue_surprise_pct: number | null;
+  currency: string | null;
+}
+
+const pctRo = (v: number) => `${v > 0 ? '+' : v < 0 ? '−' : ''}${new Intl.NumberFormat('ro-RO', { maximumFractionDigits: 1 }).format(Math.abs(v))}%`;
+/** "18,52 mld. $": revenue in the UI's number style. */
+export function moneyRo(v: number, currency: string | null): string {
+  const c = currency ?? 'USD';
+  try {
+    // FD-CALACTUALBIG: the currency's symbol ("18,52 mld. $"), as on the card.
+    return new Intl.NumberFormat('ro-RO', { style: 'currency', currency: c, currencyDisplay: 'narrowSymbol', notation: 'compact', maximumFractionDigits: 2 }).format(v);
+  } catch {
+    return `${new Intl.NumberFormat('ro-RO', { notation: 'compact', maximumFractionDigits: 2 }).format(v)} ${c}`;
+  }
+}
+
+/**
+ * The note of an earnings event with its results (FD-CALACTUAL §3): EPS and revenue against the analysts', from
+ * TradingView, and the Nasdaq forecast shown before them when there was one (it counts EPS differently).
+ */
+export function resultsNote(who: string, r: ResultRow, nasdaqForecast: string | null): string {
+  const eps = formatEps(r.eps) as string;
+  const vsEps = r.eps_forecast !== null ? ` față de ${formatEps(r.eps_forecast)} estimat${r.eps_surprise_pct !== null ? ` (${pctRo(r.eps_surprise_pct)})` : ''}` : '';
+  const rev =
+    r.revenue !== null
+      ? `; venituri ${moneyRo(r.revenue, r.currency)}${r.revenue_forecast !== null ? ` față de ${moneyRo(r.revenue_forecast, r.currency)} estimate${r.revenue_surprise_pct !== null ? ` (${pctRo(r.revenue_surprise_pct)})` : ''}` : ''}`
+      : '';
+  // FIX-EARNNOTE: Nasdaq writes a loss in brackets, "($1.45)"; inside the note's own brackets it reads "-$1.45".
+  const nasdaq = nasdaqForecast?.replace(/^\((.*)\)$/, '-$1') ?? null;
+  const before = nasdaq ? ` Înainte de rezultate, prognoza afișată era cea de la Nasdaq (${nasdaq}), care calculează EPS-ul altfel.` : '';
+  return `${who} a raportat: EPS ${eps}${vsEps}${rev}. Cifrele sunt de la TradingView.${before}`;
+}
+
 export class CalendarService {
   private readonly db: Db;
   private readonly log: Logger;
@@ -342,6 +389,67 @@ export class CalendarService {
     return stored;
   }
 
+  /**
+   * FD-CALACTUAL §3: the stocks with an earnings event from RESULTS_LOOKBACK_DAYS ago to the end of today (New York)
+   * whose results are not stored yet, with the day of the event.
+   */
+  async awaitingResults(now = Date.now()): Promise<{ symbol: string; day: string }[]> {
+    const today = dayKey(now, NY);
+    const from = dayBounds(addDays(today, -RESULTS_LOOKBACK_DAYS), NY).start;
+    const to = dayBounds(addDays(today, 1), NY).start;
+    const rows = await this.db.all<{ ext_id: string }>(
+      `SELECT c.ext_id FROM calendar_raw c WHERE c.source = N'earn' AND c.ts >= ? AND c.ts < ?
+         AND NOT EXISTS (SELECT 1 FROM earn_results r WHERE c.ext_id = r.symbol + N':' + r.day COLLATE ${BIN}) ORDER BY c.ts, c.ext_id`,
+      [from, to],
+    );
+    const out: { symbol: string; day: string }[] = [];
+    for (const r of rows) {
+      const i = r.ext_id.lastIndexOf(':');
+      if (i > 0) out.push({ symbol: r.ext_id.slice(0, i), day: r.ext_id.slice(i + 1) });
+    }
+    return out;
+  }
+
+  /**
+   * Stores the results of the stocks waiting for them, only when TradingView's last publication is the event's day and
+   * has an EPS (never the quarter before); then forgets results older than RESULTS_KEEP_DAYS. Returns those stored.
+   */
+  async saveResults(found: ReadonlyMap<string, TvResult>, waiting: { symbol: string; day: string }[], now = Date.now()): Promise<number> {
+    const rows = waiting.flatMap(({ symbol, day }) => {
+      const r = found.get(symbol);
+      if (!r || r.day !== day || r.eps === null) return [];
+      return [
+        {
+          symbol,
+          day,
+          released_at: r.releasedAt,
+          eps: r.eps,
+          eps_forecast: r.epsForecast,
+          eps_surprise_pct: r.epsSurprisePct,
+          revenue: r.revenue,
+          revenue_forecast: r.revenueForecast,
+          revenue_surprise_pct: r.revenueSurprisePct,
+          currency: r.currency,
+          fetched_at: now,
+        },
+      ];
+    });
+    await this.db.tx(async () => {
+      if (rows.length) {
+        await this.db.run(
+          `INSERT INTO earn_results(symbol, day, released_at, eps, eps_forecast, eps_surprise_pct, revenue, revenue_forecast, revenue_surprise_pct, currency, fetched_at)
+           SELECT j.symbol, j.day, j.released_at, j.eps, j.eps_forecast, j.eps_surprise_pct, j.revenue, j.revenue_forecast, j.revenue_surprise_pct, j.currency, j.fetched_at
+           FROM OPENJSON(?) WITH (symbol nvarchar(40), day nvarchar(10), released_at bigint, eps float, eps_forecast float, eps_surprise_pct float, revenue float,
+             revenue_forecast float, revenue_surprise_pct float, currency nvarchar(8), fetched_at bigint) j
+           WHERE NOT EXISTS (SELECT 1 FROM earn_results r WHERE r.symbol = j.symbol COLLATE ${BIN} AND r.day = j.day COLLATE ${BIN})`,
+          [JSON.stringify(rows)],
+        );
+      }
+      await this.db.run('DELETE FROM earn_results WHERE day < ?', [addDays(dayKey(now, NY), -RESULTS_KEEP_DAYS)]);
+    });
+    return rows.length;
+  }
+
   /** Next High-impact event start time after `now` (for burst scheduling). */
   async nextImportant(now = Date.now()): Promise<number | null> {
     const r = await this.db.get<{ ts: number | null }>(
@@ -364,6 +472,17 @@ export class CalendarService {
         w.name,
       ]),
     );
+    // FD-CALACTUAL §3: the results reported, by "SYMBOL:day" (the earnings events' own id).
+    const results = new Map<string, ResultRow>();
+    if (q.earnings !== false) {
+      const days = [dayKey(q.from - DAY, NY), dayKey(q.to + DAY, NY)];
+      for (const r of await this.db.all<ResultRow>(
+        'SELECT symbol, day, eps, eps_forecast, eps_surprise_pct, revenue, revenue_forecast, revenue_surprise_pct, currency FROM earn_results WHERE day >= ? AND day <= ?',
+        days,
+      )) {
+        results.set(`${r.symbol}:${r.day}`, r);
+      }
+    }
     const earnings =
       q.earnings === false
         ? []
@@ -374,6 +493,34 @@ export class CalendarService {
               const [when = 'unknown', quarter = '', dateFrom = '', numbersFrom = ''] = (r.period ?? '').split('|');
               const name = stocks.get(sym);
               const who = name ? cleanCompanyName(name) || sym : sym;
+              const res = results.get(r.extId);
+              if (res && res.eps !== null) {
+                return {
+                  id: `earn:${r.extId}`,
+                  source: 'earn',
+                  title: `Rezultate trimestriale ${who}`,
+                  currency: sym,
+                  ts: r.ts,
+                  allDay: r.allDay,
+                  impact: r.impact,
+                  actual: formatEps(res.eps),
+                  forecast: formatEps(res.eps_forecast),
+                  // Nasdaq's EPS of a year before counts EPS otherwise than TradingView: no comparison with it.
+                  previous: null,
+                  deviation: res.eps_forecast !== null ? Math.round((res.eps - res.eps_forecast) * 1e6) / 1e6 : null,
+                  matched: false,
+                  note: resultsNote(who, res, numbersFrom === 'tv' ? null : r.forecast),
+                  results: {
+                    eps: res.eps,
+                    epsForecast: res.eps_forecast,
+                    epsSurprisePct: res.eps_surprise_pct,
+                    revenue: res.revenue,
+                    revenueForecast: res.revenue_forecast,
+                    revenueSurprisePct: res.revenue_surprise_pct,
+                    currency: res.currency,
+                  },
+                };
+              }
               return {
                 id: `earn:${r.extId}`,
                 source: 'earn',

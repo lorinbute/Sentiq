@@ -20,6 +20,7 @@ import { setTheme, useTheme } from './theme.ts';
 import { EXIT_FULLSCREEN_EVENT } from './chart/fullscreen.ts';
 import { isImportFailure } from './stale.ts';
 import { useScrollLock } from './scroll-lock.ts';
+import { usePresence } from './presence.ts';
 import { TodayPage } from './pages/Today.tsx';
 
 const NewsPage = lazy(() => import('./pages/News.tsx'));
@@ -316,6 +317,8 @@ function SummaryFailed({ error, onClose }: { error: Error; onClose: () => void }
 
 function SignedInApp({ user }: { user: PublicUser }) {
   const location = useLocation();
+  // FD-KEYIDLE: the server learns while this tab is in use (the user's own keys work only then).
+  usePresence();
   const [search, setSearch] = useState(false);
   const [summary, setSummary] = useState(false);
   const closeSummary = useCallback(() => setSummary(false), []);

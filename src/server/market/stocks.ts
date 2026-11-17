@@ -100,6 +100,8 @@ export interface TdPlan {
 
 /** The job that reads the plan (FD-TDPLAN). */
 export const TD_PLAN_JOB = 'twelvedata.plan';
+/** FD-KEYIDLE: while its user uses Sentiq, a key's plan is read again once older than this. */
+export const TD_PLAN_EVERY_MS = 6 * 3_600_000;
 
 /** Where a key's day count and plan are kept: one pair per user since FD-TDKEYS (`td:usage` / `td:plan` before). */
 export const tdUsageKey = (scope?: string) => (scope ? `td:usage:${scope}` : 'td:usage');
@@ -230,6 +232,13 @@ export class CreditBudget {
   /** The stored plan, when it belongs to the key ending in `keyHint`. */
   planFor(keyHint: string): StoredPlan | null {
     return this.plan && this.plan.keyHint === keyHint ? this.plan : null;
+  }
+
+  /** Like `planFor`, read again from the database first (the other instance may have read it meanwhile). */
+  async storedPlan(keyHint: string): Promise<StoredPlan | null> {
+    await this.ready;
+    await this.reloadPlan();
+    return this.planFor(keyHint);
   }
 
   /** Resolves once the count was read and every write so far has finished (tests, shutdown). */
@@ -726,15 +735,20 @@ export class StockData {
   }
 
   /**
-   * Reads the user's Twelve Data key's plan and applies its limits (FD-TDPLAN): after a key is saved, at start-up, every
-   * 6 hours and on request. Without a key, the plan is forgotten. A failed read keeps the last plan (and throws).
+   * Reads the user's Twelve Data key's plan and applies its limits (FD-TDPLAN): after a key is saved, on request and,
+   * while the user uses Sentiq, every 6 hours (FD-KEYIDLE). Without a key, the plan is forgotten. A failed read keeps
+   * the last plan (and throws). `olderThanMs`: only when the plan stored for this key is older than that (else null).
    */
-  async refreshPlan(userId: number, key: string | null = null): Promise<TdPlan | null> {
+  async refreshPlan(userId: number, key: string | null = null, olderThanMs?: number): Promise<TdPlan | null> {
     const k = key ?? (await this.key(userId));
     const { client, budget } = this.account(userId);
     if (!k) {
       await budget.clearPlan();
       return null;
+    }
+    if (olderThanMs !== undefined) {
+      const stored = await budget.storedPlan(k.slice(-4));
+      if (stored && this.now() - stored.at < olderThanMs) return null;
     }
     const p = await client.plan(k);
     await budget.setPlan(p, k.slice(-4));

@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { HttpError, httpRequest, type HttpResponse } from '../net/http.ts';
 import { addDays, DAY_MS, dayKey, zonedTimeToUtc } from '../../shared/time.ts';
 import type { BalanceRow, ErrorCode, FillRow, OrderRow, PositionRow } from './accounts.ts';
+import type { HistoryMarket } from './trade-history.ts';
 
 export type BrokerId = 'trading212' | 'etoro' | 'ibkr' | 'alpaca';
 export const BROKER_IDS: readonly BrokerId[] = ['trading212', 'etoro', 'ibkr', 'alpaca'];
@@ -48,6 +49,21 @@ export interface ClosedTrade {
   pnl: number | null;
   /** The result in the account's currency; null without an exchange rate (counted, not summed). */
   net: number | null;
+  // FD-TRADES: what the broker's history says of the trade (absent: unknown).
+  symbol?: string;
+  side?: 'long' | 'short';
+  qty?: number | null;
+  entry?: number | null;
+  exit?: number | null;
+  openedAt?: number | null;
+  sl?: number | null;
+  tp?: number | null;
+  leverage?: number | null;
+  market?: HistoryMarket;
+  /** The currency of `pnl` when not the account's (IBKR: the trade's). */
+  currency?: string | null;
+  /** The amount put in (eToro): the base of the result's percent. */
+  invested?: number | null;
 }
 
 export interface ClosedTrades {
@@ -67,6 +83,14 @@ export interface BrokerOptions {
 
 const FILLS_WINDOW_MS = 7 * 86_400_000;
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** FD-TRADES: a fill added to an order's quantity and average price (null: none known yet; a fill without either is left out). */
+export function addFill(qty: number | null, price: number | null, fillQty: number | null, fillPrice: number | null): { qty: number | null; price: number | null } {
+  const q = fillQty === null ? 0 : Math.abs(fillQty);
+  if (!(q > 0) || fillPrice === null || !(fillPrice > 0)) return { qty, price };
+  const before = qty ?? 0;
+  return { qty: before + q, price: ((price ?? 0) * before + fillPrice * q) / (before + q) };
+}
 
 const num = (v: unknown): number | null => {
   const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN;
@@ -332,7 +356,10 @@ class Trading212 implements BrokerAdapter {
         const pnl = num(w.realisedProfitLoss);
         const prev = byOrder.get(id);
         const sum = prev ? (prev.pnl === null || pnl === null ? null : prev.pnl + pnl) : pnl;
-        byOrder.set(id, { id, closedAt: Math.max(prev?.closedAt ?? t, t), pnl: sum, net: sum });
+        // FD-TRADES: the share, the quantity sold and its average price (the entry is not in the history).
+        const ticker = str(o.ticker) ?? str(obj(o.instrument)?.ticker);
+        const { qty: sold, price: exit } = addFill(prev?.qty ?? null, prev?.exit ?? null, qty, num(f.price));
+        byOrder.set(id, { id, closedAt: Math.max(prev?.closedAt ?? t, t), pnl: sum, net: sum, ...(ticker ? { symbol: t212Symbol(ticker) } : {}), side: 'long', qty: sold, exit, market: 'stock' });
       }
       const next = str(resp.nextPagePath);
       path = reached || !next ? null : next.replace(/^\/api\/v0/, '');
@@ -535,6 +562,7 @@ class Etoro implements BrokerAdapter {
     // A date without a zone: a day earlier, so the period's first hours are surely in; the rows are filtered below.
     const minDate = new Date(from - DAY_MS).toISOString().slice(0, 10);
     const byId = new Map<string, ClosedTrade>();
+    const instrumentOf = new Map<string, number | null>();
     const seen = new Set<string>();
     const times: number[] = [];
     let capped = false;
@@ -555,7 +583,30 @@ class Etoro implements BrokerAdapter {
         times.push(closedAt);
         if (closedAt < from) continue;
         const pnl = num(r.netProfit);
-        byId.set(id, { id, closedAt, pnl, net: pnl });
+        // FD-TRADES: the trade as eToro keeps it, with its SL / TP (0: none); the share's symbol is read below.
+        const lev = num(r.leverage) ?? 1;
+        const isBuy = r.isBuy !== false;
+        const level = (v: unknown) => {
+          const n = num(v);
+          return n !== null && n > 0 ? n : null;
+        };
+        instrumentOf.set(id, num(pick(r, 'instrumentId', 'instrumentID')));
+        byId.set(id, {
+          id,
+          closedAt,
+          pnl,
+          net: pnl,
+          side: isBuy ? 'long' : 'short',
+          qty: level(r.units),
+          entry: level(r.openRate),
+          exit: level(r.closeRate),
+          openedAt: utcTime(pick(r, 'openTimestamp', 'openDateTime')),
+          sl: level(r.stopLossRate),
+          tp: level(r.takeProfitRate),
+          leverage: lev,
+          market: lev > 1 || !isBuy ? 'cfd' : 'stock',
+          invested: level(pick(r, 'investment', 'initialInvestment')),
+        });
       }
       // The end of the history; or a page that repeats the last one (a full page repeated: the paging is not followed).
       if (rows.length === 0) break;
@@ -567,6 +618,15 @@ class Etoro implements BrokerAdapter {
     // Cut short: complete back to the oldest row only if the rows come newest first.
     const newestFirst = times.every((t, i) => i === 0 || t <= (times[i - 1] as number));
     const coveredFrom = !capped ? from : newestFirst && times.length ? (times[times.length - 1] as number) : Number.POSITIVE_INFINITY;
+    // The symbols (an id that cannot be resolved keeps its number); a coin bought without leverage is a coin, not a share.
+    const meta = await this.instruments([...instrumentOf.values()].filter((x): x is number => x !== null));
+    for (const t of byId.values()) {
+      const iid = instrumentOf.get(t.id);
+      const info = iid !== null && iid !== undefined ? meta.get(iid) : undefined;
+      if (!info) continue;
+      t.symbol = info.symbol;
+      if (t.market === 'stock' && /crypto/i.test(info.type)) t.market = 'crypto';
+    }
     return { currency: 'USD', trades: [...byId.values()], coveredFrom, asOf: null };
   }
 }
@@ -833,11 +893,22 @@ class Ibkr implements BrokerAdapter {
       const id = t.ibOrderID || t.orderID || t.tradeID || t.transactionID || `${t.symbol ?? '?'}-${ts}`;
       const prev = byOrder.get(id);
       const net = rate === null ? null : pnl * rate;
+      // FD-TRADES: the instrument, the quantity closed and its average price; a sale closes a long, a purchase a short.
+      const mult = num(t.multiplier) ?? 1;
+      const { qty: closedQty, price: exit } = addFill(prev?.qty ?? null, prev?.exit ?? null, num(t.quantity) === null ? null : (num(t.quantity) as number) * mult, num(t.tradePrice));
+      const signed = num(t.quantity);
+      const sold = t.buySell ? t.buySell.toUpperCase().startsWith('SELL') : signed !== null ? signed < 0 : null;
       byOrder.set(id, {
         id,
         closedAt: Math.max(prev?.closedAt ?? ts, ts),
         pnl: (prev?.pnl ?? 0) + pnl,
         net: prev && prev.net === null ? null : net === null ? null : (prev?.net ?? 0) + net,
+        ...(t.symbol ? { symbol: t.symbol } : {}),
+        ...(sold === null ? {} : { side: sold ? ('long' as const) : ('short' as const) }),
+        qty: closedQty,
+        exit,
+        market: t.assetCategory === 'STK' || t.assetCategory === 'ETF' || !t.assetCategory ? 'stock' : 'other',
+        currency: t.currency || base,
       });
     }
     const toDate = flexDate(xmlElements(xml, 'FlexStatement')[0]?.toDate);
@@ -873,23 +944,32 @@ export interface FifoExec {
  */
 export function fifoResults(execs: FifoExec[], opts: { complete: boolean; shorting: boolean }): ClosedTrade[] {
   const sorted = [...execs].sort((a, b) => a.time - b.time || a.id.localeCompare(b.id));
-  // Per symbol, the open lots oldest first: quantity > 0 long, < 0 short (never both).
-  const books = new Map<string, { qty: number; price: number }[]>();
-  const orders = new Map<string, { closedAt: number; sum: number; unknown: boolean }>();
+  // Per symbol, the open lots oldest first: quantity > 0 long, < 0 short (never both); FD-TRADES: with their time.
+  const books = new Map<string, { qty: number; price: number; time: number }[]>();
+  const orders = new Map<string, { closedAt: number; sum: number; unknown: boolean; symbol: string; side: 'long' | 'short'; qty: number; exitCost: number; entryCost: number; opened: number }>();
+  const labels = new Map<string, string>();
   for (const e of sorted) {
     const symbol = e.symbol.replace('/', '').toUpperCase();
     const mult = OCC_OPTION.test(symbol) ? 100 : 1;
     const book = books.get(symbol) ?? [];
     books.set(symbol, book);
+    // FD-TRADES: a coin is named as a pair (BTC/USD) wherever one of its fills wrote it so.
+    if (!labels.get(symbol)?.includes('/')) labels.set(symbol, e.symbol.toUpperCase());
     const sign = e.side === 'buy' ? 1 : -1;
     let left = e.qty;
     let realised = 0;
     let closed = false;
+    let matched = 0;
+    let entryCost = 0;
+    let opened = Number.POSITIVE_INFINITY;
     while (left > QTY_EPS && book.length > 0 && Math.sign((book[0] as { qty: number }).qty) === -sign) {
-      const lot = book[0] as { qty: number; price: number };
+      const lot = book[0] as { qty: number; price: number; time: number };
       const m = Math.min(left, Math.abs(lot.qty));
       // A sell closes a long (price − cost); a buy closes a short (entry − price).
       realised += (sign === -1 ? e.price - lot.price : lot.price - e.price) * m * mult;
+      matched += m;
+      entryCost += lot.price * m;
+      opened = Math.min(opened, lot.time);
       lot.qty += sign * m;
       left -= m;
       closed = true;
@@ -897,14 +977,40 @@ export function fifoResults(execs: FifoExec[], opts: { complete: boolean; shorti
     }
     let unknown = false;
     if (left > QTY_EPS) {
-      if (sign === 1 || e.short || (opts.complete && opts.shorting)) book.push({ qty: sign * left, price: e.price });
+      if (sign === 1 || e.short || (opts.complete && opts.shorting)) book.push({ qty: sign * left, price: e.price, time: e.time });
       else unknown = true;
     }
     if (!closed && !unknown) continue;
+    // An unknown part is a sale of shares held from before the history: closed, at a cost not known.
+    const sold = matched + (unknown ? left : 0);
     const prev = orders.get(e.orderId);
-    orders.set(e.orderId, { closedAt: e.time, sum: (prev?.sum ?? 0) + realised, unknown: (prev?.unknown ?? false) || unknown });
+    orders.set(e.orderId, {
+      closedAt: e.time,
+      sum: (prev?.sum ?? 0) + realised,
+      unknown: (prev?.unknown ?? false) || unknown,
+      symbol,
+      side: sign === -1 ? 'long' : 'short',
+      qty: (prev?.qty ?? 0) + sold,
+      exitCost: (prev?.exitCost ?? 0) + e.price * sold,
+      entryCost: (prev?.entryCost ?? 0) + entryCost,
+      opened: Math.min(prev?.opened ?? Number.POSITIVE_INFINITY, opened),
+    });
   }
-  return [...orders.entries()].map(([id, o]) => ({ id, closedAt: o.closedAt, pnl: o.unknown ? null : o.sum, net: o.unknown ? null : o.sum }));
+  return [...orders.entries()].map(([id, o]) => ({
+    id,
+    closedAt: o.closedAt,
+    pnl: o.unknown ? null : o.sum,
+    net: o.unknown ? null : o.sum,
+    // FD-TRADES: the trade, as far as the fills tell it (an unknown cost leaves the entry and its time unknown).
+    symbol: labels.get(o.symbol) ?? o.symbol,
+    side: o.side,
+    // An option's contracts as the shares they stand for (as IBKR's), so the result's percent is of what was paid.
+    qty: o.qty > QTY_EPS ? o.qty * (OCC_OPTION.test(o.symbol) ? 100 : 1) : null,
+    exit: o.qty > QTY_EPS ? o.exitCost / o.qty : null,
+    entry: !o.unknown && o.qty > QTY_EPS ? o.entryCost / o.qty : null,
+    openedAt: !o.unknown && Number.isFinite(o.opened) ? o.opened : null,
+    market: OCC_OPTION.test(o.symbol) ? 'other' : (labels.get(o.symbol) ?? '').includes('/') ? 'crypto' : 'stock',
+  }));
 }
 
 class Alpaca implements BrokerAdapter {

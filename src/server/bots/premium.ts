@@ -1,7 +1,8 @@
 // Slingshot Premium (FD-BOT §6): what the bar that just closed says (a confirmed signal, a take profit signal, what
 // became of the signal a position entered on), the levels and the size of a trade, and its exit at the price now.
-import { liqDistance, LIQ_SAFETY, reached, type BotSide, type PremiumConfig } from '../../shared/bot.ts';
-import type { SlingshotResult, SlingshotSignal } from '../../shared/indicator/slingshot.ts';
+import { isUsdQuote, liqDistance, LIQ_SAFETY, MIN_TRADE_PROFIT, reached, type BotSide, type PremiumConfig } from '../../shared/bot.ts';
+import type { SlingshotResult, SlingshotSetup, SlingshotSignal } from '../../shared/indicator/slingshot.ts';
+import { money } from './format.ts';
 import type { BotPosition } from './state.ts';
 
 export interface BarEvents {
@@ -36,6 +37,20 @@ export function signalFate(r: SlingshotResult, side: BotSide, time: number, clos
   return s.outcomeReason === 'trendFlip' ? 'flip' : null;
 }
 
+/** FIX-BOTSHORTS: the setups forming on the closed bar (never one on the forming bar). */
+export const setupsOn = (r: SlingshotResult, closed: number): SlingshotSetup[] => (r.setups ?? []).filter((x) => x.bar === closed && !x.provisional);
+
+/**
+ * FIX-BOTSHORTS: what became of a setup a position entered on (its V2 search started at `start`), by a closed bar: the
+ * signal it was confirmed as (the search ends at the first confirmation after its start, whose V2 is within it), still
+ * forming, or ended without a signal.
+ */
+export function setupFate(r: SlingshotResult, side: BotSide, start: number, closed: number): { signal: SlingshotSignal } | 'forming' | 'cancelled' {
+  const signal = r.signals.find((s) => s.side === side && s.time >= start && s.confirmBar <= closed && !s.provisional);
+  if (signal) return { signal };
+  return setupsOn(r, closed).some((x) => x.side === side && x.startTime === start) ? 'forming' : 'cancelled';
+}
+
 /**
  * The stop loss and the take profit of a trade entered at `price` (FD-BOT §6), or why it cannot be entered: Slingshot's
  * are the signal's both, as they are, whatever the R:R from the price now (FD-BOTSLRR); "Risc / câștig" puts them at the
@@ -54,13 +69,22 @@ export function levelsFor(cfg: PremiumConfig, signal: Pick<SlingshotSignal, 'sid
 
 export interface SizeIn {
   cfg: PremiumConfig;
+  /** Leverage and margin apply (futures; a Paper Trading profile's every market). */
   futures: boolean;
-  maxAmount: number;
-  maxLeverage: number;
-  /** What is still free of the maximum amount. */
-  free: number;
+  /** FIX-BOTBUDGET: the bot's budget (its maximum amount, in margin) and the margin of its open trades. */
+  budget: number;
+  committed: number;
+  /** The trades it may still open: its open trades' maximum (at most one a symbol) less those open; at least 1. */
+  slots: number;
+  leverage: number;
   price: number;
   sl: number;
+  tp: number;
+  /** The commission of one execution, in percent. */
+  feePct: number;
+  /** FIX-BOTBUDGET: the least a trade must bring at the take profit, in the bot's currency (MIN_TRADE_PROFIT dollars). */
+  minProfit: number;
+  currency: string;
 }
 
 export interface Sized {
@@ -68,53 +92,69 @@ export interface Sized {
   margin: number;
   lev: number;
   notional: number;
-  /** Said in the journal: the risk was cut by the free amount, or the leverage lowered for the liquidation. */
+  /** Said in the journal: the leverage lowered for the liquidation. */
   notes: string[];
+  /** FIX-BOTBUDGET: the least margin that brings the minimum profit at the take profit, and the most allowed. */
+  lower: number;
+  upper: number;
 }
 
+/** A margin within [lower, upper]. */
+export const clampMargin = (v: number, lower: number, upper: number): number => Math.min(upper, Math.max(lower, v));
+
 /**
- * The size of a trade (FD-BOT §6): a fixed amount at the maximum leverage, or the risk wished for at the smallest leverage
- * the free amount allows; on futures, the stop loss well before the liquidation (the leverage comes down until it is).
+ * The size of a trade (FD-BOT §6, FIX-BOTBUDGET): at the bot's leverage (lowered until the stop loss comes well before
+ * the liquidation), the bot's free budget shared among the trades it may still open, at most its maximum a trade and
+ * at least what brings MIN_TRADE_PROFIT at the take profit after the commissions in and out. Refused when even the
+ * most allowed would bring less.
  */
 export function sizeFor(x: SizeIn): Sized | { error: string } {
-  const cap = Math.min(x.free, x.cfg.maxPerTrade ?? Infinity);
-  if (!(cap > 0)) return { error: 'Suma maximă e toată în tranzacții deschise.' };
+  const free = x.budget - x.committed;
+  const upper = Math.min(x.cfg.maxPerTrade, free);
+  if (!(upper > 0)) return { error: 'bugetul botului e tot în tranzacții deschise.' };
   const dist = Math.abs(x.price - x.sl) / x.price;
   const notes: string[] = [];
-  const maxLev = x.futures ? Math.max(1, x.maxLeverage) : 1;
-  let lev: number;
-  let notional: number;
-  let margin: number;
-  if (x.cfg.sizing === 'fixed') {
-    margin = Math.min(x.cfg.amount, cap);
-    if (margin < x.cfg.amount) notes.push('Suma pe tranzacție a fost micșorată la cât e liber din suma maximă.');
-    lev = maxLev;
-    notional = margin * lev;
-  } else {
-    const wanted = (x.maxAmount * x.cfg.riskPct) / 100 / dist;
-    lev = Math.min(maxLev, Math.max(1, Math.ceil(wanted / cap - 1e-9)));
-    notional = Math.min(wanted, cap * lev);
-    if (notional < wanted * (1 - 1e-9)) notes.push('Riscul e mai mic decât cel cerut: suma liberă nu ajunge pentru el.');
-    margin = notional / lev;
-  }
+  let lev = x.futures ? Math.max(1, x.leverage) : 1;
   // The stop loss must come well before the liquidation.
   while (x.futures && lev > 1 && dist >= LIQ_SAFETY * liqDistance(lev)) {
     lev -= 1;
-    if (x.cfg.sizing === 'fixed') notional = margin * lev;
-    else {
-      margin = notional / lev;
-      if (margin > cap) {
-        margin = cap;
-        notional = cap * lev;
-      }
-    }
     if (!notes.includes(LIQ_NOTE)) notes.push(LIQ_NOTE);
   }
   if (x.futures && dist >= LIQ_SAFETY * liqDistance(lev)) return { error: 'Stop loss-ul e prea departe: poziția s-ar lichida înaintea lui.' };
-  return { qty: notional / x.price, margin, lev, notional, notes };
+  // What a unit of margin brings at the take profit, the commissions in and out taken.
+  const edge = lev * (Math.abs(x.tp - x.price) / x.price - (2 * x.feePct) / 100);
+  if (!(edge > 0)) return { error: 'take profit-ul e prea aproape: nu acoperă comisioanele de intrare și de ieșire.' };
+  const lower = x.minProfit / edge;
+  if (lower > upper * (1 + 1e-9)) {
+    const c = x.currency;
+    return { error: `cu cel mult ${money(upper, c)} ${c} disponibili pentru tranzacție, ea ar aduce la take profit ${money(upper * edge, c)} ${c}: sub minimul de ${MIN_TRADE_PROFIT} USD${isUsdQuote(c) ? '' : ` (${money(x.minProfit, c)} ${c})`}.` };
+  }
+  const margin = clampMargin(free / Math.max(1, x.slots), lower, upper);
+  return { qty: (margin * lev) / x.price, margin, lev, notional: margin * lev, notes, lower, upper };
 }
 
 const LIQ_NOTE = 'Levierul a fost coborât: stop loss-ul trebuie atins cu mult înaintea lichidării.';
+
+/**
+ * FIX-BOTSHORTS: a trade cut to what the account has free, at the same leverage: the platform takes the margin and the
+ * opening fee (KuCoin's order cost: the value × (1 / leverage + the fee)). FIX-BOTBUDGET: never under its least
+ * (`lower`): null when the account has less than that.
+ */
+export function fitFunds(x: Sized, free: number, feePct: number, price: number): Sized | null {
+  const margin = free / (1 + (x.lev * feePct) / 100);
+  if (!(margin > 0) || !(price > 0) || margin < x.lower * (1 - 1e-9)) return null;
+  const notional = margin * x.lev;
+  return { ...x, qty: notional / price, margin, notional };
+}
+
+/** A trade at another margin (the AI's choice), within its bounds, at the same leverage. */
+export function withMargin(x: Sized, margin: number, price: number): Sized {
+  const m = clampMargin(margin, x.lower, x.upper);
+  return { ...x, qty: (m * x.lev) / price, margin: m, notional: m * x.lev };
+}
+
+/** What a trade asks of the account: its margin (its cost on spot) and the opening fee. */
+export const fundsFor = (x: Pick<Sized, 'margin' | 'notional'>, feePct: number): number => x.margin + (x.notional * feePct) / 100;
 
 /** The stop loss or the take profit reached at `price`. */
 export function exitAt(p: Pick<BotPosition, 'side' | 'sl' | 'tp'>, price: number): 'sl' | 'tp' | null {
@@ -123,6 +163,3 @@ export function exitAt(p: Pick<BotPosition, 'side' | 'sl' | 'tp'>, price: number
   if (p.tp !== null && reached(price, p.tp, long)) return 'tp';
   return null;
 }
-
-/** A simulated futures position's liquidation price (FD-BOT §6). */
-export const liquidationPrice = (p: Pick<BotPosition, 'side' | 'entry' | 'lev'>): number | null => (p.lev > 1 ? p.entry * (1 - (p.side === 'long' ? 1 : -1) * liqDistance(p.lev)) : null);

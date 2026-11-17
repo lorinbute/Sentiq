@@ -30,6 +30,14 @@ describe('why it weighs what it weighs', () => {
     );
   });
 
+  it('FIX-SENTWEIGHT: the theme that weighs more', () => {
+    expect(weighLine({ ...base, theme: 1.5, flags: ['energy', 'ai'] }, 1147, 'Reuters', now - 4 * H, now, 'Claude')).toBe(
+      'Cântărește de 4,4 ori cât o știre obișnuită de azi: importanță 3 (Claude), sursa Reuters are greutatea 1,2, e de acum 4 h (mai contează 68%), tema energie și AI × 1,5.',
+    );
+    // An answer served before it: no theme said.
+    expect(weighLine(base, 1147, 'Reuters', now - 4 * H, now, 'Claude')).not.toContain('tema');
+  });
+
   it('says only the terms that change something: relevance, the story, the flags, the cap', () => {
     const s = weighLine({ ...base, relevance: 0.8, clusterN: 3, spec: 0.5, flags: ['speculative'], cap: 0.6, share: 0.0005 }, 1147, 'Investing.com', now - 35 * 60_000, now, 'cuvinte-cheie');
     expect(s).toBe(

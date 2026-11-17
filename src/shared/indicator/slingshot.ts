@@ -65,6 +65,35 @@ export interface SlingshotSignal {
   provisional: boolean;
 }
 
+/**
+ * FIX-BOTSHORTS: a setup forming on a bar (its V2 searched, the chart's preview label), with the levels the chart shows
+ * for it on that bar. The bot enters on it at the bar's close; nothing here changes the indicator's rules.
+ */
+export interface SlingshotSetup {
+  side: SignalSide;
+  /** The bar it is forming on. */
+  bar: number;
+  time: number;
+  /** Where its V2 search started: the same setup while its V2 moves. */
+  startBar: number;
+  startTime: number;
+  /** Its V2 so far: the low of a LONG, the high of a SHORT. */
+  v2Bar: number;
+  v2Time: number;
+  entry: number;
+  /** The chart's live levels for it on this bar (its V2 ± the SL ATR, the lookback's extreme ± the TP ATR). */
+  sl: number;
+  tp: number;
+  /**
+   * FIX-BOTV1STOP: its V1 (the low of a LONG, the high of a SHORT), where Slingshot cancels it: a LONG's pullback down to
+   * the V1 low, a SHORT's rally up to the V1 high.
+   */
+  v1Bar: number;
+  v1Time: number;
+  v1: number;
+  provisional: boolean;
+}
+
 export interface SlingshotAlert {
   bar: number;
   time: number;
@@ -106,6 +135,8 @@ export interface SlingshotResult {
   uptrend: boolean[];
   markers: SlingshotMarker[];
   signals: SlingshotSignal[];
+  /** FIX-BOTSHORTS: every bar with a setup forming, each side apart. */
+  setups: SlingshotSetup[];
   alerts: SlingshotAlert[];
   /** The LONG's TP/SL on display (as in 3.3): its tracked signal, else its setup still forming. */
   atr: AtrDisplay | null;
@@ -306,6 +337,7 @@ export function runSlingshot(input: SlingshotInput): SlingshotResult {
     uptrend: new Array<boolean>(n).fill(false),
     markers: [],
     signals: [],
+    setups: [],
     alerts: [],
     atr: null,
     atrShort: null,
@@ -401,6 +433,8 @@ export function runSlingshot(input: SlingshotInput): SlingshotResult {
   let bullV2BestIdx = NaN;
   let bullV2BestLow = NaN;
   let bullV2Preview: number | null = null;
+  /** FIX-BOTSHORTS: the bar the V2 search started on. */
+  let bullV2Start = NaN;
   let bullTrendIntegrity = false;
 
   // ===================== SHORT state (the LONG's mirror) =====================
@@ -414,6 +448,7 @@ export function runSlingshot(input: SlingshotInput): SlingshotResult {
   let bearV2BestIdx = NaN;
   let bearV2BestHigh = NaN;
   let bearV2Preview: number | null = null;
+  let bearV2Start = NaN;
   let bearTrendIntegrity = false;
 
   // ===================== Market structure state =====================
@@ -582,6 +617,7 @@ export function runSlingshot(input: SlingshotInput): SlingshotResult {
       lo > bullV1Low
     ) {
       bullV2Search = true;
+      bullV2Start = i;
       bullV2BestIdx = i;
       bullV2BestLow = lo;
       if (bullV2Preview !== null) labels.delete(bullV2Preview);
@@ -786,6 +822,7 @@ export function runSlingshot(input: SlingshotInput): SlingshotResult {
       hi < bearV1High
     ) {
       bearV2Search = true;
+      bearV2Start = i;
       bearV2BestIdx = i;
       bearV2BestHigh = hi;
       if (bearV2Preview !== null) labels.delete(bearV2Preview);
@@ -1042,6 +1079,22 @@ export function runSlingshot(input: SlingshotInput): SlingshotResult {
       displaySL = liveSignalLow - stopLossAtrValue;
       displayBar = liveSignalBar;
       shouldShow = true;
+      result.setups.push({
+        side: 'long',
+        bar: i,
+        time: timeOf(i),
+        startBar: bullV2Start,
+        startTime: timeOf(bullV2Start),
+        v2Bar: liveSignalBar,
+        v2Time: timeOf(liveSignalBar),
+        entry: liveSignalLow,
+        sl: displaySL,
+        tp: displayTP,
+        v1Bar: bullV1Idx,
+        v1Time: timeOf(bullV1Idx),
+        v1: bullV1Low,
+        provisional: isProvisional(i),
+      });
     } else if (waitingLongTP) {
       if (!p.hideAtrOnTP || !tpHit) {
         displayTP = storedHighestHigh + storedTakeProfitAtr;
@@ -1063,6 +1116,22 @@ export function runSlingshot(input: SlingshotInput): SlingshotResult {
       shortDisplaySL = liveShortHigh + stopLossAtrValue;
       shortDisplayBar = liveShortBar;
       shouldShowShort = true;
+      result.setups.push({
+        side: 'short',
+        bar: i,
+        time: timeOf(i),
+        startBar: bearV2Start,
+        startTime: timeOf(bearV2Start),
+        v2Bar: liveShortBar,
+        v2Time: timeOf(liveShortBar),
+        entry: liveShortHigh,
+        sl: shortDisplaySL,
+        tp: shortDisplayTP,
+        v1Bar: bearV1Idx,
+        v1Time: timeOf(bearV1Idx),
+        v1: bearV1High,
+        provisional: isProvisional(i),
+      });
     } else if (waitingShortTP) {
       if (!p.hideAtrOnTP || !shortTpHit) {
         shortDisplayTP = storedLowestLow - storedShortTakeProfitAtr;

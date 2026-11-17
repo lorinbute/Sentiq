@@ -1,6 +1,6 @@
 // The indicators of the chart on screen (FD-INDICATORS §2, §5; TD-INDICATORS §6–§7): their inputs checked, the extra
 // bars they read loaded, and each one calculated in turn, off the click that changed it, so the page stays fluid.
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useQueries } from '@tanstack/react-query';
 import type { Bar } from 'oakscriptjs';
 import type { CandlesResult } from '../../shared/api-types.ts';
@@ -8,6 +8,7 @@ import type { Candle } from '../../shared/indicator/slingshot.ts';
 import type { Study, StudyId } from '../../shared/studies.ts';
 import type { Timeframe } from '../../shared/time.ts';
 import { api, qs } from '../api.ts';
+import { useInUse } from '../presence.ts';
 import { chartContext, runStudy, sanitizeInputs, toBars, type ChartInfo, type StudyRun } from './compute.ts';
 import { monthlyBars, planRun, resolveRequest, type ExtraLoad, type LoadState, type Resolved } from './extra-bars.ts';
 import type { StudyRuntime } from './runtime.ts';
@@ -19,7 +20,15 @@ export interface StudyState extends StudyRun {
   inputs: Record<string, unknown>;
   /** Another symbol's bars are still loading: nothing to draw yet. */
   waiting: boolean;
+  /**
+   * FD-CHARTOPEN: the chart it was calculated for (`chartOf`). Calculated after the chart's candles, a result of the chart
+   * left is still here for a moment: it is not drawn on another one.
+   */
+  chart: string;
 }
+
+/** The chart a result belongs to: its kind, exchange, symbol and timeframe (a refresh of its candles keeps it). */
+export const chartOf = (info: ChartInfo | null): string => (info ? `${info.kind}|${info.exchange}|${info.symbol}|${info.tf}` : '');
 
 export interface StudiesEnv {
   /** The chart's candle limit. */
@@ -92,12 +101,14 @@ export function useStudies({
     for (const p of plans) for (const r of p.resolved ?? []) if (r.load) byKey.set(r.load.key, r.load);
     return [...byKey.values()];
   }, [plans]);
+  // FD-KEYIDLE: a share's candles may cost the user's Twelve Data credits: not refreshed while the tab is not in use.
+  const inUse = useInUse();
   const queries = useQueries({
     queries: loads.map((l) => ({
       queryKey: ['candles', l.asset === 'crypto' ? (l.exchange ?? '') : l.asset, l.symbol, l.tf, l.limit],
       queryFn: () =>
         api.get<CandlesResult>(`/api/market/candles${qs({ ...(l.asset === 'crypto' ? { exchange: l.exchange } : { asset: l.asset }), symbol: l.symbol, tf: l.tf, limit: l.limit })}`),
-      refetchInterval: EXTRA_REFRESH_MS,
+      refetchInterval: l.asset === 'crypto' || inUse ? EXTRA_REFRESH_MS : false,
       retry: 1,
     })),
   });
@@ -115,13 +126,15 @@ export function useStudies({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loads, queries.map((q) => `${q.dataUpdatedAt}|${q.status}`).join(',')]);
 
-  // Each indicator calculated in turn; a result is kept until something it reads changes.
+  // Each indicator calculated in turn; a result is kept until something it reads changes. FD-CHARTOPEN: the first round
+  // before the page is painted, so that a chart opened draws its indicators on its first frame with its candles.
   const cache = useRef(new Map<string, { key: string; state: StudyState }>());
   const [states, setStates] = useState<ReadonlyMap<string, StudyState>>(() => new Map());
   const generation = useRef(0);
   const sig = bars ? barsSig(bars) : '';
   const visKey = visibleRange ? `${visibleRange.from}|${visibleRange.to}` : '';
-  useEffect(() => {
+  const chart = chartOf(info);
+  useLayoutEffect(() => {
     const gen = ++generation.current;
     if (!runtime || !ctx || !bars) {
       setStates((prev) => (prev.size ? new Map() : prev));
@@ -155,7 +168,7 @@ export function useStudies({
           c.rightVisibleBarTime = visibleRange.to;
         }
         let state: StudyState;
-        const base = { uid: p.study.uid, id: p.study.id, inputs: p.inputs };
+        const base = { uid: p.study.uid, id: p.study.id, inputs: p.inputs, chart };
         const plan = p.resolved ? planRun(p.resolved, loadStates) : null;
         if (plan?.mode === 'wait') {
           state = { ...base, result: null, error: null, approximated: false, missing: null, waiting: true };
@@ -178,6 +191,6 @@ export function useStudies({
     return () => {
       if (timer) clearTimeout(timer);
     };
-  }, [runtime, ctx, bars, sig, plans, loadStates, visKey, visibleRange]);
+  }, [runtime, ctx, bars, sig, plans, loadStates, visKey, visibleRange, chart]);
   return states;
 }

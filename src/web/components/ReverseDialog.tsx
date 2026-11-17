@@ -13,8 +13,7 @@ import { ModifyOutcome } from './ModifyTicket.tsx';
 import { DemoBadge, TRADING_KEY, TRADING_LOG_KEY, uuid } from './OrderTicket.tsx';
 import { settlePortfolio } from '../portfolio-settle.ts';
 
-/** Whether a position can be turned from here: a crypto futures one, with futures trading on. */
-export const canReverse = (account: AccountView, symbol: string): boolean => account.kind === 'crypto' && account.trading.enabled && account.trading.markets.includes('futures') && symbol.includes(':');
+export { canReverse } from '../chart/reverse.ts';
 
 const SIDE_RO = { long: 'Long', short: 'Short' } as const;
 const RESULT_RO: Record<ModifyResult['status'], string> = { done: 'Poziția a fost întoarsă', partial: 'Întoarsă în parte', failed: 'Poziția nu a fost întoarsă', unknown: 'Rezultat necunoscut: verifică pozițiile' };

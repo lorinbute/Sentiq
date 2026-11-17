@@ -108,6 +108,30 @@ describe('explaining the daily index', () => {
   });
 });
 
+describe('FIX-SENTWEIGHT: energy and AI stories weigh × 1.5', () => {
+  it('in the index and in its explanation, once for both themes; the others as before', () => {
+    const plain = item({ sentiment: -0.5, impact: 3, sourceId: 'x' });
+    const ai = item({ sentiment: -0.5, impact: 3, sourceId: 'y', flags: ['ai'] });
+    const both = item({ sentiment: -0.5, impact: 3, sourceId: 'z', flags: ['energy', 'ai'] });
+    // Three sources: no cap (from 4), so the weights compare as they are.
+    const spec = item({ sentiment: 0.4, impact: 2, sourceId: 'x', flags: ['speculative', 'energy'] });
+    const e = explainIndex([plain, ai, both, spec], day, asOf);
+    const by = new Map(e.items.map((x) => [x.id, x]));
+    expect(by.get(plain.id)).toMatchObject({ theme: 1 });
+    expect(by.get(ai.id)).toMatchObject({ theme: 1.5 });
+    expect(by.get(both.id)).toMatchObject({ theme: 1.5 });
+    expect(by.get(ai.id)!.weight).toBeCloseTo(by.get(plain.id)!.weight * 1.5, 12);
+    expect(by.get(both.id)!.weight).toBeCloseTo(by.get(ai.id)!.weight, 12);
+    // Both factors: 0,5 (speculative) × 1,5.
+    expect(by.get(spec.id)).toMatchObject({ spec: 0.5, theme: 1.5 });
+    expect(by.get(spec.id)!.weight).toBeCloseTo(by.get(plain.id)!.weight * (2 / 3) * 0.75, 12);
+    // The explanation's numbers are the index's.
+    expect(e.total.index).toBe(computeIndex([plain, ai, both, spec], day, asOf).index);
+    // A negative AI story pulls the day further down than the same story without the theme.
+    expect(computeIndex([item({ sentiment: 0.3 }), item({ sentiment: -0.5, flags: ['ai'] })], day, asOf).index).toBeLessThan(computeIndex([item({ sentiment: 0.3 }), item({ sentiment: -0.5 })], day, asOf).index);
+  });
+});
+
 describe('the explanation, edge cases', () => {
   it('an item of a source weighing nothing: weight 0, last, and not "cut" by the cap', () => {
     const items = [...busyDay(), item({ sentiment: 0.5, sourceId: 'zero', sourceName: 'Zero', sourceWeight: 0 })];

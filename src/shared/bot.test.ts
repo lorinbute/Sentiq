@@ -55,11 +55,11 @@ describe('the bot settings (FD-BOT §3–§6)', () => {
     expect(errors({ strategy: 'premium', ...common, market: 'stock', symbols: ['AAPL', 'MSFT'], premium: { ...premium, maxOpen: 2 } })).toEqual([]);
   });
 
-  it('a real bot on an account (shares too: FD-BOT §10), the leverage on futures', () => {
+  it('a real bot on an account (shares too: FD-BOT §10); the leverage anywhere (FIX-PAPERLEV: the check refuses it off futures on a real account)', () => {
     expect(errors({ strategy: 'premium', ...common, exec: 'real', accountId: 1, market: 'stock', symbols: ['AAPL'], premium })).toEqual([]);
     expect(errors({ strategy: 'premium', ...common, exec: 'real', premium })).toContain('Alege contul în care tranzacționează botul.');
     expect(errors({ strategy: 'premium', ...common, accountId: 3, premium })).toContain('Simularea nu folosește un cont.');
-    expect(errors({ strategy: 'premium', ...common, leverage: 3, premium })).toContain('Levierul se aplică doar pe futures.');
+    expect(errors({ strategy: 'premium', ...common, leverage: 3, premium })).toEqual([]);
     expect(errors({ strategy: 'premium', ...common, market: 'futures', leverage: 3, premium: { ...premium, direction: 'both' } })).toEqual([]);
   });
 
@@ -69,12 +69,13 @@ describe('the bot settings (FD-BOT §3–§6)', () => {
     expect(errors({ strategy: 'premium', ...common, symbols: ['BTC/USDT', 'BTC/USDT'], premium })).toContain('„BTC/USDT” apare de două ori');
     expect(errors({ strategy: 'grid', ...common, symbols: ['BTC/USDT', 'ETH/USDT'], grid })).toContain('Un bot Grid are un singur simbol.');
     expect(errors({ strategy: 'grid', ...common, startsAt: 2000, endsAt: 1000, grid })).toContain('Sfârșitul trebuie să fie după început.');
-    expect(errors({ strategy: 'premium', ...common, symbols: ['BTC/USDT'], premium: { ...premium, maxOpen: 2 } })).toContain('Botul are 1 simbol: cel mult atâtea tranzacții deschise odată.');
+    // FIX-BOTBUDGET: the open trades' maximum is a maximum: more than the symbols is saved (one a symbol, in effect).
+    expect(errors({ strategy: 'premium', ...common, symbols: ['BTC/USDT'], premium: { ...premium, maxOpen: 10 } })).toEqual([]);
   });
 
-  it('a grid: its range, its direction on spot, its stops outside it, a step that pays the fees; nothing to finish', () => {
+  it('a grid: its range, its stops outside it, a step that pays the fees; nothing to finish; any direction (the check: spot long only on a real account)', () => {
     expect(errors({ strategy: 'grid', ...common, grid: { ...grid, lower: 110, upper: 90 } })).toContain('Limita de sus trebuie să fie peste cea de jos.');
-    expect(errors({ strategy: 'grid', ...common, grid: { ...grid, direction: 'neutral' } })).toContain('Pe spot nu se poate short: doar Long (short pe futures sau pe acțiuni).');
+    expect(errors({ strategy: 'grid', ...common, grid: { ...grid, direction: 'neutral' } })).toEqual([]);
     // Shares may go short (the broker is checked by the server).
     expect(errors({ strategy: 'grid', ...common, market: 'stock', symbols: ['AAPL'], grid: { ...grid, direction: 'neutral' } })).toEqual([]);
     expect(errors({ strategy: 'grid', ...common, grid: { ...grid, stopBelow: 95 } })).toContain('„Oprește sub” trebuie să fie sub limita de jos.');
@@ -83,8 +84,8 @@ describe('the bot settings (FD-BOT §3–§6)', () => {
     expect(errors({ strategy: 'grid', ...common, endAction: 'finish', grid })[0]).toMatch(/O grilă nu are tranzacții de terminat/);
   });
 
-  it('a DCA: no short on spot, its stop loss beyond the last safety order, its orders within the maximum', () => {
-    expect(errors({ strategy: 'dca', ...common, dca: { ...dca, direction: 'short' } })).toContain('Pe spot nu se poate short: doar Long (short pe futures sau pe acțiuni).');
+  it('a DCA: its stop loss beyond the last safety order, its orders within the maximum; a short (the check: not on a real spot)', () => {
+    expect(errors({ strategy: 'dca', ...common, dca: { ...dca, direction: 'short' } })).toEqual([]);
     expect(errors({ strategy: 'dca', ...common, market: 'stock', symbols: ['AAPL'], dca: { ...dca, direction: 'short' } })).toEqual([]);
     // The 3rd safety order is 1 + 2 + 4 = 7% away.
     expect(errors({ strategy: 'dca', ...common, dca: { ...dca, stopLoss: 7 } })[0]).toMatch(/Stop loss-ul \(7%\) e mai aproape decât ultimul ordin de siguranță \(7%\)/);
@@ -94,10 +95,24 @@ describe('the bot settings (FD-BOT §3–§6)', () => {
     expect(errors({ strategy: 'dca', ...common, dca: { ...dca, deviation: 30, stepScale: 2 } })).toContain('Ultimul ordin de siguranță ar fi la un preț sub zero: abateri mai mici.');
   });
 
-  it('Premium: no short on spot, the amounts within the maximum, a weight above zero', () => {
-    expect(errors({ strategy: 'premium', ...common, premium: { ...premium, direction: 'both' } })).toContain('Pe spot nu se poate short: doar Long (short pe futures sau pe acțiuni).');
-    expect(errors({ strategy: 'premium', ...common, premium: { ...premium, amount: 2000 } })).toContain('Suma pe tranzacție nu poate trece de suma maximă.');
-    expect(errors({ strategy: 'premium', ...common, premium: { ...premium, maxPerTrade: 2000 } })).toContain('Suma maximă pe tranzacție nu poate trece de suma maximă.');
+  it('FIX-BOTBUDGET: the old sizing read as one maximum a trade', () => {
+    const read = (p: Record<string, unknown>) => (botInputSchema.parse({ strategy: 'premium', ...common, premium: { ...premium, ...p } }) as { premium: Record<string, unknown> }).premium;
+    // A fixed amount: its maximum; with a lower maximum set, that one.
+    expect(read({ sizing: 'fixed', amount: 450, maxPerTrade: null })).toMatchObject({ maxPerTrade: 450 });
+    expect(read({ sizing: 'fixed', amount: 450, maxPerTrade: 300 })).toMatchObject({ maxPerTrade: 300 });
+    // A risk sizing: its maximum, else its amount.
+    expect(read({ sizing: 'risk', amount: 100, riskPct: 2, maxPerTrade: 250 })).toMatchObject({ maxPerTrade: 250 });
+    expect(read({ sizing: 'risk', amount: 100, riskPct: 2, maxPerTrade: null })).toMatchObject({ maxPerTrade: 100 });
+    for (const k of ['sizing', 'amount', 'riskPct']) expect(read({ sizing: 'fixed', amount: 450 })).not.toHaveProperty(k);
+    // Saved after it: as it is.
+    const { sizing: _s, amount: _a, riskPct: _r, ...now } = premium;
+    expect((botInputSchema.parse({ strategy: 'premium', ...common, premium: { ...now, maxPerTrade: 400 } }) as { premium: { maxPerTrade: number } }).premium.maxPerTrade).toBe(400);
+  });
+
+  it('Premium: a maximum a trade (above the budget: saved, the budget in effect), a weight above zero; both sides (the check: not on a real spot)', () => {
+    expect(errors({ strategy: 'premium', ...common, premium: { ...premium, direction: 'both' } })).toEqual([]);
+    expect(errors({ strategy: 'premium', ...common, premium: { ...premium, maxPerTrade: 2000 } })).toEqual([]);
+    expect(errors({ strategy: 'premium', ...common, premium: { ...premium, maxPerTrade: 0 } }).length).toBeGreaterThan(0);
     expect(errors({ strategy: 'premium', ...common, premium: { ...premium, weights: { day: 0, area: 0, general: 0, symbol: 0, slingshot: 0 } } })).toContain('Cel puțin o pondere a scorului trebuie să fie peste zero.');
     expect(errors({ strategy: 'premium', ...common, premium: { ...premium, extra: 1 } }).length).toBeGreaterThan(0);
   });

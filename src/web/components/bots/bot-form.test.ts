@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { defaultGrid, formOf, initialForm, localInput, marketPatch, numText, ratioOf, readNum, toInput, zoneText, type BotSeed } from './bot-form.ts';
+import { defaultGrid, editForm, formOf, initialForm, localInput, marketPatch, numText, ratioOf, readNum, toInput, withoutSymbol, zoneText, type BotSeed } from './bot-form.ts';
 
 const seed: BotSeed = { kind: 'crypto', symbol: 'BTC/USDT', tf: '4h', price: 101.37, low: 93.12, high: 108.9 };
+/** The form with an account chosen (FD-PAPER: a bot always trades on one, a Paper Trading profile for a simulation). */
+const onAccount = (...a: Parameters<typeof initialForm>) => ({ ...initialForm(...a), accountId: 7 });
 
 describe('the bot form (FD-BOT §1)', () => {
-  it("starts from the chart: its symbol, timeframe, the last candles' range; a simulation", () => {
+  it("starts from the chart: its symbol, timeframe, the last candles' range; an account to choose (FD-PAPER: no simulation)", () => {
     const g = initialForm(seed, 'grid');
-    expect(g).toMatchObject({ strategy: 'grid', name: 'BTC/USDT · Grid', exec: 'paper', market: 'spot', symbols: ['BTC/USDT'], tf: '4h', endAction: 'close', fee: '0,1' });
+    expect(g).toMatchObject({ strategy: 'grid', name: 'BTC/USDT · Grid', exec: 'real', accountId: null, market: 'spot', symbols: ['BTC/USDT'], tf: '4h', endAction: 'close', fee: '0,1' });
     expect(g.grid).toMatchObject({ lower: '93,12', upper: '108,9', grids: '10', spacing: 'arithmetic', direction: 'long', trigger: '' });
     expect(initialForm(seed, 'premium').endAction).toBe('finish');
     expect(initialForm({ ...seed, kind: 'stocks', symbol: 'AAPL' }, 'premium').market).toBe('stock');
@@ -19,41 +21,48 @@ describe('the bot form (FD-BOT §1)', () => {
     expect(readNum('')).toBeNull();
     expect(readNum('abc')).toBeNaN();
     expect(numText(0.1 + 0.2)).toBe('0,3');
-    const f = initialForm(seed, 'grid');
+    const f = onAccount(seed, 'grid');
     const ok = toInput(f, Date.parse('2026-10-21T12:00:00Z'));
     expect(ok.error).toBeNull();
     expect(ok.input).toMatchObject({ strategy: 'grid', maxAmount: 1000, leverage: 1, fee: 0.1, startsAt: null, endsAt: null, grid: { lower: 93.12, upper: 108.9, grids: 10, trigger: null, stopBelow: null } });
     expect(toInput({ ...f, maxAmount: '' }).error).toBe('Suma maximă: lipsește.');
     expect(toInput({ ...f, grid: { ...f.grid, grids: 'zece' } }).error).toBe('Grilele: nu e un număr.');
     expect(toInput({ ...f, grid: { ...f.grid, lower: '120' } }).error).toBe('Limita de sus trebuie să fie peste cea de jos.');
-    const p = initialForm(seed, 'premium');
+    const p = onAccount(seed, 'premium');
     expect(toInput({ ...p, premium: { ...p.premium, weights: { ...p.premium.weights, area: '' } } }).error).toBe('Ponderea „Aria”: lipsește.');
     expect(toInput({ ...p, premium: { ...p.premium, cooldownMin: '' } }).error).toBe('Pauza după o pierdere: lipsește.');
   });
 
-  it('a start in the past is now; the end must come after it; leverage only on futures', () => {
+  it('a start in the past is now; the end must come after it; leverage on futures (FIX-PAPERLEV: on a Paper Trading profile everywhere)', () => {
     const now = Date.parse('2026-10-21T12:00:00Z');
-    const f = initialForm(seed, 'dca');
+    const f = onAccount(seed, 'dca');
     expect(toInput({ ...f, startsAt: localInput(now - 60_000) }, now).input?.startsAt).toBeNull();
     expect(toInput({ ...f, startsAt: localInput(now + 3_600_000) }, now).input?.startsAt).toBe(Math.floor((now + 3_600_000) / 60_000) * 60_000);
     expect(toInput({ ...f, startsAt: '' }, now).error).toBe('Începutul: alege data și ora.');
     expect(toInput({ ...f, startsAt: localInput(now + 7_200_000), endsAt: localInput(now + 3_600_000) }, now).error).toBe('Sfârșitul trebuie să fie după început.');
     expect(toInput({ ...f, leverage: '7' }, now).input?.leverage).toBe(1);
     expect(toInput({ ...f, ...marketPatch(f, 'futures'), leverage: '7' }, now).input?.leverage).toBe(7);
+    // Spot starts at 1×, futures at 3×; on a profile, spot keeps its leverage and margin, and a short.
+    expect(f.leverage).toBe('1');
+    expect(marketPatch(f, 'futures')).toMatchObject({ market: 'futures', leverage: '3' });
+    expect(toInput({ ...f, leverage: '7', marginMode: 'cross' }, now, true).input).toMatchObject({ market: 'spot', leverage: 7, marginMode: 'cross' });
+    const p = onAccount(seed, 'premium');
+    expect(marketPatch({ ...p, premium: { ...p.premium, direction: 'both' } }, 'spot', true)).toEqual({ market: 'spot' });
+    expect(marketPatch({ ...p, premium: { ...p.premium, direction: 'both' } }, 'spot').premium?.direction).toBe('long');
   });
 
   it('leaving futures makes every strategy long; a bot read back gives the same settings', () => {
-    const p = initialForm(seed, 'premium');
+    const p = onAccount(seed, 'premium');
     const fut = { ...p, ...marketPatch(p, 'futures'), premium: { ...p.premium, direction: 'both' as const } };
     expect(toInput(fut).input).toMatchObject({ market: 'futures', premium: { direction: 'both' } });
     expect(toInput({ ...fut, ...marketPatch(fut, 'spot') }).input).toMatchObject({ market: 'spot', premium: { direction: 'long' } });
-    const input = toInput(initialForm(seed, 'dca')).input!;
+    const input = toInput(onAccount(seed, 'dca')).input!;
     const back = toInput(formOf(input)).input;
     expect(back).toEqual(input);
   });
 
   it('FD-BOTPCT: Slingshot by default; "Risc / câștig" is two percents from the entry, the ratio shown as 1:x', () => {
-    const p = initialForm(seed, 'premium');
+    const p = onAccount(seed, 'premium');
     expect(p.premium).toMatchObject({ levels: 'slingshot', slPct: '1', tpPct: '2' });
     for (const k of ['sl', 'tp', 'rrRisk', 'rrReward', 'minRr']) expect(k in p.premium).toBe(false);
     const pct = { ...p, premium: { ...p.premium, levels: 'percent' as const, slPct: '1,5', tpPct: '3' } };
@@ -71,7 +80,7 @@ describe('the bot form (FD-BOT §1)', () => {
   });
 
   it('FD-BOTDIR: a threshold per side, 50 by default; the hidden one does not block the save; the sentence under them', () => {
-    const p = initialForm(seed, 'premium');
+    const p = onAccount(seed, 'premium');
     expect(p.premium).toMatchObject({ longMin: '50', shortMax: '50' });
     expect('minScore' in p.premium).toBe(false);
     // Long only: the short's threshold is hidden; emptied or wrong, its default; valid, kept.
@@ -96,10 +105,46 @@ describe('the bot form (FD-BOT §1)', () => {
   });
 
   it('FD-NEWSWIN: the minutes before important economic news, named so in the errors; 0 turns it off', () => {
-    const p = initialForm(seed, 'premium');
+    const p = onAccount(seed, 'premium');
     expect(p.premium.newsWindowMin).toBe('60');
     expect(toInput({ ...p, premium: { ...p.premium, newsWindowMin: '' } }).error).toBe('Minutele dinaintea știrilor economice importante: lipsește.');
     expect(toInput({ ...p, premium: { ...p.premium, newsWindowMin: '721' } }).error).toBe('Minutele dinaintea știrilor economice importante: cel mult 720');
     expect(toInput({ ...p, premium: { ...p.premium, newsWindowMin: '0' } }).input).toMatchObject({ premium: { newsWindowMin: 0 } });
+  });
+});
+
+describe('FD-BOTEDIT: the form of a bot being edited', () => {
+  it("is the bot's settings; a scheduled bot keeps its start in the form, a started one has none to change", () => {
+    const now = Date.parse('2026-11-10T09:00:00Z');
+    const f = onAccount(seed, 'dca');
+    const input = toInput({ ...f, startsAt: localInput(now + 3_600_000) }, now).input!;
+    expect(editForm({ input, status: 'scheduled', startsAt: input.startsAt! }, now).startsAt).toBe(localInput(now + 3_600_000));
+    expect(editForm({ input: { ...input, startsAt: now - 60_000 }, status: 'running', startsAt: now - 60_000 }, now).startsAt).toBeNull();
+    // A start that passed while the form was closed: now.
+    expect(editForm({ input, status: 'scheduled', startsAt: now - 1 }, now).startsAt).toBeNull();
+    expect(editForm({ input, status: 'running', startsAt: input.startsAt! }, now)).toEqual(formOf(input));
+  });
+
+  it('a symbol taken out leaves „Tranzacții deschise odată” as typed (FIX-BOTBUDGET: a maximum)', () => {
+    const p = onAccount(seed, 'premium');
+    const three = { ...p, symbols: ['BTC/USDT', 'ETH/USDT', 'SOL/USDT'], premium: { ...p.premium, maxOpen: '3' } };
+    expect(withoutSymbol(three, 'ETH/USDT')).toEqual({ symbols: ['BTC/USDT', 'SOL/USDT'] });
+    // The last one: nothing to bring down to (the form says a symbol is missing).
+    expect(withoutSymbol({ ...p, symbols: ['BTC/USDT'] }, 'BTC/USDT')).toEqual({ symbols: [] });
+  });
+});
+
+describe('FIX-BOTMARGIN: the margin of a futures bot', () => {
+  it('Isolated by default; Cross when chosen, read back the same; off futures always Isolated', () => {
+    const f = onAccount(seed, 'premium');
+    expect(f.marginMode).toBe('isolated');
+    const fut = { ...f, ...marketPatch(f, 'futures') };
+    expect(toInput(fut).input?.marginMode).toBe('isolated');
+    const cross = toInput({ ...fut, marginMode: 'cross' }).input!;
+    expect(cross.marginMode).toBe('cross');
+    expect(formOf(cross).marginMode).toBe('cross');
+    expect(toInput(formOf(cross)).input).toEqual(cross);
+    // Back to spot with Cross left in the form: nothing to choose there.
+    expect(toInput({ ...fut, marginMode: 'cross', ...marketPatch(fut, 'spot') }).input).toMatchObject({ market: 'spot', marginMode: 'isolated' });
   });
 });

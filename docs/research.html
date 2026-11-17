@@ -1,0 +1,777 @@
+<!doctype html><html lang="ro"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sentiq — Research (12–13 oct 2026)</title><style>body{font:15px/1.55 -apple-system,system-ui,sans-serif;max-width:1000px;margin:32px auto;padding:0 16px;color:#222;background:#fff}
+code{font-size:13px;background:#f3f1ec;padding:1px 4px;border-radius:3px}
+pre{background:#f3f1ec;padding:10px 12px;border-radius:6px;overflow:auto}pre code{background:none;padding:0}
+table{border-collapse:collapse;margin:10px 0}th,td{border:1px solid #ddd;padding:4px 8px;text-align:left;vertical-align:top}th{background:#f6f5f2}
+blockquote{margin:12px 0;padding:2px 14px;border-left:3px solid #ddd;color:#555}
+h1{font-size:26px}h2{font-size:21px;margin-top:28px}h3{font-size:17px;margin-top:22px}a{color:#2b5bd7}
+@media (prefers-color-scheme:dark){body{background:#111;color:#e8e8e8}code,pre{background:#2a2a2a}th{background:#1c1c1c}th,td{border-color:#333}blockquote{border-color:#333;color:#aaa}a{color:#8ab4ff}}</style></head><body>
+<h1 id="sentiq--research-1213-oct-2026">Sentiq — Research (12–13 oct 2026)</h1>
+<blockquote>
+<p>Cercetarea făcută înaintea deciziilor (aplicația se numea atunci Kryptoniq). Ce face aplicația azi: <a href="functional-design.html">functional-design.html</a>, Partea I.</p>
+</blockquote>
+<p>Toate sursele de mai jos au fost <strong>testate live</strong> pe 2026-10-12 (status HTTP, număr de item-uri, prospețimea ultimei știri). Ce nu a mers e notat explicit.</p>
+<h2 id="1-surse-de-știri">1. Surse de știri</h2>
+<h3 id="11-crypto-rss-fără-cheie">1.1 Crypto (RSS, fără cheie)</h3>
+<table>
+<thead>
+<tr>
+<th>Sursă</th>
+<th>URL feed</th>
+<th>Rezultat test</th>
+<th>Note</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>CoinDesk</td>
+<td><code>https://www.coindesk.com/arc/outboundfeeds/rss</code></td>
+<td>200, 25 item-uri, proaspăt</td>
+<td>titluri în CDATA, <code>media:content</code> pentru imagine</td>
+</tr>
+<tr>
+<td>Cointelegraph</td>
+<td><code>https://cointelegraph.com/rss</code></td>
+<td>200, 30 item-uri</td>
+<td></td>
+</tr>
+<tr>
+<td>Decrypt</td>
+<td><code>https://decrypt.co/feed</code></td>
+<td>200, 38 item-uri</td>
+<td></td>
+</tr>
+<tr>
+<td>The Block</td>
+<td><code>https://www.theblock.co/rss.xml</code></td>
+<td>200, 20 item-uri</td>
+<td>CDATA</td>
+</tr>
+<tr>
+<td>CryptoSlate</td>
+<td><code>https://cryptoslate.com/feed/</code></td>
+<td>200, 10 item-uri</td>
+<td></td>
+</tr>
+<tr>
+<td>BeInCrypto</td>
+<td><code>https://beincrypto.com/feed/</code></td>
+<td>200, 12 item-uri</td>
+<td></td>
+</tr>
+<tr>
+<td>U.Today</td>
+<td><code>https://u.today/rss</code></td>
+<td>200, 97 item-uri</td>
+<td>volum mare, multe „price prediction”</td>
+</tr>
+<tr>
+<td>NewsBTC</td>
+<td><code>https://www.newsbtc.com/feed/</code></td>
+<td>200, 10 item-uri</td>
+<td>analiză tehnică, relevanță mai mică</td>
+</tr>
+<tr>
+<td>Watcher.Guru</td>
+<td><code>https://watcher.guru/news/feed</code></td>
+<td>200, 10 item-uri</td>
+<td>breaking news scurte</td>
+</tr>
+<tr>
+<td><del>Bitcoin Magazine</del></td>
+<td><code>/.rss/full/</code></td>
+<td><strong>blocat Cloudflare</strong></td>
+<td>exclus</td>
+</tr>
+<tr>
+<td><del>Blockworks</del></td>
+<td><code>/feed</code></td>
+<td>200 dar 0 item-uri</td>
+<td>exclus</td>
+</tr>
+<tr>
+<td><del>CryptoPanic RSS</del></td>
+<td><code>/news/rss/</code></td>
+<td><strong>410 Gone</strong></td>
+<td>API-ul v2 cere token; poate fi adăugat ulterior ca sursă opțională</td>
+</tr>
+</tbody></table>
+<h3 id="12-piețe--macro-rss-fără-cheie">1.2 Piețe / macro (RSS, fără cheie)</h3>
+<table>
+<thead>
+<tr>
+<th>Sursă</th>
+<th>URL feed</th>
+<th>Rezultat</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>CNBC Top News</td>
+<td><code>https://www.cnbc.com/id/100003114/device/rss/rss.html</code></td>
+<td>200, 30</td>
+</tr>
+<tr>
+<td>CNBC Economy</td>
+<td><code>https://www.cnbc.com/id/20910258/device/rss/rss.html</code></td>
+<td>200, 30</td>
+</tr>
+<tr>
+<td>CNBC Finance</td>
+<td><code>https://www.cnbc.com/id/10000664/device/rss/rss.html</code></td>
+<td>200, 30</td>
+</tr>
+<tr>
+<td>CNBC Investing</td>
+<td><code>https://www.cnbc.com/id/15839069/device/rss/rss.html</code></td>
+<td>200, 29</td>
+</tr>
+<tr>
+<td>Bloomberg Markets</td>
+<td><code>https://feeds.bloomberg.com/markets/news.rss</code></td>
+<td>200, 20</td>
+</tr>
+<tr>
+<td>Bloomberg Economics</td>
+<td><code>https://feeds.bloomberg.com/economics/news.rss</code></td>
+<td>200, 18</td>
+</tr>
+<tr>
+<td>MarketWatch Top Stories</td>
+<td><code>https://feeds.content.dowjones.io/public/rss/mw_topstories</code></td>
+<td>200, 10 (proaspăt)</td>
+</tr>
+<tr>
+<td>FT Markets</td>
+<td><code>https://www.ft.com/markets?format=rss</code></td>
+<td>200, 25</td>
+</tr>
+<tr>
+<td>Seeking Alpha Market Currents</td>
+<td><code>https://seekingalpha.com/market_currents.xml</code></td>
+<td>200, 7</td>
+</tr>
+<tr>
+<td>FXStreet</td>
+<td><code>https://www.fxstreet.com/rss/news</code></td>
+<td>200, 30 de pe un calculator; <strong>din Azure 403 din 16 oct 2026</strong> (Cloudflare blochează adresele de datacenter): dezactivată din 16 nov 2026 (FIX-SOURCES)</td>
+</tr>
+<tr>
+<td>InvestingLive (fost ForexLive)</td>
+<td><code>https://investinglive.com/feed/</code></td>
+<td>200, 25</td>
+</tr>
+<tr>
+<td>Investing.com News</td>
+<td><code>https://www.investing.com/rss/news.rss</code></td>
+<td>200, 10 — <strong>dată non-RFC</strong> (<code>2026-10-12 16:00:43</code>, UTC)</td>
+</tr>
+<tr>
+<td>Federal Reserve press</td>
+<td><code>https://www.federalreserve.gov/feeds/press_all.xml</code></td>
+<td>200, 20 — <strong>BOM</strong> la început, <code>pubDate</code> în CDATA</td>
+</tr>
+<tr>
+<td>SEC press releases</td>
+<td><code>https://www.sec.gov/news/pressreleases.rss</code></td>
+<td>200, 25</td>
+</tr>
+<tr>
+<td><del>MarketWatch marketpulse / realtime</del></td>
+<td></td>
+<td>200 dar <strong>învechite (2025)</strong> — excluse</td>
+</tr>
+<tr>
+<td><del>WSJ Markets (<code>feeds.a.dj.com</code>)</del></td>
+<td></td>
+<td>învechit (ian 2025) — exclus</td>
+</tr>
+<tr>
+<td><del>Yahoo Finance RSS</del></td>
+<td></td>
+<td>404 — exclus</td>
+</tr>
+<tr>
+<td><del>Reuters</del></td>
+<td></td>
+<td>nu mai are RSS public</td>
+</tr>
+</tbody></table>
+<h3 id="13-geopolitică-relevanță-condiționată">1.3 Geopolitică (relevanță condiționată)</h3>
+<table>
+<thead>
+<tr>
+<th>Sursă</th>
+<th>URL feed</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>BBC World</td>
+<td><code>https://feeds.bbci.co.uk/news/world/rss.xml</code> (200, 26)</td>
+</tr>
+<tr>
+<td>CNBC International</td>
+<td><code>https://www.cnbc.com/id/100727362/device/rss/rss.html</code> (200, 30)</td>
+</tr>
+<tr>
+<td>CNBC Politics &amp; Policy</td>
+<td><code>https://www.cnbc.com/id/10000113/device/rss/rss.html</code> (200, 30)</td>
+</tr>
+<tr>
+<td>BBC Business</td>
+<td><code>https://feeds.bbci.co.uk/news/business/rss.xml</code> (200, 44)</td>
+</tr>
+<tr>
+<td>The Guardian Economics</td>
+<td><code>https://www.theguardian.com/business/economics/rss</code> (200, 20)</td>
+</tr>
+</tbody></table>
+<p>Exemplu concret din testul de azi: CNBC — <em>„As the U.S.-Iran war heats up again, these parts of the stock market…”</em>. Geopolitica mișcă piața, dar feed-urile generale conțin și știri irelevante → se iau în calcul doar dacă conțin termeni care mișcă piața (vezi TD §6).</p>
+<p><strong>Concluzii:</strong> RSS e sursa principală (gratuit, fără cheie, stabil). Feed-urile pot muri sau îngheța → aplicația monitorizează sănătatea fiecărei surse (ultimul fetch reușit, ultima știre nouă, eroare) și le poți activa/dezactiva sau adăuga altele din Setări. Parserul trebuie să suporte RSS 2.0, Atom, RSS 1.0/RDF, CDATA, entități HTML, BOM și date non-RFC.</p>
+<h2 id="2-calendar-economic">2. Calendar economic</h2>
+<h3 id="21-forexfactory-fair-economy--sursa-principală-pentru-listă-și-impact">2.1 ForexFactory (Fair Economy) — sursa principală pentru listă și impact</h3>
+<ul>
+<li><code>https://nfs.faireconomy.media/ff_calendar_thisweek.json</code> → 200. (<code>cdn-nfs.</code> nu a răspuns.)</li>
+<li>Câmpuri: <code>title, country (=valută: USD, EUR, GBP…, „All”), date (ISO cu offset US/Eastern), impact (High|Medium|Low|Holiday), forecast, previous</code>. <strong>Nu are <code>actual</code>.</strong></li>
+<li>Doar săptămâna curentă (<code>nextweek.json</code> → 404). Varianta XML are în plus <code>url</code>, dar ora e în GMT și formatul e <code>MM-DD-YYYY</code> + <code>9:30am</code>.</li>
+<li><strong>Limită:</strong> max 2 descărcări / 5 min per IP; fișierul se actualizează o dată pe oră; la depășire primești o pagină HTML („Please wait five minutes…”) în loc de JSON. → interogăm <strong>cel mult o dată pe oră</strong> și tratăm răspunsul HTML ca rate-limit (backoff).</li>
+<li>Exemplu azi: 109 evenimente (13 High), ex. <code>Core CPI m/m USD 2026-10-14T08:30:00-04:00 High f=0.2% p=0.3%</code>.</li>
+</ul>
+<h3 id="22-tradingview-economic-calendar--sursa-pentru-actual-și-fallback">2.2 TradingView economic calendar — sursa pentru <code>actual</code> și fallback</h3>
+<ul>
+<li><code>GET https://economic-calendar.tradingview.com/events?from=&lt;ISO&gt;&amp;to=&lt;ISO&gt;&amp;countries=US,EU,…</code> cu header <code>Origin: https://www.tradingview.com</code> → 200, JSON <code>{status, result[]}</code>.</li>
+<li>Câmpuri: <code>id, title, country, indicator, period, actual, forecast, previous, currency, importance (-1|0|1), date (UTC), unit, scale, source, source_url, comment</code>.</li>
+<li><strong>Are <code>actual</code></strong> după publicare (ex. ISM Services PMI a=54.9 f=55 p=55.4).</li>
+<li>Endpoint <strong>neoficial / nedocumentat</strong> → poate dispărea. Aplicația funcționează și fără el (fără <code>actual</code>).</li>
+<li>Titlurile diferă de FF („CPI m/m” vs „Inflation Rate MoM”, „Unemployment Claims” vs „Initial Jobless Claims”) → potrivire pe (valută, oră exactă) + similaritate de titlu cu dicționar de sinonime (TD §7).</li>
+</ul>
+<h3 id="23-context-de-piață-nu-intră-în-sentimentul-din-știri">2.3 Context de piață (nu intră în sentimentul din știri)</h3>
+<ul>
+<li>Crypto Fear &amp; Greed: <code>https://api.alternative.me/fng/?limit=N</code> → 200 (azi 69 „Greed”).</li>
+<li>CoinGecko: <code>/api/v3/global</code> (cap total, dominanță BTC) și <code>/api/v3/coins/markets</code> (top monede: nume + simbol → folosite și pentru detectarea monedelor în știri). Gratuit, rate-limit strict → o dată pe oră.</li>
+</ul>
+<h2 id="3-sentiment--evaluare-modele-local-offline">3. Sentiment — evaluare modele (local, offline)</h2>
+<p>Set de evaluare: 50 de titluri etichetate manual (bullish / neutru / bearish pentru crypto și acțiuni), salvat ca test de regresie (<code>server/src/sentiment/__fixtures__/headlines.json</code>).</p>
+<table>
+<thead>
+<tr>
+<th>Model (ONNX, transformers.js, q8)</th>
+<th>Corecte exact</th>
+<th>Polaritate inversată</th>
+<th>Viteză (50 titluri)</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>FinBERT (<code>Xenova/finbert</code>) — test pe 10</td>
+<td>5/10</td>
+<td>3 (ex. „exchange hacked, $200M stolen” → neutru; „Altcoins bleed” → pozitiv)</td>
+<td>~45 ms</td>
+</tr>
+<tr>
+<td>distilroberta financial news</td>
+<td>~8/13 (scoruri saturate 0/1)</td>
+<td>2</td>
+<td>rapid</td>
+</tr>
+<tr>
+<td>twitter-roberta-sentiment</td>
+<td>26/50</td>
+<td>3</td>
+<td>0.46 s</td>
+</tr>
+<tr>
+<td>NLI zero-shot <code>nli-deberta-v3-xsmall</code></td>
+<td>32/50</td>
+<td>2</td>
+<td>0.9 s</td>
+</tr>
+<tr>
+<td><strong>NLI zero-shot <code>nli-deberta-v3-small</code></strong></td>
+<td><strong>35/50</strong></td>
+<td><strong>1</strong></td>
+<td>0.9 s (~170 MB)</td>
+</tr>
+<tr>
+<td>NLI zero-shot <code>nli-deberta-v3-base</code></td>
+<td>27/50 (prea multe „neutru”)</td>
+<td>0</td>
+<td>2.4 s</td>
+</tr>
+</tbody></table>
+<p>Etichete zero-shot câștigătoare: <code>[&quot;good news for crypto and stock prices&quot;, &quot;bad news for crypto and stock prices&quot;, &quot;neutral news&quot;]</code>, template <code>&quot;This is {}.&quot;</code> (alte formulări testate: 16–33/50).</p>
+<p>Ce greșesc modelele: implicațiile macro („Fed cuts rates” → ar trebui pozitiv; „Treasury yields jump” → negativ; „dollar slides” → pozitiv; „Mt. Gox moves BTC to exchange” → negativ). <strong>Decizie:</strong> motor hibrid = NLI zero-shot + <strong>reguli de domeniu</strong> (lexicon macro/crypto cu precizie mare care, când se declanșează, domină scorul). Fallback numai-reguli dacă modelul nu se poate descărca.</p>
+<p><strong>Opțional:</strong> motor Claude (API Anthropic), activabil din Setări cu cheie API. Model implicit <code>claude-opus-5-5</code> (configurabil, ex. <code>claude-haiku-5-5</code> pentru cost minim). Estimare: ~1000 titluri/zi ≈ 60k tokeni input + 15k output ⇒ ~0,5 $/zi pe Opus 5.5, ~0,01 $/zi pe Haiku 5.5. Cache per știre (fiecare titlu e scorat o singură dată). La orice eroare → motorul local.</p>
+<h2 id="4-grafice-și-date-ohlcv">4. Grafice și date OHLCV</h2>
+<ul>
+<li><strong>lightweight-charts 5.2.1</strong> (TradingView, Apache-2.0): candlestick, linii, markere (<code>createSeriesMarkers</code>), price lines, panouri, <strong>primitives</strong> (plugin API) pentru umplerea norului EMA și segmente orizontale TP/SL/structură de piață care încep la o bară anume și se prelungesc în viitor.</li>
+<li>Date: <strong>ccxt 4.5.85</strong> → <code>fetchOHLCV</code> public (fără cheie). Testat KuCoin <code>BTC/USDT 1h</code>: 1500 lumânări/cerere, <code>paginate:true</code> → 3000 ok. Timeframe-uri KuCoin: 1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,1w,1M.</li>
+</ul>
+<h2 id="5-indicatorul-slingshot-system-32-pine-v5--semantică-necesară-pentru-port">5. Indicatorul Slingshot System 3.2 (Pine v5) — semantică necesară pentru port</h2>
+<p>Sursa: <code>/Users/lorinbute/Documents/Development/GitHub/Sling Shot System/sling-shot-system.pine</code> (v3.2, „Market Structure Levels”). Cercetarea s-a făcut pe 3.2. Între timp scriptul și portul au ajuns la 3.3 (reparația urmăririi TP/SL) și apoi la 3.4 (partea SHORT, <code>sling-shot-system-3.4.pine</code>, vezi <a href="slingshot-port.html">slingshot-port.html</a> și FD-SLINGSHOT34). Semantica de mai jos rămâne valabilă pentru LONG, iar SHORT-ul este oglinda ei.</p>
+<p>Semantica exactă a funcțiilor <code>ta.*</code> a fost verificată în <strong>PyneCore</strong> (runtime Python care reproduce bit-cu-bit TradingView, cu „measured laws”):</p>
+<ul>
+<li><code>ta.ema</code>: α = 2/(len+1), <strong>seed = SMA</strong> pe primele <code>len</code> valori non-na; pas <code>prev + α·(src − prev)</code> (forma algebric echivalentă <code>α·src + (1−α)·prev</code> diverge pe ultimii biți).</li>
+<li><code>ta.rma</code>: seed SMA; pas <code>(prev·(len−1) + src)/len</code>.</li>
+<li><code>ta.rsi</code>: prima bară na; <code>rma(max(Δ,0))</code>, <code>rma(max(−Δ,0))</code>; dacă <code>rmaD ≤ 1e-10</code> → 100; altfel dacă <code>rmaU ≤ 1e-10</code> → 0; altfel <code>100 − 100/(1+u/d)</code>.</li>
+<li><code>ta.stoch(src,h,l,len)</code>: <code>100·(src − lowest)/(highest − lowest)</code>, <strong>fără clamp</strong>; interval 0 → <code>0/0 = na</code> (semantică IEEE, identică cu JS).</li>
+<li><code>ta.sma</code> / <code>math.sum</code>: fereastra e <strong>na-compactată</strong> (bara na → rezultat na, valoarea nu intră în fereastră).</li>
+<li><code>ta.highest/lowest</code>: na dacă <code>bar_index &lt; len−1</code>; o valoare na <strong>resetează</strong> fereastra (după reset, extremul se calculează doar pe valorile de după reset). <code>ta.highestbars/lowestbars</code>: la egalitate se alege <strong>cea mai veche</strong> bară.</li>
+<li><code>ta.pivothigh(L,R)</code>: fereastră L+R+1 cu egalitate → <strong>cea mai nouă</strong> bară; pivotul e confirmat dacă indexul maximului e exact −R ⇒ bara centrală trebuie să fie <strong>strict mai mare decât barele din dreapta</strong> și <strong>≥ barele din stânga</strong>. <code>pivotlow</code> simetric.</li>
+<li><code>ta.atr(len) = rma(tr(true), len)</code>; <code>tr</code> prima bară = <code>high − low</code>.</li>
+<li><code>ta.valuewhen(cond, src, 0)</code>: ultima valoare a <code>src</code> când <code>cond</code> a fost adevărat.</li>
+<li>Comparații cu na → false; aritmetică cu na → na; <code>math.max(0, na)</code> → na (identic cu <code>NaN</code> în JS, <strong>atenție la <code>!=</code></strong>, care în JS dă <code>true</code> cu NaN — codul Pine protejează mereu cu <code>na()</code> înainte).</li>
+<li><code>request.security(..., lookahead_off)</code> pe istoric: valoarea unei bare HTF devine vizibilă pe bara de chart la care bara HTF s-a închis; înainte se vede valoarea HTF precedentă. Pe bara în formare (realtime) se vede bara HTF în formare.</li>
+<li><code>max_labels_count = 500</code>: etichetele vii cele mai vechi sunt șterse automat.</li>
+</ul>
+<h2 id="6-exchange--kucoin">6. Exchange — KuCoin</h2>
+<ul>
+<li>Semnătura REST: <code>KC-API-SIGN = base64(HMAC-SHA256(secret, timestamp + METHOD + endpoint + body))</code>, passphrase criptat HMAC pentru cheile v2/v3 (<code>KC-API-KEY-VERSION</code>).</li>
+<li><strong>Unified Trading Account (UTA)</strong> lansat 10 feb 2026; din iunie 2026 API-ul Pro trece pe UTA, contul clasic e în mentenanță. <strong>ccxt</strong> detectează automat modul (<code>isUTAEnabled()</code> → <code>GET /api/ua/v1/account/mode</code>) și folosește endpoint-urile UTA/clasice corespunzătoare → <strong>folosim ccxt</strong> (acoperă și Binance/Bybit/OKX pentru extinderi ulterioare: toate au <code>fetchPositions, fetchOpenOrders, fetchMyTrades, fetchBalance</code>).</li>
+<li>Futures clasic: clasa separată <code>kucoinfutures</code>.</li>
+<li>Cheile trebuie create <strong>doar cu permisiunea „General/Read”</strong> (fără Trade, fără Withdraw) și, ideal, cu IP whitelist.</li>
+</ul>
+<h2 id="7-mediu--constrângeri-locale">7. Mediu / constrângeri locale</h2>
+<ul>
+<li>Node 25.9, npm 11, macOS arm64. <code>node:sqlite</code> disponibil (SQLite 3.53) → fără dependențe native pentru DB.</li>
+<li>În sandbox-ul de dezvoltare ieșirea la internet trece printr-un proxy: <code>fetch</code> din Node necesită <code>NODE_USE_ENV_PROXY=1</code>, iar ccxt opțiunea <code>httpsProxy</code>. Aplicația respectă <code>HTTPS_PROXY</code> dacă e setat (inofensiv pe mașina ta, unde nu există proxy).</li>
+</ul>
+<h2 id="8-acțiuni--surse-de-date-și-brokeri-cercetare-13-oct-2026">8. Acțiuni — surse de date și brokeri (cercetare 13 oct 2026)</h2>
+<p>Testele de mai jos s-au făcut din rețeaua de dezvoltare, pe 13 oct 2026.</p>
+<h3 id="81-brokeri-cu-acces-prin-cheie-api-portofoliu-doar-citire">8.1 Brokeri cu acces prin cheie API (portofoliu, doar citire)</h3>
+<table>
+<thead>
+<tr>
+<th>Broker</th>
+<th>Autentificare</th>
+<th>Ce cere de la utilizator</th>
+<th>Doar citire?</th>
+<th>Ce se poate citi</th>
+<th>Note</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Trading 212</strong></td>
+<td>HTTP Basic: <code>Authorization: Basic base64(API_KEY:API_SECRET)</code></td>
+<td>cheie + secret (<em>Settings → API (Beta)</em>; secretul apare o singură dată), mediu Live / Demo</td>
+<td>da: cheia are permisiuni pe categorii (account, metadata, orders, portfolio, history); bifezi doar citirea</td>
+<td>rezumatul contului (<code>/api/v0/equity/account/summary</code>), pozițiile deschise (<code>/api/v0/equity/positions</code>, 1 cerere / s), ordinele, istoricul ordinelor (<code>/api/v0/equity/history/orders</code>, paginat prin <code>cursor</code>), instrumentele</td>
+<td>doar conturi <strong>Invest</strong> și <strong>Stocks ISA</strong>; bază <code>https://live.trading212.com/api/v0</code> / <code>https://demo.trading212.com/api/v0</code>; restricție opțională pe IP; limite per cont, cu antete <code>x-ratelimit-*</code></td>
+</tr>
+<tr>
+<td><strong>eToro</strong></td>
+<td>antete <code>x-api-key</code> (cheia publică) + <code>x-user-key</code> (cheia de utilizator) + <code>x-request-id</code> (UUID)</td>
+<td>cheie publică + cheie de utilizator, din <em>Settings → Trading → API Key Management → Create New Key</em> (confirmare prin SMS); mediu Real / Demo (câte o cheie pe mediu)</td>
+<td>da: permisiunea <strong>Read</strong> la crearea cheii; opțional IP whitelist și dată de expirare</td>
+<td><code>GET /api/v1/trading/info/real/pnl</code> (pozițiile cu <code>instrumentID</code>, <code>isBuy</code>, <code>openRate</code>, <code>units</code>, <code>amount</code>, <code>leverage</code>, <code>stopLossRate</code>, <code>takeProfitRate</code>, <code>unrealizedPnL</code>, plus credit și ordine); <code>/trading/info/trade/history</code>; metadatele instrumentelor (<code>GET /api/v2/market-data/instruments?instrumentsIds=…</code>, pentru simbol și nume); lumânări</td>
+<td>răspunsurile au doar <code>instrumentID</code>, deci simbolul vine din cererea de metadate; limite: 60 / 60 s comun pentru portofoliu / PnL, 120 / 60 s pentru market data</td>
+</tr>
+<tr>
+<td><strong>Interactive Brokers</strong></td>
+<td><strong>Flex Web Service</strong>: token + ID-ul unui Flex Query</td>
+<td>token (<em>Performance &amp; Reports → Flex Queries → Flex Web Service Configuration</em>: activezi serviciul, alegi expirarea, implicit 6 ore, opțional un IP, „Generate New Token”) + Query ID (un Activity Flex Query cu secțiunile Open Positions, Trades, Cash Report)</td>
+<td>da: serviciul doar citește rapoarte</td>
+<td>poziții, tranzacții, numerar, la data raportului</td>
+<td><code>GET https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService/SendRequest?t=TOKEN&amp;q=QUERY&amp;v=3</code> → <code>ReferenceCode</code> + <code>Url</code>, apoi <code>GET &lt;Url&gt;?t=TOKEN&amp;q=REF&amp;v=3</code>, reîncercat cât timp răspunsul e „Statement generation in progress”; XML; cel mult 1 cerere / s și 10 / min. Datele sunt ale <strong>zilei precedente</strong> (Activity), nu în timp real. Alternativele în timp real (Client Portal Gateway, un program Java local cu autentificare zilnică și 2FA; OAuth care cere aprobare IBKR) nu se potrivesc unei aplicații locale cu cheie</td>
+</tr>
+<tr>
+<td><strong>Alpaca</strong></td>
+<td>antete <code>APCA-API-KEY-ID</code> + <code>APCA-API-SECRET-KEY</code> (sau Basic)</td>
+<td>Key ID + Secret, mediu Live / Paper (cheile nu sunt interschimbabile)</td>
+<td>cheile Alpaca nu au permisiuni separate de citire; aplicația doar citește</td>
+<td><code>/v2/account</code>, <code>/v2/positions</code>, <code>/v2/orders?status=open</code>, activitățile; aceleași chei dau și date de piață</td>
+<td>broker din SUA; <code>https://api.alpaca.markets</code> / <code>https://paper-api.alpaca.markets</code>; date gratuite: feed IEX, istoric din 2016, fără ultimele 15 min, 200 cereri / min</td>
+</tr>
+<tr>
+<td><strong>XTB</strong></td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td><strong>API închis pe 14 martie 2025</strong> (<code>xapi.xtb.com</code>, <code>ws.xtb.com</code>); integrarea nu e posibilă</td>
+</tr>
+<tr>
+<td><strong>Tradeville</strong></td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>nu există API public pentru clienți (doar Portal, MyTradeville, aplicația mobilă)</td>
+</tr>
+<tr>
+<td><strong>Freedom24 (Tradernet)</strong></td>
+<td>cheie publică + cheie privată, cereri semnate</td>
+<td>—</td>
+<td>—</td>
+<td>portofoliu, ordine (după clienții open-source)</td>
+<td>documentația oficială nu e accesibilă din rețeaua de test; amânat</td>
+</tr>
+<tr>
+<td>Revolut, Degiro, Schwab, Saxo, Webull</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+<td>Revolut și Degiro: fără API oficial pentru acțiuni; Schwab și Saxo: OAuth cu aplicație aprobată și reînnoirea tokenului; Webull: OpenAPI cu aprobare</td>
+</tr>
+</tbody></table>
+<h3 id="82-exchange-uri-crypto-ccxt-requiredcredentials">8.2 Exchange-uri crypto (ccxt <code>requiredCredentials</code>)</h3>
+<table>
+<thead>
+<tr>
+<th>Exchange</th>
+<th>Câmpuri</th>
+<th>Observații</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>KuCoin</td>
+<td>apiKey, secret, password (passphrase)</td>
+<td>suport complet existent (UTA / clasic / HF)</td>
+</tr>
+<tr>
+<td>OKX, Bitget</td>
+<td>apiKey, secret, password (passphrase)</td>
+<td></td>
+</tr>
+<tr>
+<td>Binance, Bybit, Kraken, Gate, Crypto.com, MEXC, HTX</td>
+<td>apiKey, secret</td>
+<td></td>
+</tr>
+<tr>
+<td>Coinbase (Advanced Trade / CDP)</td>
+<td>apiKey = numele cheii CDP (<code>organizations/…/apiKeys/…</code>), secret = cheia privată EC (PEM)</td>
+<td></td>
+</tr>
+</tbody></table>
+<p>Toate au <code>fetchBalance</code>, <code>fetchOpenOrders</code> și <code>fetchMyTrades</code>, iar cele cu derivate și <code>fetchPositions</code>. Permisiunile de citire diferă ca nume: Binance „Enable Reading”, Bybit „Read-Only”, OKX „Read”, Kraken „Query Funds / Query Open Orders &amp; Trades”.</p>
+<h3 id="83-date-de-piață-pentru-acțiuni">8.3 Date de piață pentru acțiuni</h3>
+<table>
+<thead>
+<tr>
+<th>Sursă</th>
+<th>Cheie</th>
+<th>Ce dă</th>
+<th>Rezultat test</th>
+<th>Concluzie</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Nasdaq (<code>api.nasdaq.com</code>, neoficial, cu User-Agent de browser)</td>
+<td>nu</td>
+<td>istoric zilnic (<code>/api/quote/{SYM}/historical?assetclass=stocks&amp;fromdate=&amp;todate=&amp;limit=</code>), intraday doar pentru ziua curentă (<code>/api/quote/{SYM}/chart</code>), calendarul de rezultate (<code>/api/calendar/earnings?date=YYYY-MM-DD</code>)</td>
+<td>200 JSON</td>
+<td>bun pentru zilnic și calendarul de rezultate, doar SUA</td>
+</tr>
+<tr>
+<td>Twelve Data</td>
+<td>da, gratuită (Basic: 800 credite / zi, 8 / min)</td>
+<td><code>time_series</code> intraday și zilnic, căutare</td>
+<td>200 (cheia <code>demo</code>, AAPL 1h)</td>
+<td>bun pentru intraday în SUA cu cheie gratuită; internațional, doar simboluri de probă</td>
+</tr>
+<tr>
+<td>Alpaca Market Data</td>
+<td>cheile contului Alpaca</td>
+<td>bare istorice (IEX), fără ultimele 15 min, 200 / min</td>
+<td>nu am avut chei de test</td>
+<td>bun pentru clienții Alpaca</td>
+</tr>
+<tr>
+<td>eToro Market Data</td>
+<td>cheile eToro</td>
+<td>lumânări și cotații pentru instrumentele eToro (acțiuni SUA și UE, ETF-uri)</td>
+<td>nu am avut chei de test</td>
+<td>bun pentru clienții eToro</td>
+</tr>
+<tr>
+<td>Yahoo Finance (neoficial)</td>
+<td>nu, dar cere cookie / „crumb”</td>
+<td>grafice, căutare, RSS</td>
+<td><strong>429</strong> (limitat din rețeaua de test)</td>
+<td>nesigur; nu e sursă principală</td>
+</tr>
+<tr>
+<td>Stooq</td>
+<td>nu</td>
+<td>CSV zilnic</td>
+<td>pagină de verificare JavaScript</td>
+<td>inutilizabil automat</td>
+</tr>
+<tr>
+<td>Finnhub</td>
+<td>da, gratuită (60 / min, necomercial)</td>
+<td>știri pe companie, calendar de rezultate (1 lună), cotație, profil; lumânările nu sunt confirmate în planul gratuit</td>
+<td>401 cu cheia <code>demo</code></td>
+<td>opțional, pentru știri și rezultate</td>
+</tr>
+<tr>
+<td>Alpha Vantage</td>
+<td>da, gratuită (25 / zi)</td>
+<td>serii</td>
+<td>cheia <code>demo</code> doar pentru exemple</td>
+<td>prea limitat</td>
+</tr>
+<tr>
+<td>CNN Fear &amp; Greed (acțiuni)</td>
+<td>nu, cu <code>Referer</code> / <code>Origin</code> CNN</td>
+<td>indicele 0–100 și istoricul</td>
+<td>200 (45,4 „neutral”)</td>
+<td>bun pentru contextul de piață</td>
+</tr>
+<tr>
+<td>SEC EDGAR</td>
+<td>nu, dar cere User-Agent cu e-mail de contact</td>
+<td>lista ticker → CIK, filings</td>
+<td>403 fără e-mail</td>
+<td>opțional, cu acordul utilizatorului pentru e-mail</td>
+</tr>
+</tbody></table>
+<h3 id="84-știri-despre-acțiuni-rss-fără-cheie">8.4 Știri despre acțiuni (RSS, fără cheie)</h3>
+<table>
+<thead>
+<tr>
+<th>Sursă</th>
+<th>URL</th>
+<th>Rezultat</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Nasdaq pe simbol</td>
+<td><code>https://www.nasdaq.com/feed/rssoutbound?symbol=AAPL</code></td>
+<td>200, 15 articole</td>
+</tr>
+<tr>
+<td>Nasdaq Stocks</td>
+<td><code>https://www.nasdaq.com/feed/rssoutbound?category=Stocks</code></td>
+<td>200</td>
+</tr>
+<tr>
+<td>CNBC Earnings / Business (<code>search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&amp;id=10001147</code>)</td>
+<td></td>
+<td>200, 30</td>
+</tr>
+<tr>
+<td>Investing.com Stock News</td>
+<td><code>https://www.investing.com/rss/news_25.rss</code></td>
+<td>200, 10</td>
+</tr>
+<tr>
+<td>MarketWatch, Seeking Alpha, Bloomberg, FT, CNBC</td>
+<td>deja în aplicație (§1.2)</td>
+<td>—</td>
+</tr>
+</tbody></table>
+<p>Pentru sentimentul pe acțiuni trebuie recunoscute companiile în titluri: simboluri (<code>$AAPL</code>, <code>(NASDAQ: AAPL)</code>) și nume („Apple”, „Nvidia”). Pentru simbolurile din favorite se pot folosi lista de nume de la Nasdaq sau de la broker, plus aliasuri, ca la monedele crypto.</p>
+<h3 id="85-logo-uri">8.5 Logo-uri</h3>
+<ul>
+<li><strong>Exchange-uri crypto:</strong> <code>@web3icons/core</code> (MIT, deja instalat) are <code>exchanges/branded</code> pentru binance, bybit, okx, kucoin, kraken, coinbase, bitget, gate-io, crypto-com, bitstamp, gemini și altele.</li>
+<li><strong>Brokeri:</strong> <code>simple-icons</code> (CC0) nu are IBKR, Trading 212, eToro, Alpaca și XTB (are Revolut și Robinhood). Iconițele oficiale (apple-touch-icon, 96–180 px) se descarcă de pe site-urile brokerilor: interactivebrokers.com, trading212.com, etoro.com, files.alpaca.markets, xas-cdn.xtb.com, tradeville.ro, freedom24.com. Sunt folosite doar ca să identifice brokerul în aplicația locală.</li>
+</ul>
+<h2 id="9-importanța-știrilor-cuvinte-cheie-vs-claude-cercetare-13-oct-2026">9. Importanța știrilor: cuvinte-cheie vs. Claude (cercetare 13 oct 2026)</h2>
+<p>Întrebarea: care importanță (impact 1–3) a unei știri e mai corectă pentru indexul zilei: cea din regulile de cuvinte-cheie (<code>news/classify.ts</code>) sau cea întoarsă de Claude odată cu scorul (<code>meta.impact</code>, salvată dar nefolosită)?</p>
+<p>Date: baza reală, 1.240 de știri notate de Claude Opus 5.5 care au ambele valori (citire, fără modificări).</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Claude 1</th>
+<th>Claude 2</th>
+<th>Claude 3</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Reguli 1</td>
+<td>638</td>
+<td>77</td>
+<td>2</td>
+</tr>
+<tr>
+<td>Reguli 1,5</td>
+<td>25</td>
+<td>4</td>
+<td>0</td>
+</tr>
+<tr>
+<td>Reguli 2</td>
+<td>237</td>
+<td>80</td>
+<td>2</td>
+</tr>
+<tr>
+<td>Reguli 3</td>
+<td>121</td>
+<td>48</td>
+<td>6</td>
+</tr>
+</tbody></table>
+<ul>
+<li>Acord în ~58% din cazuri. Dezacordul e aproape mereu „regulile umflă”: 406 știri cu 2–3 la reguli și 1 la Claude.</li>
+<li>Regulile dau 3 pe cuvinte, fără context: „…Strategy Is Key to Surviving a Stock Market <strong>Crash</strong>…” (articol de sfaturi), „…owner hit by cyber-attack” (<strong>hack</strong> la un lanț de haine), comentarii valutare care pomenesc „<strong>inflation</strong>”, „US Dollar: … no clear catalyst”.</li>
+<li>Regulile ratează ce nu are cuvintele lor: „Chip Selloff Sparks 7% Korea Rout…” (reguli 1, Claude 3).</li>
+<li>Claude e reținut: 3 doar la 10 știri din 1.240.</li>
+<li>Efectul asupra indexului: 0–3 puncte pe zi (ex. 13 oct: 44,8 cu reguli, 42,2 cu Claude); același sens, altă cântărire.</li>
+<li>Limită: „corect” e aici judecata pe exemple, nu o măsurătoare față de mișcarea prețului; un test față de randamentele BTC / S&amp;P 500 din orele următoare devine posibil după câteva săptămâni de istoric.</li>
+</ul>
+<p>Concluzie: importanța de la Claude, când există; regulile rămân pentru știrile notate local (fallback-ul sau motorul local ales).</p>
+<p>Separat, cererea utilizatorului: știrile geopolitice cântăresc mai mult de când Trump e președinte (tarife, sancțiuni, războaie, declarații), deci relevanța lor urcă de la 0,6 la 0,8 (aceeași ca știrile macro fără termeni de piață); cele fără nicio legătură cu piețele rămân în afara indexului.</p>
+<h2 id="10-indicatori-economici-pe-țări-cercetare-13-oct-2026">10. Indicatori economici pe țări (cercetare 13 oct 2026)</h2>
+<p>Cererea: o pagină cu nivelul curent al tuturor indicatorilor economici ai piețelor principale (în special SUA), grupați pe țară, cu nivelul UE unde există, și cu data următoarei publicări.</p>
+<p><strong>Surse verificate</strong></p>
+<table>
+<thead>
+<tr>
+<th>Sursă</th>
+<th>Ce are</th>
+<th>Cheie</th>
+<th>Concluzie</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Calendarul TradingView (<code>economic-calendar.tradingview.com/events</code>, folosit deja de aplicație)</td>
+<td>pentru fiecare publicare: <code>ticker</code> stabil (ex. <code>ECONOMICS:USIJC</code>), <code>indicator</code>, <code>category</code>, <code>period</code>, <code>referenceDate</code>, <code>actual</code> / <code>previous</code> (revizuit) / <code>forecast</code>, <code>unit</code>, <code>scale</code> (K / M / B / T), <code>importance</code>, <code>source</code> + <code>source_url</code> (instituția oficială), <code>comment</code> (descriere, engleză), <code>date</code>; publicările viitoare cu data și prognoza</td>
+<td>nu</td>
+<td>sursa principală: aceleași date ca în Calendar, toate țările, și data următoarei publicări</td>
+</tr>
+<tr>
+<td>FRED (<code>fred.stlouisfed.org/graph/fredgraph.csv?id=…</code>)</td>
+<td>serii istorice SUA (CPI, șomaj, cereri de șomaj…), fără cheie</td>
+<td>nu (API-ul oficial cere cheie)</td>
+<td>doar SUA, fără date viitoare; nu e nevoie</td>
+</tr>
+<tr>
+<td>Eurostat / BCE (JSON-stat, SDMX)</td>
+<td>serii UE / zona euro</td>
+<td>nu</td>
+<td>ar dubla ce are TradingView pentru zona euro; fără date viitoare</td>
+</tr>
+</tbody></table>
+<p><strong>Ce dă TradingView (măsurat pe 120 de zile, US / EU / GB / JP / CN / DE)</strong></p>
+<ul>
+<li>349 de indicatori cu <code>ticker</code>; alte evenimente fără <code>ticker</code> au totuși <code>indicator</code> (randamente la licitații, U6, GDPNow, productivitate), deci cheia unui indicator = <code>ticker</code> sau <code>țară:indicator</code>. „Calendar” și „Holidays” (categoria <code>gov</code>) nu sunt indicatori.</li>
+<li>Categorii: <code>prce</code> prețuri, <code>lbr</code> muncă, <code>gdp</code>, <code>bsnss</code> industrie / afaceri, <code>cnsm</code> consum, <code>hse</code> locuințe, <code>mny</code> bani / dobânzi, <code>trd</code> comerț, <code>gov</code> buget, <code>bnd</code> / <code>mrkt</code> obligațiuni, <code>enrg</code> energie, fără categorie (PMI-urile).</li>
+<li>SUA ~150 de indicatori (inflație, CPI, PCE, PPI, cereri de șomaj, NFP, JOLTS, ISM, Fed-urile regionale, locuințe, ipoteci, stocuri de petrol…); zona euro (<code>EU</code>) ~33 (inflație, șomaj, PIB, ZEW, încredere, BCE…), fără locuințe; Germania are în plus Ifo, comenzi, producție.</li>
+<li>Unități: <code>%</code>; fără unitate (indici); <code>K</code> / <code>M</code> / <code>B</code> / <code>T</code> cu sau fără monedă (<code>$</code>, <code>€</code>, <code>£</code>, <code>¥</code>, <code>CNY</code>, <code>cf</code>).</li>
+<li><strong>Limită: cel mult 2.000 de evenimente pe cerere</strong> (SUA pe 400 de zile a fost tăiat la martie). Istoricul se cere pe bucăți, cu împărțire automată când răspunsul atinge limita.</li>
+<li><strong>Viitorul:</strong> publicările programate se văd cam 5 săptămâni înainte (cererea până la +90 de zile întoarce evenimente până la ~+36 de zile). Mai departe, data nu e cunoscută.</li>
+<li>Zona euro publică „flash” apoi „final” pentru aceeași perioadă (ex. inflația august: 3,3 apoi 3,2): pentru o perioadă contează ultima publicare.</li>
+<li>Calendarul aplicației citește deja −7 … +14 zile pentru 13 țări la 15 minute (și imediat după publicările importante): aceleași răspunsuri pot ține valorile la zi fără cereri în plus.</li>
+</ul>
+<h2 id="11-când-e-bună-o-creștere-sensul-fiecărui-indicator-cercetare-13-oct-2026">11. Când e bună o creștere: sensul fiecărui indicator (cercetare 13 oct 2026)</h2>
+<p>Pentru colorarea paginii Economie (verde = bine, roșu = rău), din perspectiva <strong>sănătății economiei</strong>, cum a cerut utilizatorul („dacă inflația crește, e rău; dacă PIB-ul a crescut, e bine”). Am clasificat toate cele 344 de nume distincte de indicatori din baza reală.</p>
+<table>
+<thead>
+<tr>
+<th>Sens</th>
+<th>Indicatori</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Creșterea e bună</strong></td>
+<td>PIB (toate formele, GDPNow, investiții, contribuția exporturilor); producția industrială și manufacturieră, gradul de utilizare, comenzile (bunuri durabile, fabrici, utilaje, construcții), PMI-urile, ISM, indicii Fed-urilor regionale, Ifo, ZEW, Tankan, încrederea companiilor și a consumatorilor, indicii anticipativi; locurile de muncă (NFP, ADP, angajări, posturi libere, demisii, participarea, orele lucrate, productivitatea); vânzările cu amănuntul, cheltuielile și veniturile gospodăriilor; locuințele începute, autorizațiile, vânzările de locuințe, NAHB, cererile de ipoteci; balanța comercială, contul curent, exporturile, investițiile străine directe; soldul bugetului; creditarea în economie (China)</td>
+</tr>
+<tr>
+<td><strong>Creșterea e rea</strong></td>
+<td>toată inflația (CPI, PCE, PPI, de bază, lunară, anuală, regională, așteptările de inflație, prețurile de import, prețurile plătite din ISM / Philly Fed, prețul mașinilor rulate); șomajul (rata, U6, numărul șomerilor, cererile de ajutor de șomaj, concedierile anunțate); costul unitar al muncii; dobânzile băncilor centrale și la ipoteci; randamentele obligațiunilor; datoria publică față de PIB</td>
+</tr>
+<tr>
+<td><strong>Neutru</strong> (efect ambiguu)</td>
+<td>salariile (bune pentru gospodării, dar inflaționiste); stocurile companiilor și de mărfuri / energie; prețul locuințelor (bun pentru proprietari, rău pentru accesibilitate); importurile; creditul de consum; masa monetară și bilanțul băncii centrale; prețurile exporturilor și ale materiilor prime; rezervele valutare</td>
+</tr>
+</tbody></table>
+<p>Observații:</p>
+<ul>
+<li>Perspectiva e a economiei, nu reacția pieței: un NFP foarte puternic e verde aici, deși poate scădea bursa (Fed rămâne strict).</li>
+<li>Dobânzile și randamentele mai mari sunt roșii: condiții de finanțare mai grele pentru economie (și pentru piețele de risc), chiar când sunt răspunsul la inflație.</li>
+<li>„Mai mic e mai bine” la inflație ține doar cât inflația e pozitivă; o deflație ar trebui citită separat. Sursa nu are cazuri recente, deci rămâne regula simplă.</li>
+</ul>
+<h2 id="12-rezumatul-zilei-cu-claude-cercetare-13-oct-2026">12. Rezumatul zilei cu Claude (cercetare 13 oct 2026)</h2>
+<p><strong>API (SDK <code>@anthropic-ai/sdk</code> 0.133, instalat):</strong> <code>client.messages.stream({ model, max_tokens, system, messages, output_config: { effort, format: zodOutputFormat(schema) } })</code> + <code>await stream.finalMessage()</code> → <code>parsed_output</code> (JSON validat cu zod; <code>null</code> dacă nu se poate citi). Pe Claude Opus 5.5 gândirea e mereu adaptivă (fără parametrul <code>thinking</code>), adâncimea se reglează cu <code>effort</code> (implicit <code>medium</code>). Streaming-ul evită timeout-urile la răspunsuri lungi. <code>stop_reason === &#39;refusal&#39;</code> → refuz; <code>max_tokens</code> → răspuns tăiat (<code>parsed_output</code> nul). Erorile tipizate (<code>AuthenticationError</code>, <code>RateLimitError</code>…) se folosesc deja în motorul de sentiment.</p>
+<p><strong>Ce știe aplicația despre zi (fără cereri noi pe internet):</strong></p>
+<ul>
+<li>sentimentul zilei (index, încredere, defalcare pe categorii, evoluția pe ore, ultimele 7 zile, știrile care trag în sus / jos);</li>
+<li>știrile de azi, cu scor, importanță și monede;</li>
+<li>calendarul (evenimente de azi cu valoare / prognoză / anterior, plus ce urmează în 24 h);</li>
+<li>indicatorii economici publicați azi (pagina Economie: valoare, anterior, prognoză, sensul bine / rău, istoric) și cei programați;</li>
+<li>piața: Fear &amp; Greed crypto și acțiuni, capitalizarea, dominanța BTC, S&amp;P 500 / Nasdaq 100 / VIX, starea bursei americane;</li>
+<li>favoritele utilizatorului din scanner: preț, variația pe 24 h, trend, semnal Slingshot.</li>
+</ul>
+<p><strong>Graficele:</strong> Claude nu desenează și nu inventează cifre: aplicația pregătește seriile (evoluția sentimentului, sub-indicii, istoricul fiecărui indicator publicat azi, variația favoritelor), iar Claude alege, după situație, care dintre ele contează și scrie sub fiecare ce arată. Interfața le desenează din datele aplicației.</p>
+<p><strong>Cost:</strong> un rezumat trimite ~4–5 mii de tokeni (promptul real pe datele de azi: ~10 400 de caractere, plus instrucțiunile și schema) și primește ~2–5 mii (JSON-ul de ~4 200 de caractere plus gândirea); la $4 / $20 pe milion (Claude Opus 5.5) înseamnă ~5–15 cenți; jurnalul notează tokenii fiecărui rezumat; de aceea rezumatul se păstrează și se refolosește la redeschidere, iar o actualizare se poate cere cel mult o dată la 2 minute.</p>
+<h2 id="13-connector-claude-mcp-pe-abonamentul-fiecăruia-cercetare-13-oct-2026">13. Connector Claude (MCP) pe abonamentul fiecăruia (cercetare 13 oct 2026)</h2>
+<p><strong>De ce MCP:</strong> termenii Anthropic (code.claude.com/docs/en/legal-and-compliance, citit 13 oct 2026) nu permit unei aplicații să trimită cereri prin credențialele Free / Pro / Max ale utilizatorilor și nici să colecteze / păstreze token-urile claude.ai. Calea permisă: Sentiq e un <strong>server MCP la distanță</strong> pe care fiecare îl adaugă în Claude ca <em>custom connector</em>; Claude (web, desktop, mobil după ce l-ai adăugat pe web, Claude Code) citește datele Sentiq și face analiza pe abonamentul lui. Cere o adresă publică HTTPS: Claude se conectează din infrastructura Anthropic (<code>160.79.104.0/21</code>), nu din browser.</p>
+<p><strong>Specificația MCP 2026-07-28 (autorizare):</strong> OAuth 2.1; serverul MCP e <em>resource server</em> și <strong>trebuie</strong> să publice Protected Resource Metadata (RFC 9728) și să răspundă <code>401</code> cu <code>WWW-Authenticate: Bearer resource_metadata=&quot;…&quot;</code>; serverul de autorizare publică RFC 8414 (<code>/.well-known/oauth-authorization-server</code>); PKCE S256 obligatoriu (<code>code_challenge_methods_supported: [&quot;S256&quot;]</code>, altfel clienții refuză); parametrul <code>resource</code> (RFC 8707) în autorizare și token, iar serverul <strong>trebuie</strong> să accepte doar token-uri emise pentru el (audiența); token-ul doar în header, niciodată în URL; <code>iss</code> în răspunsul de autorizare (RFC 9207, recomandat, cu <code>authorization_response_iss_parameter_supported</code>); token-uri de acces de scurtă durată; refresh <strong>rotit</strong> pentru clienți publici; redirect doar <code>https</code> sau <code>localhost</code>, comparat exact; pe ecranul de consimțământ trebuie arătat hostul redirect-ului și un avertisment pentru redirect doar pe localhost. Înregistrarea clienților: <strong>Client ID Metadata Documents</strong> (CIMD, recomandat: <code>client_id</code> e un URL HTTPS cu un JSON al clientului, pe care serverul îl descarcă și îl validează: <code>client_id</code> identic cu URL-ul, <code>redirect_uris</code>), pre-înregistrare sau <strong>DCR</strong> (RFC 7591, păstrat pentru compatibilitate).</p>
+<p><strong>Ce face concret Claude (claude.com/docs/connectors/building/authentication, lazy-authentication):</strong></p>
+<ul>
+<li><code>401</code> obligatoriu (un <code>WWW-Authenticate</code> pe <code>200</code> e ignorat); <code>resource</code> din metadata = exact URL-ul pus de utilizator (cu <code>/mcp</code>); folosește doar primul <code>authorization_servers</code>;</li>
+<li>alege <strong>CIMD</strong> doar dacă metadata are <code>client_id_metadata_document_supported: true</code> <strong>și</strong> <code>&quot;none&quot;</code> în <code>token_endpoint_auth_methods_supported</code>; altfel DCR (<code>registration_endpoint</code>);</li>
+<li><code>client_id</code>-ul Claude (descărcat 13 oct 2026): <code>https://claude.ai/oauth/mcp-oauth-client-metadata</code> → <code>{&quot;client_name&quot;:&quot;Claude&quot;,&quot;redirect_uris&quot;:[&quot;https://claude.ai/api/mcp/auth_callback&quot;],&quot;token_endpoint_auth_method&quot;:&quot;none&quot;,…}</code>; Claude Code: <code>https://claude.ai/oauth/claude-code-client-metadata</code> → <code>redirect_uris: [&quot;http://localhost/callback&quot;,&quot;http://127.0.0.1/callback&quot;]</code>, port variabil (potrivire fără port, RFC 8252 §7.3); <code>Cache-Control: max-age=300</code>; callback-ul poate trece și pe claude.com;</li>
+<li>PKCE S256 la fiecare autorizare; cere scope-urile din <code>WWW-Authenticate</code> sau <code>scopes_supported</code> și adaugă <code>offline_access</code> dacă metadata serverului de autorizare îl are (ca să primească refresh token);</li>
+<li><code>/token</code> primește <code>application/x-www-form-urlencoded</code>; reîmprospătează pe <code>401</code> și cu până la 5 min înainte de expirare; la refresh invalid vrea <code>invalid_grant</code>; timp de răspuns: 10 s (descoperire, înregistrare, token), 30 s (refresh);</li>
+<li>un <code>200</code> cu <code>isError</code> nu pornește autentificarea; <code>403</code> + <code>insufficient_scope</code> cere scope în plus;</li>
+<li>metadata e ținută în cache ~5 min.</li>
+</ul>
+<p><strong>SDK-ul TypeScript v2</strong> (<code>@modelcontextprotocol/server</code> 2.3.1, instalat fix; v1 <code>@modelcontextprotocol/sdk</code> e linia veche): <code>createMcpHandler(factory)</code> → <code>{ fetch(Request, { authInfo, parsedBody }) → Response }</code>, fără stare (un <code>McpServer</code> nou per cerere), servește atât clienții 2026-07-28, cât și pe cei din 2025 (verificat: clientul SDK a vorbit 2025-11-25 și a primit unelte, prompturi și erorile de validare ca <code>isError</code>). <code>authInfo</code> e doar transmis (verificarea token-ului e a noastră); SDK-ul v2 <strong>nu</strong> are server de autorizare (cel din v1 e „înghețat” în <code>server-legacy</code>), deci Sentiq e propriul server de autorizare (are deja conturi, 2FA, passkey). Unelte: <code>registerTool(name, { title, description, inputSchema: z.object(…), annotations: { readOnlyHint } }, cb)</code>; prompturi: <code>registerPrompt</code>; <code>instructions</code> la server; <code>maxToolInputElements</code>. 2.3.0 (2 oct): „un server per cerere”, <code>expectedResource</code>; 2.3.1 (5 oct): doar documentație / server-legacy.</p>
+<p><strong>Ce există deja în Sentiq și se refolosește:</strong> contextul zilei (<code>buildDayContext</code>, FD-SUMMARY), <code>DailySentimentService.today/history</code>, <code>queryNews</code> (filtre: interval, categorie, monede, sentiment, text), <code>CalendarService.query</code> (cu evenimentele utilizatorului și rezultatele companiilor), <code>EconomyService.view</code>, <code>Scanner.result(userId)</code>, <code>readContext</code> (piața), <code>MarketData.candles</code> / <code>StockData.candles</code> + <code>runSlingshot</code> / <code>summarize</code> (aceeași analiză ca scannerul). Login-ul (parolă + 2FA / passkey) e cel al aplicației; <code>safeNext</code> limitează adresa de întoarcere la 300 de caractere (de aceea cererea de autorizare se ține pe server și pagina de consimțământ primește doar un id).</p>
+<h2 id="14-boți-de-tranzacționare-cercetare-21-oct-2026">14. Boți de tranzacționare (cercetare 21 oct 2026)</h2>
+<p><strong>Ce tipuri există</strong> (Binance, OKX, 3Commas, Gainium, Altrady, bit.com):</p>
+<ul>
+<li><strong>Grid:</strong> cumpără sub preț și vinde peste, între o limită de jos și una de sus, împărțite în N grile.<ul>
+<li>Spațiere aritmetică (pas egal în preț) sau geometrică (pas egal în procente).</li>
+<li>Pe spot, la pornire se cumpără activul pentru grilele de deasupra prețului (ca să existe ce vinde).</li>
+<li>Pe futures: modurile Long, Short și Neutru, cu levier și o marjă inițială.</li>
+<li>Opțiuni: un preț de pornire (trigger); stop loss / take profit pe preț, sau pe profit / ROI; „închide pozițiile la oprire”.</li>
+<li>Câștigul pe grilă = pasul minus comisioanele (de 2 ori: cumpărare + vânzare).</li>
+<li>Iese din interval: botul nu mai face nimic până revine prețul.</li>
+</ul>
+</li>
+<li><strong>DCA</strong> (3Commas, Gainium): un ordin de bază și ordine de siguranță (safety orders) la scăderi succesive.<ul>
+<li>Ordinul de bază: suma și tipul (piață / limită).</li>
+<li>Ordinele de siguranță: abaterea până la primul, suma primului, multiplicatorul de volum, multiplicatorul de pas, câte cel mult.</li>
+<li>Take profit: procent din prețul mediu (unul sau mai multe, opțional trailing).</li>
+<li>Stop loss: procent din prețul ordinului de bază; acțiunea la SL (închide / închide și oprește botul), breakeven, trailing.</li>
+<li>Ciclurile: pauză între cicluri, câte cicluri cel mult, prețul minim / maxim la care pornește un ciclu, durata maximă a unui ciclu.</li>
+</ul>
+</li>
+<li><strong>Boți pe semnale:</strong> intră pe semnalele unui indicator sau ale unui webhook (TradingView), cu SL / TP proprii sau ale semnalului.</li>
+</ul>
+<p><strong>Reguli de risc folosite peste tot:</strong></p>
+<ul>
+<li>risc pe tranzacție de 0,5–2% din capital, riscul total deschis ~6%;</li>
+<li>o limită de pierdere pe zi (kill switch);</li>
+<li>stop loss obligatoriu;</li>
+<li>pauză după o pierdere;</li>
+<li>un număr maxim de poziții deschise.</li>
+</ul>
+<p><strong>Ce înseamnă pentru Sentiq:</strong></p>
+<ul>
+<li>Setările clasice: Grid și DCA, cu numele și valorile obișnuite.</li>
+<li>Modul Premium: un bot pe semnale (Slingshot), cu sentimentul site-ului ca filtru și, la alegere, modelul AI al utilizatorului ca o ultimă verificare.</li>
+<li>Ordinele pleacă prin <code>TradingService.place</code> (aceleași verificări, același jurnal, aceeași cheie anti-dublură ca formularul).</li>
+<li>Platformele închid diferit:<ul>
+<li>un exchange crypto acceptă o vânzare la piață sau un ordin reduce-only;</li>
+<li>eToro închide după id-ul poziției;</li>
+<li>Trading 212 nu are short.</li>
+</ul>
+</li>
+<li>De aceea modul real pornește doar pe exchange-urile crypto. Pe acțiuni, botul rulează în simulare (aceleași reguli, fără ordine).</li>
+</ul>
+<h2 id="surse">Surse</h2>
+<ul>
+<li>PyneCore <code>ta.py</code>, <code>safe_convert.py</code>, <code>_math_stateful.py</code> — github.com/PyneSys/pynecore</li>
+<li><a href="https://KuCoin.com/docs/basic-info/connection-method/authentication/signing-a-message">KuCoin — Signing a Message</a></li>
+<li><a href="https://www.kucoin.com/es/announcement/id-kucoin-unified-trading-account-uta-launch-announcement">KuCoin — anunț UTA</a>, <a href="https://www.kucoin.com/fr/announcement/vn-announcement-of-kucoin-api-upgrade-2026-06-03">upgrade API 2026-06-03</a></li>
+<li><a href="https://www.forexfactory.com/thread/post/15166506">ForexFactory — limită download calendar</a></li>
+<li><a href="https://www.mql5.com/en/forum/343908/16870225">MQL5 forum — endpoint FF JSON</a></li>
+<li>Hugging Face: <code>Xenova/finbert</code>, <code>Xenova/nli-deberta-v3-small</code>, <code>Xenova/twitter-roberta-base-sentiment-latest</code></li>
+<li><a href="https://docs.trading212.com">Trading 212 Public API</a>, <a href="https://docs.trading212.com/api/positions">Positions</a></li>
+<li><a href="https://api-portal.etoro.com/getting-started">eToro API — Getting started</a>, <a href="https://builders.etoro.com/learn/authentication-and-api-keys">Authentication &amp; API keys</a>, <a href="https://builders.etoro.com/learn/portfolio-management-and-positions">Portfolio &amp; positions</a>, <a href="https://api-portal.etoro.com/api-reference/trading--real/get-account-pnl-and-portfolio-details.md">PnL endpoint</a>, <a href="https://api-portal.etoro.com/api-reference/market-data/search-for-securities-instruments-by-id-or-symbol.md">Instruments</a></li>
+<li><a href="https://www.ibkrguides.com/clientportal/performanceandstatements/flex3.htm">IBKR — Configure Flex Web Service</a>, <a href="https://www.interactivebrokers.com/docs/web-api/flex-web-service/using-flex-web-service/make-request-to-send-request">Flex Web Service</a>, <a href="https://github.com/erdewit/ib_insync/blob/master/ib_insync/flexreport.py">ib_insync flexreport.py</a></li>
+<li><a href="https://docs.alpaca.markets/docs/authentication">Alpaca — Authentication</a>, <a href="https://docs.alpaca.markets/docs/about-market-data-api">About Market Data API</a></li>
+<li><a href="https://www.xtb.com/int/help-center/our-platforms-1/do-you-offer-api-1">XTB — Do you offer API?</a></li>
+<li><a href="https://support.twelvedata.com/en/articles/5194820-api-credits-limits">Twelve Data — API credits limits</a>, <a href="https://twelvedata.com/pricing">pricing</a></li>
+<li><a href="https://socket.dev/npm/package/tradernet-mcp">tradernet-mcp (Freedom24)</a></li>
+<li><a href="https://code.claude.com/docs/en/legal-and-compliance">Claude Code — Legal and compliance (autentificare)</a></li>
+<li><a href="https://claude.com/docs/connectors/building/authentication">Claude — Authentication for connectors</a>, <a href="https://claude.com/docs/connectors/building/lazy-authentication">Lazy authentication</a></li>
+<li><a href="https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization">MCP 2026-07-28 — Authorization</a>, <a href="https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/client-registration">Client registration</a>, <a href="https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/security-considerations">Security considerations</a>, <a href="https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/authorization-server-discovery">Authorization server discovery</a></li>
+<li><a href="https://ts.sdk.modelcontextprotocol.io/v2/serving/http">MCP TypeScript SDK v2 — Serving over HTTP</a>, <a href="https://ts.sdk.modelcontextprotocol.io/v2/serving/authorization.html">Authorization</a></li>
+<li>Boți: <a href="https://www.binance.com/en/support/faq/binance-spot-grid-trading-parameters-688ff6ff08734848915de76a07b953dd">Binance — Spot Grid parameters</a>, <a href="https://www.binance.com/en/support/faq/what-is-spot-grid-trading-and-how-does-it-work-d5f441e8ab544a5b98241e00efb3a4ab">Binance — What is spot grid trading</a>, <a href="https://www.binance.com/en/support/faq/what-is-futures-grid-trading-f4c453bab89648beb722aa26634120c3">Binance — What is futures grid trading</a>, <a href="https://help.3commas.io/en/articles/3108940-main-settings-dca-bot">3Commas — Main settings of the DCA bot</a>, <a href="https://support.altrady.com/en/article/grid-bot-setup-configuration-guide-1pffkoo/">Altrady — Grid bot setup</a>, <a href="https://gainium.io/grid-bot">Gainium — Grid bot</a>, <a href="https://forklog.com/en/grid-dca-and-the-signals-marketplace-an-overview-of-okxs-trading-bots/">ForkLog — OKX trading bots</a>, <a href="https://www.bit.com/knowledge-hub/trading-bot">bit.com — Trading bot</a></li>
+</ul>
+</body></html>

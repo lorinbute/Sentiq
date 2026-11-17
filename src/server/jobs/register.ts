@@ -6,15 +6,19 @@ import type { AppContext } from '../context.ts';
 import { retagCoins, retagRecent, upgradeClassification } from '../news/ingest.ts';
 import { MEMBERS_JOB, membersSignature, RETAG_JOB } from '../news/index-members.ts';
 import { fetchDueSources } from '../news/fetcher.ts';
-import { EARN_JOB, FF_JOB, TV_JOB } from '../calendar/service.ts';
-import { fetchTvEarnings } from '../calendar/sources.ts';
+import { EARN_JOB, FF_JOB, RESULTS_JOB, TV_JOB } from '../calendar/service.ts';
+import { fetchTvEarnings, fetchTvResults } from '../calendar/sources.ts';
 import { ECON_JOB, feedingEconomy } from '../economy/service.ts';
 import { refreshStockContext } from '../market/stock-context.ts';
 import { syncStockSources } from '../news/sources.ts';
 import { readJobData, writeJobData } from './scheduler.ts';
 import { DAILY_JOB, MAINTENANCE_JOB } from '../sentiment/daily.ts';
-import { TD_PLAN_JOB } from '../market/stocks.ts';
+import { TD_PLAN_EVERY_MS, TD_PLAN_JOB } from '../market/stocks.ts';
 import { BOT_TICK_MS } from '../../shared/bot.ts';
+import { migrateSimulatedBots } from '../bots/legacy-paper.ts';
+import { MAX_ACCOUNTS_PER_USER } from '../exchange/accounts.ts';
+/** FD-PAPER: the paper engine's look. */
+export const PAPER_JOB = 'paper.match';
 
 export const BOTS_JOB = 'bots';
 
@@ -61,6 +65,17 @@ export function pruneLogs(dir: string, before: number): number {
 export function registerJobs(ctx: AppContext): void {
   const { scheduler, db, log } = ctx;
 
+  // FD-PAPER §5: the Paper Trading profiles' waiting orders, stop losses / take profits and liquidations.
+  scheduler.add({
+    name: PAPER_JOB,
+    everyMs: 10_000,
+    firstDelayMs: 15_000,
+    timeoutMs: 2 * MIN,
+    run: async () => {
+      await ctx.paper.match();
+    },
+  });
+
   scheduler.add({
     name: 'news.fetch',
     everyMs: MIN,
@@ -89,7 +104,8 @@ export function registerJobs(ctx: AppContext): void {
     },
   });
 
-  // FD-AIKEYS: the users' own AI scores the last days' news, each with their key (FD-AISLOW §3: rounds of one batch each).
+  // FD-AIKEYS: the users' own AI scores the last days' news, each with their key (FD-AISLOW §3: rounds of one batch each),
+  // only for those using Sentiq (FD-KEYIDLE): a round reads who they are.
   scheduler.add({
     name: 'sentiment.ai',
     everyMs: 60_000,
@@ -192,17 +208,20 @@ export function registerJobs(ctx: AppContext): void {
     },
   });
 
-  // FD-TDPLAN: each user's Twelve Data key's plan (limits a minute and a day, FD-TDKEYS), at start and every 6 hours;
-  // one credit of their key a read. One key failing does not stop the others.
+  // FD-TDPLAN: each user's Twelve Data key's plan (limits a minute and a day, FD-TDKEYS); one credit of their key a
+  // read. FD-KEYIDLE: only while they use Sentiq, once the plan read is 6 hours old (looked at every 10 minutes). One
+  // key failing does not stop the others.
   scheduler.add({
     name: TD_PLAN_JOB,
-    everyMs: 6 * 60 * MIN,
+    everyMs: 10 * MIN,
     firstDelayMs: 20_000,
     run: async () => {
       const failed: string[] = [];
+      const here = await ctx.presence.activeUsers();
       for (const userId of await ctx.settings.usersWithKey('twelvedata')) {
+        if (!here.has(userId)) continue;
         try {
-          const p = await ctx.stocks.refreshPlan(userId);
+          const p = await ctx.stocks.refreshPlan(userId, null, TD_PLAN_EVERY_MS);
           if (p) log.info(`twelvedata: user ${userId}: plan ${p.category}, ${p.perMinute} credits a minute, ${p.perDay === null ? 'no daily limit' : `${p.perDay} a day`}`);
         } catch (err) {
           failed.push(`user ${userId}: ${(err as Error).message}`);
@@ -222,6 +241,21 @@ export function registerJobs(ctx: AppContext): void {
       const symbols = (await db.all<{ coin: string }>("SELECT DISTINCT coin FROM watchlist WHERE kind = N'stock' ORDER BY coin")).map((r) => r.coin);
       // FD-EARNTV: with the dates the companies confirmed, from TradingView.
       await ctx.calendar.refreshEarnings(symbols, (day) => ctx.stocks.nasdaq.earnings(day), undefined, (s) => fetchTvEarnings(s));
+    },
+  });
+
+  // FD-CALACTUAL §3: the results the companies reported, from TradingView, while some stock of a watchlist has an earnings
+  // event in the last days without them (one request for all; none when nothing waits).
+  scheduler.add({
+    name: RESULTS_JOB,
+    everyMs: 10 * MIN,
+    firstDelayMs: 60_000,
+    run: async () => {
+      const waiting = await ctx.calendar.awaitingResults();
+      if (waiting.length === 0) return;
+      const found = await fetchTvResults(waiting.map((w) => w.symbol));
+      const saved = await ctx.calendar.saveResults(found, waiting);
+      if (saved) log.info(`calendar: results of ${saved} companies saved`);
     },
   });
 
@@ -249,6 +283,7 @@ export function registerJobs(ctx: AppContext): void {
     },
   });
 
+  let simulatedMoved = false;
   // FD-BOT §8: the trading bots, every 30 s (only here: one instance runs the jobs).
   scheduler.add({
     name: BOTS_JOB,
@@ -256,6 +291,14 @@ export function registerJobs(ctx: AppContext): void {
     firstDelayMs: 30_000,
     timeoutMs: 4 * MIN,
     run: async (signal) => {
+      // FD-PAPER §7: the bots still simulating move onto a Paper Trading profile first (nothing left after the first run).
+      // FD-PAPER §7: the simulating bots move onto Paper Trading profiles (they do not run until then); tried again while
+      // one could not be moved.
+      if (!simulatedMoved) {
+        const { moved, failed } = await migrateSimulatedBots({ db, paper: ctx.paper, log, maxAccounts: MAX_ACCOUNTS_PER_USER });
+        if (moved) log.info(`bots: ${moved} simulated bot(s) moved onto Paper Trading profiles`);
+        simulatedMoved = failed === 0;
+      }
       await ctx.botEngine.run(signal);
     },
   });
@@ -285,6 +328,8 @@ export function registerJobs(ctx: AppContext): void {
       await db.run('UPDATE sources SET item_count = (SELECT count(*) FROM news WHERE source_id = sources.id)');
       // FD-USERS / FD-INVITE: sign-ins that ended, and account requests nobody answered within 30 days.
       await ctx.sessions.purgeExpired();
+      // FD-KEYIDLE: the tabs' beats that no longer count.
+      await ctx.presence.purge();
       const purged = await ctx.users.purgeOldRequests();
       if (purged) log.info(`users: removed ${purged} account requests nobody answered`);
       // Feeds of stocks nobody follows any more (another instance's change, FD-AUTOFEED).

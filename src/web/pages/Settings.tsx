@@ -18,6 +18,8 @@ import { StockNewsSection } from '../components/StockNewsSettings.tsx';
 import { ProviderLogo } from '../components/ProviderLogo.tsx';
 import { SettingsTabs } from '../components/SettingsTabs.tsx';
 import { providerById } from '../../shared/providers.ts';
+import { PaperBadge, PaperResetDialog, PaperSettingsDialog } from '../components/PaperDialogs.tsx';
+import { commissionText, PAPER_KIND_RO } from '../../shared/paper.ts';
 
 /**
  * FD-MARKETSRC §2: with two or more exchanges that can give prices, the user picks the one their charts, strip and
@@ -72,6 +74,9 @@ function AccountsSection() {
     },
   });
   const list = accounts.data ?? [];
+  // FD-PAPER: a Paper Trading profile's settings or reset, opened from its row.
+  const [paperDialog, setPaperDialog] = useState<{ account: AccountView; what: 'settings' | 'reset' } | null>(null);
+  const closePaper = useCallback(() => setPaperDialog(null), []);
   return (
     <Panel
       title="Conturi (exchange-uri și brokeri)"
@@ -92,32 +97,49 @@ function AccountsSection() {
         {list.map((a) => {
           const provider = providerById(a.exchange);
           const envLabel = provider?.envs?.find((e) => e.id === a.env)?.label;
+          const paper = a.exchange === 'paper';
           return (
             <div key={a.id} className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border border-line px-3.5 py-2.5">
               <ProviderLogo id={a.exchange} size={28} />
               <span className="flex min-w-0 flex-col">
-                <strong className="truncate">{a.label}</strong>
+                <strong className="flex min-w-0 items-center gap-1.5">
+                  <span className="truncate">{a.label}</span>
+                  {paper && <PaperBadge />}
+                </strong>
                 <span className="text-[12px] text-faint">
                   {provider?.name ?? a.exchange}
+                  {paper && a.paper ? `, ${PAPER_KIND_RO[a.paper.kind]}, ${commissionText(a.paper.commissionType, a.paper.commissionValue)}` : ''}
                   {envLabel && a.env !== provider?.envs?.[0]?.id ? `, ${envLabel}` : ''}
                 </span>
               </span>
-              <span className="num text-faint">{a.keyHint}</span>
+              {!paper && <span className="num text-faint">{a.keyHint}</span>}
               {a.lastError ? <span className="text-bear">{a.lastError}</span> : a.lastOkAt ? <span className="text-bull">conectat {fmtAgo(a.lastOkAt)}</span> : null}
               {a.fundsRisk ? (
                 <span className="text-bear">cheia poate retrage / transfera fonduri: {a.permissions}</span>
               ) : (
                 a.permissionWarning && <span className={a.trading.enabled ? 'text-muted' : 'text-warn'}>permisiuni în plus față de citire: {a.permissions}</span>
               )}
-              {a.trading.enabled && <span className="text-bull">tranzacționare pornită</span>}
-              <span className="ml-auto flex gap-2">
-                <button className="btn" onClick={() => test.mutate(a.id)} disabled={test.isPending}>
-                  Testează
-                </button>
+              {a.trading.enabled && !paper && <span className="text-bull">tranzacționare pornită</span>}
+              {/* FD-PAPER: a profile's three buttons go two by two on a phone, „Șterge” on a row of its own (FD-MOBILESYM). */}
+              <span className={clsx('ml-auto flex gap-2', paper && 'max-sm:grid max-sm:w-full max-sm:grid-cols-2 max-sm:[&>:last-child]:col-span-2')}>
+                {paper ? (
+                  <>
+                    <button className="btn" onClick={() => setPaperDialog({ account: a, what: 'settings' })}>
+                      Setări profil
+                    </button>
+                    <button className="btn" onClick={() => setPaperDialog({ account: a, what: 'reset' })}>
+                      Resetează
+                    </button>
+                  </>
+                ) : (
+                  <button className="btn" onClick={() => test.mutate(a.id)} disabled={test.isPending}>
+                    Testează
+                  </button>
+                )}
                 <button
                   className="btn btn-danger"
                   onClick={() => {
-                    if (window.confirm(`Ștergi contul „${a.label}”? Cheile lui se șterg din Sentiq.`)) remove.mutate(a.id);
+                    if (window.confirm(paper ? `Ștergi profilul „${a.label}”? Pozițiile, ordinele și istoricul lui se șterg.` : `Ștergi contul „${a.label}”? Cheile lui se șterg din Sentiq.`)) remove.mutate(a.id);
                   }}
                 >
                   Șterge
@@ -130,6 +152,8 @@ function AccountsSection() {
         <PriceSourceChoice />
       </div>
       {wizard && <AccountWizard onClose={closeWizard} />}
+      {paperDialog?.what === 'settings' && <PaperSettingsDialog account={paperDialog.account} onClose={closePaper} />}
+      {paperDialog?.what === 'reset' && <PaperResetDialog account={paperDialog.account} onClose={closePaper} />}
     </Panel>
   );
 }

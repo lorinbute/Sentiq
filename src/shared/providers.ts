@@ -15,6 +15,7 @@ export const PROVIDER_IDS = [
   'etoro',
   'ibkr',
   'alpaca',
+  'paper',
 ] as const;
 export type ProviderId = (typeof PROVIDER_IDS)[number];
 
@@ -52,6 +53,8 @@ export interface ProviderDef {
   ipRestrict?: boolean;
   /** Under /provider-logos/ (an initials badge when missing). */
   logo?: string;
+  /** FD-PAPER: Sentiq's own Paper Trading (no key; its market chosen per profile). */
+  paper?: true;
 }
 
 const KEY = { key: 'apiKey', label: 'API Key' };
@@ -259,7 +262,19 @@ export const PROVIDERS: ProviderDef[] = [
     reads: 'pozițiile, ordinele deschise și execuțiile recente',
     logo: 'alpaca.png',
   },
+  {
+    id: 'paper',
+    name: 'Paper Trading',
+    kind: 'crypto',
+    paper: true,
+    fields: [],
+    steps: [],
+    reads: 'banii, pozițiile, ordinele și istoricul profilului (fără bani reali)',
+  },
 ];
+
+/** FD-PAPER: whether an account is a Paper Trading profile (its orders are never real). */
+export const isPaperExchange = (exchange: string): boolean => exchange === 'paper';
 
 export function providerById(id: string): ProviderDef | undefined {
   return PROVIDERS.find((p) => p.id === id);

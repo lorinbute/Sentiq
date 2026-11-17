@@ -1,39 +1,30 @@
-import { useCallback, useEffect, useState } from 'react';
+import { Children, isValidElement, useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { clsx } from 'clsx';
-import { ArrowRightLeft, ChartCandlestick, Coins, History, ListChecks, Plus, Power, RefreshCw, Wallet } from 'lucide-react';
-import type { AccountView, BalanceRow, OrderRow, Portfolio, StatsPeriod, TradeStats } from '../../shared/api-types.ts';
+import { ArrowRightLeft, ChartCandlestick, Coins, ListChecks, Plus, Power, RefreshCw, RotateCcw, Settings2, Wallet } from 'lucide-react';
+import { PaperBadge, PaperResetDialog, PaperSettingsDialog } from '../components/PaperDialogs.tsx';
+import type { AccountView, BalanceRow, OrderRow, Portfolio, StatsPeriod, TradeHistory, TradeStats } from '../../shared/api-types.ts';
 import { api, errorMessage, qs } from '../api.ts';
-import { autoDigits, fmtAgo, fmtDateTime, fmtMoney, fmtNum, fmtPct, fmtPrice, fmtUsd, fmtWeekday } from '../format.ts';
-import { useTz } from '../hooks.ts';
+import { autoDigits, breakableUnit, fmtAgo, fmtDateTime, fmtMoney, fmtNum, fmtPct, fmtPrice, fmtUsd, fmtWeekday, positionAmount } from '../format.ts';
+import { useRevealInRow, useTz } from '../hooks.ts';
 import { Empty, ErrorNote, Loading, Panel, Warning } from '../components/ui.tsx';
 import { CoinLogo } from '../components/icons.tsx';
 import { AccountWizard } from '../components/AccountWizard.tsx';
 import { ProviderLogo } from '../components/ProviderLogo.tsx';
 import { providerById } from '../../shared/providers.ts';
 import { OrderTicket, type TicketSeed } from '../components/OrderTicket.tsx';
-import { CancelOrderButton, EnableTradingDialog, FundsRiskNote, TradeJournal, useDisableTrading } from '../components/TradingControls.tsx';
+import { CancelOrderButton, EnableTradingDialog, FundsRiskNote, useDisableTrading } from '../components/TradingControls.tsx';
 import { ModifyTicket } from '../components/ModifyTicket.tsx';
 import { holdingSeed, orderSeed, positionSeed, type ModifySeed } from '../components/modify-seeds.ts';
 import { closeSeed, sellSeed } from '../components/trade-seeds.ts';
 import { canReverse, ReverseDialog } from '../components/ReverseDialog.tsx';
 import { portfolioInterval } from '../portfolio-settle.ts';
+import { codeRo, SHOW_RAW, tradesRo } from '../components/account-text.ts';
+import { historyKey, historyUrl, TradeHistoryPanel } from '../components/TradeHistory.tsx';
 
-const SECTION_RO: Record<string, string> = { balances: 'Solduri', positions: 'Poziții', orders: 'Ordine', fills: 'Tranzacții', prices: 'Prețuri', mode: 'Tip cont', futures: 'Cont futures' };
-/** `who`: „exchange-ul” or „brokerul”. */
-const codeRo = (code: string, who: string): string =>
-  ({
-    AUTH: 'cheia API e invalidă sau a expirat',
-    PERMISSION: 'cheia nu are permisiunea necesară (sau IP-ul nu e pe lista permisă)',
-    RATE_LIMIT: `${who} limitează temporar cererile (prea multe cereri sau supraîncărcare); reîncerc automat`,
-    NETWORK: 'problemă de rețea',
-    MAINTENANCE: `${who} e în mentenanță sau nu răspunde`,
-    EXCHANGE: `eroare de la ${who.replace(/-?ul$/, '')}`,
-  })[code] ?? `eroare de la ${who.replace(/-?ul$/, '')}`;
-
-/** Codes whose raw exchange text helps (a wrong key, a missing permission, an unknown error); the rest are explained above. */
-const SHOW_RAW = new Set(['AUTH', 'PERMISSION', 'EXCHANGE']);
+// FD-TRADES: the fills are no longer listed; they still give the holdings' average price.
+const SECTION_RO: Record<string, string> = { balances: 'Solduri', positions: 'Poziții', orders: 'Ordine', fills: 'Execuțiile (pentru prețul mediu)', prices: 'Prețuri', mode: 'Tip cont', futures: 'Cont futures' };
 
 const STABLE_ASSETS = new Set(['USDT', 'USDC', 'USD', 'DAI', 'FDUSD']);
 
@@ -65,25 +56,55 @@ function writePeriod(v: StatsPeriod): void {
 const statsKey = (id: number, period: StatsPeriod) => ['portfolio-stats', id, period] as const;
 const statsUrl = (id: number, period: StatsPeriod, force = false) => `/api/portfolio/${id}/stats${qs({ period, force: force ? '1' : undefined })}`;
 
+/** FD-TRADESMOBILE: on a phone (two cards a row), an odd last card takes the whole row. */
+const ODD_LAST_FULL = 'max-sm:[&>:last-child:nth-child(odd)]:col-span-2';
+
 /** One summary card; `title` explains it (or why it shows a dash). */
 function Stat({ label, value, tone, title, hint }: { label: string; value: string; tone?: string; title?: string; hint?: string }) {
   return (
-    <div className="panel min-w-0 px-4 py-3" title={title}>
+    <div className="panel min-w-0 px-4 py-3 sm:@container" title={title}>
       <div className="truncate text-[12.5px] text-muted">{label}</div>
-      <div className={clsx('num mt-0.5 truncate text-[22px] tracking-[-0.02em]', tone)}>{value}</div>
+      {/* FIX-FITWIDTH (`stat-fit`): the size at which the grid's longest value fits, at most 22 px, cut only below 14 px;
+          on a phone (FD-TRADESMOBILE) at most 18 px, the currency on the next line, the sum smaller only when it alone
+          does not fit (never under 12 px). */}
+      <div className={clsx('num stat-fit mt-0.5 tracking-[-0.02em] max-sm:whitespace-normal sm:truncate', tone)}>{breakableUnit(value)}</div>
       {hint && <div className="truncate text-[11.5px] text-faint">{hint}</div>}
     </div>
   );
 }
 
-/** „Reîmprospătează” in the page's top row (FD-TRADESTATS §2, FD-BROKERSTATS): the account's portfolio and its stats for the period. */
+/**
+ * FIX-FITWIDTH: the cards' grid, with the length of its longest value (`--stat-chars`) and of its longest sum without
+ * its currency (`--stat-num-chars`, a phone wraps the currency): all its values at one size, the largest that fits.
+ */
+function StatGrid({ className, children }: { className: string; children: React.ReactNode }) {
+  const values = Children.toArray(children).map((c) => (isValidElement<{ value?: unknown }>(c) && typeof c.props.value === 'string' ? c.props.value : ''));
+  const chars = Math.max(1, ...values.map((v) => v.length));
+  const numChars = Math.max(1, ...values.map((v) => v.replace(/[\s\u00a0][^\s\u00a0\d.,−+-]+$/, '').length));
+  return (
+    // A phone sizes the values from the grid (two columns), so the odd last card, a whole row, has the others' size.
+    <div className={clsx(className, 'max-sm:@container')} style={{ '--stat-chars': chars, '--stat-num-chars': numChars } as React.CSSProperties}>
+      {children}
+    </div>
+  );
+}
+
+/**
+ * „Reîmprospătează” in the page's top row (FD-TRADESTATS §2, FD-BROKERSTATS): the account's portfolio and its stats for
+ * the period; FD-TRADES: and its trade history.
+ */
 function useRefreshAccount(account: AccountView, period: StatsPeriod) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async () => {
-      const [p, st] = await Promise.all([api.get<Portfolio>(`/api/portfolio/${account.id}?force=1`), api.get<TradeStats>(statsUrl(account.id, period, true)).catch(() => null)]);
+      const [p, st, h] = await Promise.all([
+        api.get<Portfolio>(`/api/portfolio/${account.id}?force=1`),
+        api.get<TradeStats>(statsUrl(account.id, period, true)).catch(() => null),
+        api.get<TradeHistory>(historyUrl(account.id, period, true)).catch(() => null),
+      ]);
       qc.setQueryData(['portfolio', account.id], p);
       if (st) qc.setQueryData(statsKey(account.id, period), st);
+      if (h) qc.setQueryData(historyKey(account.id, period), h);
     },
   });
 }
@@ -145,6 +166,7 @@ function CryptoCards({
   updated: React.ReactNode;
 }) {
   const name = providerById(account.exchange)?.name ?? account.exchange;
+  const paper = account.exchange === 'paper';
   // A server from before FD-TRADESTATS sends no `futuresAvailable`.
   const futures = p.totals.futuresAvailable ?? null;
   const futuresErr = p.errors.futures;
@@ -164,17 +186,28 @@ function CryptoCards({
   const why = statDash();
   const count = (v: number | null | undefined) => (stats.isPending ? '…' : v === null || v === undefined ? '—' : fmtNum(v, 0));
   const periodLabel = PERIODS.find((x) => x.id === period)?.label ?? period;
-  const closedTitle = (what: string) => why ?? `${what}: pozițiile futures închise în perioada aleasă (${periodLabel}), după rezultatul lor net (cu comisioane și funding).`;
+  const closedTitle = (what: string) =>
+    why ?? (paper ? `${what}: pozițiile închise în perioada aleasă (${periodLabel}), spot și futures, după rezultatul net (cu comisioanele).` : `${what}: pozițiile futures închise în perioada aleasă (${periodLabel}), după rezultatul lor net (cu comisioane și funding).`);
   return (
     <div className="flex flex-col gap-2.5">
-      <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7">
-        <Stat label="Disponibil în futures" value={fmtUsd(futures)} title={futuresTitle} />
+      <StatGrid className={clsx('grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7', ODD_LAST_FULL)}>
+        {/* FD-PAPER §6: a profile has one wallet: what is free for new orders, and its money with its coins. */}
+        <Stat label={paper ? 'Disponibil' : 'Disponibil în futures'} value={fmtUsd(futures)} title={paper ? 'Banii profilului liberi pentru ordine noi: fără marja pozițiilor și fără ce țin ordinele care așteaptă.' : futuresTitle} />
         <Stat
-          label="Valoare în contul spot"
+          label={paper ? 'Valoarea contului' : 'Valoare în contul spot'}
           value={fmtUsd(p.totals.spotValue)}
-          title="Tot ce ai în conturile spot (la KuCoin: Trading și Funding): monedele la prețul de acum, plus stablecoins. Contul futures nu e inclus."
+          title={
+            paper
+              ? 'Banii profilului plus rezultatul pozițiilor deschise (spot și futures), la prețul de acum.'
+              : 'Tot ce ai în conturile spot (la KuCoin: Trading și Funding): monedele la prețul de acum, plus stablecoins. Contul futures nu e inclus.'
+          }
         />
-        <Stat label="PnL nerealizat (futures)" value={fmtUsd(p.totals.unrealizedPnl)} tone={pnlClass(p.totals.unrealizedPnl)} title="Profitul sau pierderea pozițiilor futures încă deschise, la prețul de acum." />
+        <Stat
+          label={paper ? 'PnL nerealizat (poziții)' : 'PnL nerealizat (futures)'}
+          value={fmtUsd(p.totals.unrealizedPnl)}
+          tone={pnlClass(p.totals.unrealizedPnl)}
+          title={paper ? 'Profitul sau pierderea pozițiilor deschise (spot și futures), la prețul de acum.' : 'Profitul sau pierderea pozițiilor futures încă deschise, la prețul de acum.'}
+        />
         <Stat label="Tranzacții profitabile" value={count(st?.wins)} tone={st?.wins ? 'text-bull' : undefined} title={closedTitle('Profitabile')} />
         <Stat label="Tranzacții cu pierdere" value={count(st?.losses)} tone={st?.losses ? 'text-bear' : undefined} title={closedTitle('Cu pierdere')} />
         <Stat
@@ -189,7 +222,7 @@ function CryptoCards({
           title={why ?? 'Suma rezultatelor nete ale pozițiilor futures închise în perioadă.'}
           hint={st?.netPartial ? 'parțial: o monedă fără preț' : undefined}
         />
-      </div>
+      </StatGrid>
       {/* The period is chosen in the page's top row (FD-UIPOLISH); here only what was read and when. */}
       <div className="flex flex-wrap items-center gap-x-3.5 gap-y-1">
         {st?.error && <span className="text-[12px] text-bear">{why}</span>}
@@ -205,6 +238,7 @@ const BROKER_STATS_NOTE: Record<string, string> = {
   trading212: 'vânzările executate (un ordin e o tranzacție), după profitul realizat dat de Trading 212',
   ibkr: 'ordinele care au închis sau redus o poziție, după Realized P/L (FIFO, cu comisioane) din raportul Flex',
   alpaca: 'ordinele care au închis sau redus o poziție; rezultatul e calculat de Sentiq din execuții (FIFO), fără taxele regulatorii',
+  paper: 'pozițiile închise (o închidere parțială e o tranzacție separată), după rezultatul net, cu comisioanele',
 };
 
 /** FD-BROKERSTATS §3: why a closed trade can have no known result. */
@@ -213,9 +247,6 @@ const UNKNOWN_WHY: Record<string, string> = {
   trading212: 'Trading 212 nu a dat profitul realizat',
   alpaca: 'cumpărarea e mai veche decât istoricul citit, acțiunile au venit prin transfer sau split, ori contul nu permite short',
 };
-
-/** „1 tranzacție”, „5 tranzacții”, „20 de tranzacții”. */
-const tradesRo = (n: number): string => (n === 1 ? '1 tranzacție' : `${n}${n % 100 >= 20 || (n > 0 && n % 100 === 0) ? ' de' : ''} tranzacții`);
 
 /** IBKR's reports follow the New York trading day. */
 const ET = 'America/New_York';
@@ -275,11 +306,17 @@ function BrokerCards({
           ? ` Fără rezultat cunoscut, deci nenumărate: ${tradesRo(st.unknownResults)}${UNKNOWN_WHY[account.exchange] ? ` (${UNKNOWN_WHY[account.exchange]})` : ''}.`
           : '',
       ].join('');
+  const paper = account.exchange === 'paper';
   const cards: React.ReactNode[] = [
-    <Stat key="value" label="Valoare dețineri" value={fmtMoney(p.totals.spotValue, p.currency)} />,
-    p.cash !== null && <Stat key="cash" label="Numerar disponibil" value={fmtMoney(p.cash, p.currency)} />,
+    <Stat
+      key="value"
+      label={paper ? 'Valoarea contului' : 'Valoare dețineri'}
+      value={fmtMoney(p.totals.spotValue, p.currency)}
+      title={paper ? 'Banii profilului plus rezultatul pozițiilor deschise, la prețul de acum.' : undefined}
+    />,
+    p.cash !== null && <Stat key="cash" label={paper ? 'Disponibil' : 'Numerar disponibil'} value={fmtMoney(p.cash, p.currency)} title={paper ? 'Banii liberi pentru ordine noi: fără marja pozițiilor și fără ce țin ordinele care așteaptă.' : undefined} />,
     p.positions.length > 0 && (
-      <Stat key="upnl" label="PnL nerealizat (poziții)" value={fmtMoney(p.totals.unrealizedPnl, p.currency)} tone={pnlClass(p.totals.unrealizedPnl)} title="Profitul sau pierderea pozițiilor cu levier sau short încă deschise." />
+      <Stat key="upnl" label="PnL nerealizat (poziții)" value={fmtMoney(p.totals.unrealizedPnl, p.currency)} tone={pnlClass(p.totals.unrealizedPnl)} title={paper ? 'Profitul sau pierderea pozițiilor deschise, la prețul de acum.' : 'Profitul sau pierderea pozițiilor cu levier sau short încă deschise.'} />
     ),
     <Stat key="wins" label="Tranzacții profitabile" value={count(st?.wins)} tone={st?.wins ? 'text-bull' : undefined} title={closedTitle('Profitabile')} />,
     <Stat key="losses" label="Tranzacții cu pierdere" value={count(st?.losses)} tone={st?.losses ? 'text-bear' : undefined} title={closedTitle('Cu pierdere')} />,
@@ -300,7 +337,7 @@ function BrokerCards({
   ].filter(Boolean);
   return (
     <div className="flex flex-col gap-2.5">
-      <div className={clsx('grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-4', BROKER_GRID[cards.length])}>{cards}</div>
+      <StatGrid className={clsx('grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-4', BROKER_GRID[cards.length], ODD_LAST_FULL)}>{cards}</StatGrid>
       <div className="flex flex-wrap items-center gap-x-3.5 gap-y-1">
         {st?.error && <span className="text-[12px] text-bear">{why}</span>}
         <div className="ml-auto">{updated}</div>
@@ -340,10 +377,12 @@ function PortfolioView({
     refetchInterval: 5 * 60_000,
     retry: 1,
   });
-  if (!q.data && !q.isError) return <Loading label={account.kind === 'stocks' ? 'Se citesc datele de la broker…' : 'Se citesc datele de pe exchange…'} />;
+  if (!q.data && !q.isError) return <Loading label={account.exchange === 'paper' ? 'Se citește profilul Paper Trading…' : account.kind === 'stocks' ? 'Se citesc datele de la broker…' : 'Se citesc datele de pe exchange…'} />;
   if (!q.data) return <ErrorNote error={q.error} onRetry={() => q.refetch()} />;
   const p = q.data;
   const stocks = p.kind === 'stocks';
+  // FD-PAPER, FIX-PAPERLEV: a profile holds positions only (spot too: long or short, with leverage), the money in the cards.
+  const paperAcc = account.exchange === 'paper';
   // Crypto values are in USDT and shown as dollars, as before; a broker's are in the account's currency.
   const money = (v: number | null | undefined, currency = p.currency) => (stocks ? fmtMoney(v, currency) : fmtUsd(v));
   const errs = Object.entries(p.errors);
@@ -379,10 +418,10 @@ function PortfolioView({
         </Warning>
       )}
 
-      <Panel title={stocks ? 'Poziții cu levier sau short' : 'Poziții futures deschise'} icon={ChartCandlestick} flush>
+      <Panel title={paperAcc ? 'Poziții deschise' : stocks ? 'Poziții cu levier sau short' : 'Poziții futures deschise'} icon={ChartCandlestick} flush>
         {p.positions.length === 0 ? (
           <div>
-            <Empty>{stocks ? 'Nicio poziție cu levier sau short.' : 'Nicio poziție futures deschisă.'}</Empty>
+            <Empty>{paperAcc ? 'Nicio poziție deschisă.' : stocks ? 'Nicio poziție cu levier sau short.' : 'Nicio poziție futures deschisă.'}</Empty>
           </div>
         ) : (
           // Rows with buttons: every cell on the row's middle, as the buttons (the text never sits above them).
@@ -391,7 +430,8 @@ function PortfolioView({
               <tr>
                 <th>Simbol</th>
                 <th>Direcție</th>
-                <th className="text-right">Mărime</th>
+                {/* FIX-POSAMOUNT: on futures (a crypto profile too) the money the position took, without leverage. */}
+                <th className="text-right">{stocks ? 'Mărime' : 'Sumă'}</th>
                 <th className="text-right">Intrare</th>
                 <th className="text-right">Mark</th>
                 <th className="text-right">PnL</th>
@@ -414,16 +454,25 @@ function PortfolioView({
                     <td>
                       {/* The margin mode centred on the symbol's row, as the logo and the name (FD-ORDEREDIT); a block flex, so
                           the cell's middle is the text's (an inline one sits on the logo's baseline). */}
+                      {/* FIX-POSMARGIN: WebKit counts a logo image with `max-width: 100%` (the base styles) as 0 px wide in a
+                          table cell's minimum width, so the column came out 18 px too narrow and a futures symbol ran over the
+                          margin mode: the logo keeps its size (`max-w-none`) and neither part shrinks or breaks. */}
                       <span className="flex items-center gap-x-1.5">
-                        <Link to={stocks ? chartOf(base ?? '') : `/charts/${base}/${(quoteFull ?? 'USDT').split(':')[0]}`} className="inline-flex items-center gap-2 font-semibold text-text">
-                          {base && <CoinLogo coin={base} size={18} badge={stocks} square={stocks} />}
+                        <Link to={stocks ? chartOf(base ?? '') : `/charts/${base}/${(quoteFull ?? 'USDT').split(':')[0]}`} className="inline-flex shrink-0 items-center gap-2 font-semibold whitespace-nowrap text-text">
+                          {base && <CoinLogo coin={base} size={18} badge={stocks} square={stocks} className="max-w-none" />}
                           {stocks ? base : pos.symbol}
                         </Link>
-                        {pos.marginMode && <span className="text-[12px] leading-none text-faint">{pos.marginMode}</span>}
+                        {pos.marginMode && <span className="shrink-0 text-[12px] leading-none whitespace-nowrap text-faint">{pos.marginMode}</span>}
                       </span>
                     </td>
                     <td className={pos.side === 'long' ? 'text-bull' : 'text-bear'}>{pos.side === 'long' ? 'Long' : pos.side === 'short' ? 'Short' : pos.side}</td>
-                    <td className="num text-right">{fmtNum(pos.size ?? pos.contracts, 6)}</td>
+                    {stocks ? (
+                      <td className="num text-right">{fmtNum(pos.size ?? pos.contracts, 6)}</td>
+                    ) : (
+                      <td className="num text-right" title="Banii luați din disponibil pentru poziție: marja, fără levier.">
+                        {positionAmount(pos)}
+                      </td>
+                    )}
                     <td className="num text-right">{fmtPrice(pos.entryPrice, d)}</td>
                     <td className="num text-right">{fmtPrice(pos.markPrice, d)}</td>
                     <td className={clsx('num text-right', pnlClass(pos.unrealizedPnl))}>
@@ -467,114 +516,118 @@ function PortfolioView({
         )}
       </Panel>
 
-      <Panel title={stocks ? 'Dețineri' : 'Dețineri spot'} icon={Coins} flush>
-        {p.balances.length === 0 ? (
-          <div>
-            <Empty>Niciun sold.</Empty>
-          </div>
-        ) : (
-          <table className={clsx('table', trades && '[&_td]:align-middle')}>
-            <thead>
-              <tr>
-                <th>Activ</th>
-                <th>Cont</th>
-                <th className="text-right">Cantitate</th>
-                <th className="text-right">Preț</th>
-                <th className="text-right">Valoare</th>
-                <th className="text-right">Preț mediu</th>
-                <th className="text-right">{stocks ? 'PnL' : 'PnL estimat'}</th>
-                {trades && (
-                  <th className="relative text-right">
-                    <span className="sr-only">Acțiuni</span>
-                  </th>
-                )}
-              </tr>
-            </thead>
-            <tbody>
-              {p.balances.map((b) => {
-                const d = digits(b.price, b.crypto);
-                return (
-                  <tr key={`${b.account}-${b.asset}`}>
-                    <td className="font-semibold">
-                      {/* Block flex: the logo and the name on one middle (an inline one sits on the logo's baseline). */}
-                      {STABLE_ASSETS.has(b.asset) || b.asset.startsWith('#') ? (
-                        <span className="flex items-center gap-2">
-                          <CoinLogo coin={b.asset} size={18} badge={stocks} square={stocks} />
-                          {b.asset}
-                        </span>
-                      ) : (
-                        <Link to={chartOf(b.asset, b.crypto)} className="flex w-fit items-center gap-2 text-text">
-                          <CoinLogo coin={b.asset} size={18} badge={stocks && !b.crypto} square={stocks && !b.crypto} />
-                          {b.asset}
-                        </Link>
-                      )}
-                      {b.name && <div className="max-w-[24ch] truncate text-[11.5px] font-normal text-faint">{b.name}</div>}
-                      {b.note && <div className="text-[11.5px] font-normal text-link">{b.note}</div>}
-                    </td>
-                    <td className="text-[12px] text-muted">{b.account}</td>
-                    <td className="num text-right">
-                      {fmtNum(b.total, 8)}
-                      {b.used > 0 && <div className="text-[11.5px] text-faint">{fmtNum(b.used, 8)} în ordine</div>}
-                    </td>
-                    <td className="num text-right">
-                      {fmtPrice(b.price, d)}
-                      {stocks && b.priceCurrency && b.priceCurrency !== b.currency && <span className="ml-1 text-[11px] text-faint">{b.priceCurrency}</span>}
-                    </td>
-                    <td className="num text-right">{money(b.value, b.currency ?? p.currency)}</td>
-                    <td className="num text-right">
-                      {b.avgPrice !== null ? fmtPrice(b.avgPrice, d) : <span className="text-faint">necunoscut</span>}
-                      {b.avgSource === 'manual' && <div className="text-[11px] text-faint">setat manual</div>}
-                      {b.avgSource === 'broker' && <div className="text-[11px] text-faint">de la broker</div>}
-                      {/* An eToro instrument without a symbol ("#1234") has nothing to attach a price to. */}
-                      {!STABLE_ASSETS.has(b.asset) && /^[A-Z0-9][A-Z0-9.-]{0,19}$/.test(b.asset) && (
-                        <div>
-                          <CostBasisEditor accountId={account.id} row={b} />
-                        </div>
-                      )}
-                    </td>
-                    <td className={clsx('num text-right', pnlClass(b.pnl))}>
-                      {b.pnl !== null ? (
-                        <>
-                          {money(b.pnl, b.currency ?? p.currency)} <span className="text-[12px]">{fmtPct(b.pnlPct)}</span>
-                        </>
-                      ) : b.pnlPct !== null ? (
-                        <span className="text-[12px]">{fmtPct(b.pnlPct)}</span>
-                      ) : (
-                        '—'
-                      )}
-                    </td>
-                    {trades && (
-                      <td className="text-right">
-                        {(() => {
-                          // Stablecoins and instruments without a symbol are not sold from here; nor a KuCoin "main" balance
-                          // (it trades only once moved to the trading account, and Sentiq never moves funds).
-                          const seed = STABLE_ASSETS.has(b.asset) || b.asset.startsWith('#') || b.free <= 0 || b.account === 'main' ? null : sellSeed(account, b);
-                          // A holding's SL / TP once per asset (KuCoin's "main" row is the same holding).
-                          const protect = STABLE_ASSETS.has(b.asset) || b.asset.startsWith('#') || b.account === 'main' ? null : holdingSeed(account, p, b);
-                          return (
-                            <span className="inline-flex items-center justify-end gap-1.5">
-                              {protect && (
-                                <button className="btn h-8 px-2 text-[12px] whitespace-nowrap" onClick={() => onModify(protect)} aria-label={protect.title}>
-                                  SL / TP
-                                </button>
-                              )}
-                              {seed && (
-                                <button className="btn h-8 px-2 text-[12px]" onClick={() => onTicket(seed)}>
-                                  Vinde
-                                </button>
-                              )}
-                            </span>
-                          );
-                        })()}
+      {/* FD-PAPER: a profile has no holdings apart (its trades are positions): no panel of coins. */}
+      {!paperAcc && (
+        <Panel title={stocks ? 'Dețineri' : 'Dețineri spot'} icon={Coins} flush>
+          {p.balances.length === 0 ? (
+            <div>
+              <Empty>Niciun sold.</Empty>
+            </div>
+          ) : (
+            <table className={clsx('table', trades && '[&_td]:align-middle')}>
+              <thead>
+                <tr>
+                  <th>Activ</th>
+                  <th>Cont</th>
+                  <th className="text-right">Cantitate</th>
+                  <th className="text-right">Preț</th>
+                  <th className="text-right">Valoare</th>
+                  <th className="text-right">Preț mediu</th>
+                  <th className="text-right">{stocks ? 'PnL' : 'PnL estimat'}</th>
+                  {trades && (
+                    <th className="relative text-right">
+                      <span className="sr-only">Acțiuni</span>
+                    </th>
+                  )}
+                </tr>
+              </thead>
+              <tbody>
+                {p.balances.map((b) => {
+                  const d = digits(b.price, b.crypto);
+                  return (
+                    <tr key={`${b.account}-${b.asset}`}>
+                      <td className="font-semibold">
+                        {/* Block flex: the logo and the name on one middle (an inline one sits on the logo's baseline). */}
+                        {STABLE_ASSETS.has(b.asset) || b.asset.startsWith('#') ? (
+                          <span className="flex items-center gap-2">
+                            <CoinLogo coin={b.asset} size={18} badge={stocks} square={stocks} />
+                            {b.asset}
+                          </span>
+                        ) : (
+                          <Link to={chartOf(b.asset, b.crypto)} className="flex w-fit items-center gap-2 text-text">
+                            <CoinLogo coin={b.asset} size={18} badge={stocks && !b.crypto} square={stocks && !b.crypto} />
+                            {b.asset}
+                          </Link>
+                        )}
+                        {b.name && <div className="max-w-[24ch] truncate text-[11.5px] font-normal text-faint">{b.name}</div>}
+                        {b.note && <div className="text-[11.5px] font-normal text-link">{b.note}</div>}
                       </td>
-                    )}
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
-      </Panel>
+                      <td className="text-[12px] text-muted">{b.account}</td>
+                      <td className="num text-right">
+                        {fmtNum(b.total, 8)}
+                        {b.used > 0 && <div className="text-[11.5px] text-faint">{fmtNum(b.used, 8)} în ordine</div>}
+                      </td>
+                      <td className="num text-right">
+                        {fmtPrice(b.price, d)}
+                        {stocks && b.priceCurrency && b.priceCurrency !== b.currency && <span className="ml-1 text-[11px] text-faint">{b.priceCurrency}</span>}
+                      </td>
+                      <td className="num text-right">{money(b.value, b.currency ?? p.currency)}</td>
+                      <td className="num text-right">
+                        {b.avgPrice !== null ? fmtPrice(b.avgPrice, d) : <span className="text-faint">necunoscut</span>}
+                        {b.avgSource === 'manual' && <div className="text-[11px] text-faint">setat manual</div>}
+                        {b.avgSource === 'broker' && <div className="text-[11px] text-faint">de la broker</div>}
+                        {/* An eToro instrument without a symbol ("#1234") has nothing to attach a price to; FD-PAPER: a profile's is
+                            its own fills', exact. */}
+                        {!STABLE_ASSETS.has(b.asset) && account.exchange !== 'paper' && /^[A-Z0-9][A-Z0-9.-]{0,19}$/.test(b.asset) && (
+                          <div>
+                            <CostBasisEditor accountId={account.id} row={b} />
+                          </div>
+                        )}
+                      </td>
+                      <td className={clsx('num text-right', pnlClass(b.pnl))}>
+                        {b.pnl !== null ? (
+                          <>
+                            {money(b.pnl, b.currency ?? p.currency)} <span className="text-[12px]">{fmtPct(b.pnlPct)}</span>
+                          </>
+                        ) : b.pnlPct !== null ? (
+                          <span className="text-[12px]">{fmtPct(b.pnlPct)}</span>
+                        ) : (
+                          '—'
+                        )}
+                      </td>
+                      {trades && (
+                        <td className="text-right">
+                          {(() => {
+                            // Stablecoins and instruments without a symbol are not sold from here; nor a KuCoin "main" balance
+                            // (it trades only once moved to the trading account, and Sentiq never moves funds).
+                            const seed = STABLE_ASSETS.has(b.asset) || b.asset.startsWith('#') || b.free <= 0 || b.account === 'main' ? null : sellSeed(account, b);
+                            // A holding's SL / TP once per asset (KuCoin's "main" row is the same holding).
+                            const protect = STABLE_ASSETS.has(b.asset) || b.asset.startsWith('#') || b.account === 'main' ? null : holdingSeed(account, p, b);
+                            return (
+                              <span className="inline-flex items-center justify-end gap-1.5">
+                                {protect && (
+                                  <button className="btn h-8 px-2 text-[12px] whitespace-nowrap" onClick={() => onModify(protect)} aria-label={protect.title}>
+                                    SL / TP
+                                  </button>
+                                )}
+                                {seed && (
+                                  <button className="btn h-8 px-2 text-[12px]" onClick={() => onTicket(seed)}>
+                                    Vinde
+                                  </button>
+                                )}
+                              </span>
+                            );
+                          })()}
+                        </td>
+                      )}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </Panel>
+      )}
 
       <Panel title="Ordine deschise" icon={ListChecks} flush>
         {p.orders.length === 0 ? (
@@ -609,7 +662,7 @@ function PortfolioView({
                       {stocks ? o.symbol.split('/')[0] : o.symbol}
                     </span>
                   </td>
-                  <td className="text-muted">{stocks ? (o.market === 'spot' ? 'Acțiuni' : 'Levier / short') : o.market === 'spot' ? 'Spot' : 'Futures'}</td>
+                  <td className="text-muted">{stocks ? (o.market === 'spot' || paperAcc ? 'Acțiuni' : 'Levier / short') : paperAcc ? (o.symbol.includes(':') ? 'Futures' : 'Spot') : o.market === 'spot' ? 'Spot' : 'Futures'}</td>
                   <td>
                     {o.type}
                     {o.reduceOnly && <span className="ml-1 text-[12px] text-faint">reduce-only</span>}
@@ -651,48 +704,6 @@ function PortfolioView({
         )}
       </Panel>
 
-      <Panel title="Tranzacții recente (7 zile)" icon={History} flush>
-        {p.fills.length === 0 ? (
-          <div>
-            <Empty>Nicio tranzacție în ultimele 7 zile.</Empty>
-          </div>
-        ) : (
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Data</th>
-                <th>Simbol</th>
-                <th>Direcție</th>
-                <th className="text-right">Preț</th>
-                <th className="text-right">Cantitate</th>
-                <th className="text-right">Valoare</th>
-                <th className="text-right">Comision</th>
-              </tr>
-            </thead>
-            <tbody>
-              {p.fills.map((f) => (
-                <tr key={`${f.market}-${f.id}`}>
-                  <td className="num text-[12px] text-muted">{fmtDateTime(f.timestamp, tz)}</td>
-                  <td>
-                    <span className="inline-flex items-center gap-2">
-                      <CoinLogo coin={f.symbol.split('/')[0] ?? f.symbol} size={16} badge={stocks} square={stocks} />
-                      {stocks ? f.symbol.split('/')[0] : f.symbol}
-                    </span>{' '}
-                    <span className="text-[12px] text-faint">{stocks ? (f.market === 'spot' ? '' : 'derivat') : f.market === 'spot' ? 'spot' : 'futures'}</span>
-                  </td>
-                  <td className={f.side === 'buy' ? 'text-bull' : 'text-bear'}>{f.side === 'buy' ? 'Cumpărare' : 'Vânzare'}</td>
-                  <td className="num text-right">{fmtPrice(f.price, digits(f.price))}</td>
-                  <td className="num text-right">{fmtNum(f.amount, 8)}</td>
-                  <td className="num text-right">{fmtNum(f.cost, 2)}</td>
-                  <td className="num text-right text-muted">
-                    {fmtNum(f.fee, 6)} {f.feeCurrency ?? ''}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </Panel>
     </div>
   );
 }
@@ -734,6 +745,9 @@ export default function TradesPage() {
   return <AccountsView list={list} current={current} onSelect={setSelected} onAdd={() => setWizard(true)} wizardEl={wizardEl} />;
 }
 
+/** FD-TRADESMOBILE: an account's button; on a phone a little smaller, its text over two lines when it must. */
+const ACCOUNT_BTN = 'btn max-sm:min-h-[44px] max-sm:px-2.5 max-sm:text-[12.5px] max-sm:leading-tight max-sm:text-center';
+
 /** The page with accounts: the top row (accounts, „Reîmprospătează”, „Adaugă un cont”) and the chosen account. */
 function AccountsView({ list, current, onSelect, onAdd, wizardEl }: { list: AccountView[]; current: AccountView; onSelect: (id: number) => void; onAdd: () => void; wizardEl: React.ReactNode }) {
   const [period, setPeriod] = useState<StatsPeriod>(readPeriod);
@@ -757,25 +771,41 @@ function AccountsView({ list, current, onSelect, onAdd, wizardEl }: { list: Acco
   const [reverse, setReverse] = useState<{ accountId: number; symbol: string; side: 'long' | 'short' } | null>(null);
   const closeReverse = useCallback(() => setReverse(null), []);
   const closeEnabling = useCallback(() => setEnabling(false), []);
+  // FD-TRADESMOBILE: on a phone the accounts' row scrolls sideways; the chosen one is brought into view, sideways only
+  // (scrollIntoView could move the page too).
+  const accountsRow = useRef<HTMLDivElement>(null);
+  useRevealInRow(accountsRow, current.id);
+  const paper = current.exchange === 'paper';
+  const [paperDialog, setPaperDialog] = useState<'settings' | 'reset' | null>(null);
+  const closePaperDialog = useCallback(() => setPaperDialog(null), []);
   return (
     <div className="flex w-full flex-col gap-3.5">
-      <div className="flex flex-wrap items-center gap-3">
+      {/* FD-TRADESMOBILE: on a phone everything below the title takes the full width, a row each: the accounts, the
+          period (its label above it), „Ordin nou”, the account's buttons two by two, all of one size. */}
+      <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
         <h1 className="page-title">Tranzacții</h1>
-        <div className="seg" role="group" aria-label="Cont">
+        <div ref={accountsRow} className="seg max-sm:row-fill" role="group" aria-label="Cont">
           {list.map((a) => (
-            <button key={a.id} type="button" aria-pressed={a.id === current.id} onClick={() => onSelect(a.id)} className="inline-flex items-center gap-1.5">
+            <button
+              key={a.id}
+              type="button"
+              aria-pressed={a.id === current.id}
+              onClick={() => onSelect(a.id)}
+              className="inline-flex items-center gap-1.5"
+            >
               <ProviderLogo id={a.exchange} size={16} />
               {a.label}
+              {a.exchange === 'paper' && <PaperBadge />}
             </button>
           ))}
         </div>
         {/* FD-TRADESTATS §2, FD-UIPOLISH: the period of the closed trades and the buttons share the top row (FD-BROKERSTATS: every account). */}
-        <div className="ml-auto flex flex-wrap items-center gap-2">
-          <div className="flex items-center gap-2">
+        <div className="flex flex-col gap-3 sm:ml-auto sm:flex-row sm:flex-wrap sm:items-center sm:gap-2">
+          <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-2">
             <span id="trades-period" className="text-[12.5px] text-muted">
               Tranzacții închise în
             </span>
-            <div className="seg" role="group" aria-labelledby="trades-period">
+            <div className="seg max-sm:row-fill" role="group" aria-labelledby="trades-period">
               {PERIODS.map((x) => (
                 <button key={x.id} type="button" aria-pressed={x.id === period} onClick={() => x.id !== period && choosePeriod(x.id)}>
                   {x.label}
@@ -783,35 +813,50 @@ function AccountsView({ list, current, onSelect, onAdd, wizardEl }: { list: Acco
               ))}
             </div>
           </div>
-          {current.trading.enabled ? (
-            <>
-              <button className="btn btn-primary" onClick={() => setTicket({ accountId: current.id, kind: current.kind })}>
-                <ArrowRightLeft size={14} aria-hidden /> Ordin nou
-              </button>
+          {current.trading.enabled && (
+            <button className="btn btn-primary max-sm:w-full" onClick={() => setTicket({ accountId: current.id, kind: current.kind })}>
+              <ArrowRightLeft size={14} aria-hidden /> Ordin nou
+            </button>
+          )}
+          {/* Two by two on a phone, each as wide and tall as the others; FIX-MOBILESYM2: an odd last one takes the whole
+              row, as the odd last card does (never centred). On a wide screen the grid is gone (`contents`): the buttons stay in
+              the row. */}
+          <div className="grid grid-cols-2 gap-2 sm:contents max-sm:[&>:last-child:nth-child(odd)]:col-span-2">
+            {/* FD-PAPER §6: a profile trades always: its settings and its reset instead of the switch. */}
+            {paper ? (
+              <>
+                <button className={ACCOUNT_BTN} onClick={() => setPaperDialog('settings')}>
+                  <Settings2 size={14} className="shrink-0" aria-hidden /> Setări profil
+                </button>
+                <button className={ACCOUNT_BTN} onClick={() => setPaperDialog('reset')}>
+                  <RotateCcw size={14} className="shrink-0" aria-hidden /> Resetează
+                </button>
+              </>
+            ) : current.trading.enabled ? (
               <button
-                className="btn"
+                className={ACCOUNT_BTN}
                 disabled={disable.isPending}
                 title="Oprește tranzacționarea pe acest cont"
                 onClick={() => {
                   if (window.confirm(`Oprești tranzacționarea pe „${current.label}”? Ordinele deja plasate rămân pe platformă.`)) disable.mutate();
                 }}
               >
-                <Power size={14} aria-hidden /> Oprește tranzacționarea
+                <Power size={14} className="shrink-0" aria-hidden /> Oprește tranzacționarea
               </button>
-            </>
-          ) : (
-            current.trading.supported && (
-              <button className="btn" onClick={() => setEnabling(true)}>
-                <ArrowRightLeft size={14} aria-hidden /> Pornește tranzacționarea
-              </button>
-            )
-          )}
-          <button className="btn" onClick={() => refresh.mutate()} disabled={refresh.isPending}>
-            <RefreshCw size={14} className={clsx(refresh.isPending && 'animate-spin')} aria-hidden /> Reîmprospătează
-          </button>
-          <button className="btn" onClick={onAdd}>
-            <Plus size={15} aria-hidden /> Adaugă un cont
-          </button>
+            ) : (
+              current.trading.supported && (
+                <button className={ACCOUNT_BTN} onClick={() => setEnabling(true)}>
+                  <ArrowRightLeft size={14} className="shrink-0" aria-hidden /> Pornește tranzacționarea
+                </button>
+              )
+            )}
+            <button className={ACCOUNT_BTN} onClick={() => refresh.mutate()} disabled={refresh.isPending}>
+              <RefreshCw size={14} className={clsx('shrink-0', refresh.isPending && 'animate-spin')} aria-hidden /> Reîmprospătează
+            </button>
+            <button className={ACCOUNT_BTN} onClick={onAdd}>
+              <Plus size={15} className="shrink-0" aria-hidden /> Adaugă un cont
+            </button>
+          </div>
         </div>
       </div>
       {refresh.isError && <Warning>Reîmprospătarea nu a reușit: {errorMessage(refresh.error)}</Warning>}
@@ -830,12 +875,16 @@ function AccountsView({ list, current, onSelect, onAdd, wizardEl }: { list: Acco
       {current.trading.reason && <p className="text-[12.5px] text-faint">{current.trading.reason} Contul rămâne doar pentru citire.</p>}
       {current.lastError && <Warning>Ultima eroare: {current.lastError}</Warning>}
       <PortfolioView key={current.id} account={current} period={period} onTicket={setTicket} onModify={setModify} onReverse={(r) => setReverse({ ...r, accountId: current.id })} />
-      <TradeJournal account={current} />
+      {/* FD-TRADES: apart from the portfolio, so a platform that cannot be read still shows its bots' trades. FIX-TRADESWITCH:
+          its own key, unlike the portfolio's (two siblings with one key left the old account's panels on screen). */}
+      <TradeHistoryPanel key={`history-${current.id}`} account={current} period={period} />
       {wizardEl}
       {ticket && <OrderTicket seed={ticket} onClose={closeTicket} />}
       {modify && modify.account.id === current.id && <ModifyTicket seed={modify} onClose={closeModify} />}
       {reverse && reverse.accountId === current.id && <ReverseDialog account={current} symbol={reverse.symbol} side={reverse.side} onClose={closeReverse} />}
       {enabling && <EnableTradingDialog account={current} onClose={closeEnabling} />}
+      {paper && paperDialog === 'settings' && <PaperSettingsDialog account={current} onClose={closePaperDialog} />}
+      {paper && paperDialog === 'reset' && <PaperResetDialog account={current} onClose={closePaperDialog} />}
     </div>
   );
 }

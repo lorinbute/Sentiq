@@ -12,6 +12,32 @@ const headlines = JSON.parse(readFileSync(fileURLToPath(new URL('./__fixtures__/
 const lab = (s: number) => (s > 0.2 ? 1 : s < -0.2 ? -1 : 0);
 
 describe('domain rules', () => {
+  it('FIX-SENTWEIGHT: dearer energy is bad for the market, cheaper good; forecasts and energy shares left to others', () => {
+    const rule = (t: string) => applyRules(t).hits.map((h) => [h.id, h.score]);
+    expect(rule('Oil prices dip as markets look to recovering supplies')).toEqual([['energy-down', 0.6]]);
+    expect(rule('US diesel below $6 a gallon at 2-month low on easing tensions')).toEqual([['energy-down', 0.6]]);
+    expect(rule('Natural gas prices plunge 10%')).toEqual([['energy-plunge', 0.7]]);
+    expect(rule('Electricity prices soar in Europe')).toEqual([['energy-spike', -0.7]]);
+    expect(rule('Gasoline prices rise for a third week')).toEqual([['energy-up', -0.6]]);
+    expect(rule("Japan's economy contracts as elevated energy costs bite")).toEqual([['energy-up', -0.6]]);
+    expect(rule('India’s wholesale inflation accelerates to 12.29% on fuel price surge')).toEqual([
+      ['inflation-hot', -0.7],
+      ['energy-spike', -0.7],
+    ]);
+    // A forecast: the model decides (no "price target" rule on it).
+    expect(rule('UBS sees Brent hitting $110 as tight supply leaves oil vulnerable')).toEqual([['energy-forecast', 0]]);
+    expect(rule('Goldman sees Brent at $78 by end-2027 as oil surplus returns')).toEqual([['energy-forecast', 0]]);
+    // Negated: the other way.
+    expect(rule('Oil prices fail to rise despite OPEC cut')).toEqual([['energy-up', 0.6]]);
+    // Energy companies' shares are the market's rules; a network's gas is not energy.
+    expect(rule('Oil stocks rise')).toEqual([['risk-up', 0.6]]);
+    expect(rule('Ethereum gas prices fall to record lows')).toEqual([['fees-low', 0]]);
+    expect(rule('Gas fees drop sharply')).toEqual([['fees-low', 0]]);
+    // At the pump: energy getting cheaper. Palm oil is food, not energy.
+    expect(rule('Gas prices fall for a third week')).toEqual([['energy-down', 0.6]]);
+    expect(rule('Palm oil prices rise on weak output')).not.toContainEqual(['energy-up', -0.6]);
+  });
+
   it('never inverts the polarity of the labelled headline set and labels ≥ 44/50 exactly', () => {
     let exact = 0;
     const flips: string[] = [];
@@ -292,6 +318,7 @@ describe('scanner summary', () => {
       uptrend: [],
       markers: [],
       signals: [{ ...signal, side: 'long' as const, bar: 1 }, signal],
+      setups: [],
       alerts: [],
       atr: { side: 'long' as const, tp: 130, sl: 95, fromBar: 1, toBarTp: 50, toBarSl: 50, labelBar: 5, showLines: true, showLabels: true },
       atrShort: { side: 'short' as const, tp: 78, sl: 106, fromBar: 3, toBarTp: 50, toBarSl: 50, labelBar: 5, showLines: true, showLabels: true },

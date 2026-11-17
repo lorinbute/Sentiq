@@ -42,6 +42,8 @@ interface Opts {
   /** The stop orders' listing fails (a timeout). */
   failTrigger?: boolean;
   uta?: boolean;
+  /** FIX-KUCOINMARGIN: the pair's margin mode on KuCoin ("CROSS" / "ISOLATED"); not set: not readable. */
+  pairMargin?: string;
 }
 
 /** A ccxt-like client with open orders and positions; every request recorded. */
@@ -90,6 +92,12 @@ function client(id: string, o: Opts = {}) {
     async setMarginMode(...args: unknown[]) {
       calls.push({ fn: 'setMarginMode', args });
     },
+    // FIX-KUCOINMARGIN: the pair's margin mode on KuCoin's classic futures (not set: not readable, as before).
+    async fetchMarginMode(...args: unknown[]) {
+      calls.push({ fn: 'fetchMarginMode', args });
+      if (!o.pairMargin) throw new ccxt.NotSupported('not read here');
+      return { info: { marginMode: o.pairMargin } };
+    },
     async createOrder(...args: unknown[]) {
       calls.push({ fn: 'createOrder', args });
       if (o.failCreate) throw o.failCreate;
@@ -125,7 +133,7 @@ const trader = (exchange: string, o: Opts = {}) => {
   const t = new CcxtTrader(exchange, { spot: c.ex, futures: exchange === 'kucoin' ? c.ex : null }, silentLogger);
   return { t, calls: c.calls };
 };
-const sent = (calls: { fn: string; args: unknown[] }[]) => calls.filter((c) => !['fetchOpenOrders', 'setLeverage', 'setMarginMode'].includes(c.fn)).map((c) => [c.fn, ...c.args]);
+const sent = (calls: { fn: string; args: unknown[] }[]) => calls.filter((c) => !['fetchOpenOrders', 'setLeverage', 'setMarginMode', 'fetchMarginMode'].includes(c.fn)).map((c) => [c.fn, ...c.args]);
 const ticket = (changes: ModifyTicket['changes'], extra: Partial<ModifyTicket> = {}): ModifyTicket => ({ accountId: 1, idemKey: KEY, market: 'futures', symbol: PERP, position: { side: 'long' }, changes, ...extra });
 const longPos = { symbol: PERP, side: 'long', contracts: 10, entryPrice: 59000, marginMode: 'isolated', info: {} };
 const slOrder = { id: 'sl1', symbol: PERP, type: 'market', side: 'sell', price: null, triggerPrice: 57000, amount: 10, reduceOnly: true, info: { stop: 'down' } };
@@ -418,5 +426,37 @@ describe('a futures position turned the other way (FD-REVERSE)', () => {
     const plan = await t.normalizeReverse(reverseTicket('short'));
     expect(plan.preview.errors).toContain('Poziția nu mai e deschisă.');
     expect(sent(calls)).toEqual([]);
+  });
+});
+
+describe("KuCoin's classic futures: closings, replacements and the reverse take the pair's margin (FIX-KUCOINMARGIN)", () => {
+  // ccxt names a KuCoin position's margin from `crossMode`, which its own notes call always false: here it says isolated
+  // while the pair (and so its position) is on cross. KuCoin keeps one margin mode per pair.
+  it('a stop loss moved on a cross pair goes with cross; nothing switched', async () => {
+    const { t, calls } = trader('kucoin', { orders: [slOrder], positions: [longPos], pairMargin: 'CROSS' });
+    const r = await t.modify(await t.normalizeModify(ticket([{ what: 'sl', orderId: 'sl1', level: 58000 }])));
+    expect(r.status).toBe('done');
+    expect(sent(calls)[0]).toEqual(['createOrder', PERP, 'market', 'sell', 10, undefined, { stopLossPrice: 58000, reduceOnly: true, marginMode: 'cross' }]);
+    expect(calls.some((c) => c.fn === 'setMarginMode')).toBe(false);
+  });
+
+  it("an entry replaced takes the pair's margin over the one read from the order, its leverage set on the cross pair", async () => {
+    const entry = { id: 'e1', symbol: PERP, type: 'limit', side: 'buy', price: 58000, triggerPrice: null, amount: 5, reduceOnly: false, info: { leverage: '5', marginMode: 'ISOLATED' } };
+    const { t, calls } = trader('kucoin', { orders: [entry], pairMargin: 'CROSS' });
+    const r = await t.modify(await t.normalizeModify(ticket([{ what: 'order', orderId: 'e1', trigger: false, price: 57500 }], { position: undefined })));
+    expect(r.status).toBe('done');
+    expect(calls.some((c) => c.fn === 'setMarginMode')).toBe(false);
+    expect(calls.find((c) => c.fn === 'setLeverage')?.args).toEqual([5, PERP, { marginMode: 'cross' }]);
+    expect(sent(calls).find((c) => c[0] === 'createOrder')?.[6]).toMatchObject({ marginMode: 'cross' });
+  });
+
+  it("the reverse: both orders and the dialog take the pair's margin; nothing switched", async () => {
+    const long = { ...longPos, contractSize: 0.001, leverage: 5 };
+    const { t, calls } = trader('kucoin', { orders: [], positions: [long], pairMargin: 'CROSS' });
+    const plan = await t.normalizeReverse({ accountId: 1, idemKey: KEY, symbol: PERP, side: 'long' });
+    expect(plan.preview).toMatchObject({ marginMode: 'cross', errors: [] });
+    expect((await t.reverse(plan)).status).toBe('done');
+    expect(sent(calls).filter((c) => c[0] === 'createOrder').map((c) => (c[6] as Record<string, unknown>).marginMode)).toEqual(['cross', 'cross']);
+    expect(calls.some((c) => c.fn === 'setMarginMode')).toBe(false);
   });
 });

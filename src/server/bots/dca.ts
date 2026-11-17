@@ -7,12 +7,15 @@ export const newDca = (): DcaState => ({ cycle: 0, cooldownUntil: 0, done: false
 
 export const dealAvg = (d: DcaDeal): number => d.cost / d.qty;
 
-/** The take profit (from the average) and the stop loss (from the base order's price) of a cycle. */
+/**
+ * The take profit (from the average) and the stop loss (from the base order's price) of a cycle; FIX-BOTDRAG: a level
+ * moved on the chart instead.
+ */
 export function dealLevels(cfg: DcaConfig, d: DcaDeal): { tp: number; sl: number | null } {
   const dir = d.side === 'long' ? 1 : -1;
   return {
-    tp: dealAvg(d) * (1 + (dir * cfg.takeProfit) / 100),
-    sl: cfg.stopLoss !== null ? d.basePrice * (1 - (dir * cfg.stopLoss) / 100) : null,
+    tp: d.tp ?? dealAvg(d) * (1 + (dir * cfg.takeProfit) / 100),
+    sl: d.sl ?? (cfg.stopLoss !== null ? d.basePrice * (1 - (dir * cfg.stopLoss) / 100) : null),
   };
 }
 
@@ -30,10 +33,16 @@ export type DcaAction =
   | { kind: 'close'; reason: 'tp' | 'sl' }
   | null;
 
+/**
+ * No cycle open and none to follow: the last one ended the bot (`done`), the repeat is off after one, or the limit is
+ * reached (FD-BOTEDIT §2: the settings may have changed since the last cycle closed).
+ */
+export const dcaOver = (cfg: DcaConfig, st: DcaState): boolean => !st.deal && (st.done || (st.cycle >= 1 && !cfg.repeat) || (cfg.maxCycles !== null && st.cycle >= cfg.maxCycles));
+
 /** What the cycle does at `price`: the take profit and the stop loss first, then the safety orders reached. */
 export function dcaStep(cfg: DcaConfig, st: DcaState, price: number, now: number, canOpen: boolean): DcaAction {
   const d = st.deal;
-  if (!d) return !st.done && now >= st.cooldownUntil && canOpen ? { kind: 'open', margin: cfg.baseOrder } : null;
+  if (!d) return !dcaOver(cfg, st) && now >= st.cooldownUntil && canOpen ? { kind: 'open', margin: cfg.baseOrder } : null;
   const long = d.side === 'long';
   const { tp, sl } = dealLevels(cfg, d);
   if (reached(price, tp, long)) return { kind: 'close', reason: 'tp' };

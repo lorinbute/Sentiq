@@ -48,7 +48,7 @@ export interface Driver {
   without?: number;
   effect?: number;
   /** FD-WHYPLAIN, as served: why it weighs what it weighs. */
-  weighs?: { relevance: number; impact: number; sourceWeight: number; spec: number; flags: string[]; decay: number; clusterN: number; cap: number; share: number };
+  weighs?: { relevance: number; impact: number; sourceWeight: number; spec: number; theme: number; flags: string[]; decay: number; clusterN: number; cap: number; share: number };
 }
 
 /** "De ce acest scor?" (FD-SCOREWHY): the engine and its details, and what weighs the item, as the News page shows them. */
@@ -84,12 +84,19 @@ export interface IndexResult {
 
 const LABEL_T = 0.2;
 const SPEC = { sponsored: 0.2, speculative: 0.5, recap: 0.5 } as const;
+/** FIX-SENTWEIGHT: an energy or AI story weighs this much more than another of the same importance (once for both). */
+export const THEME_FACTOR = 1.5;
 const CONFIDENCE = { medium: 3, high: 10 } as const;
 
 export function specFactor(flags: string[]): number {
   if (flags.includes('sponsored')) return SPEC.sponsored;
   if (flags.includes('speculative') || flags.includes('recap')) return SPEC.speculative;
   return 1;
+}
+
+/** FIX-SENTWEIGHT: the theme's factor (energy, AI). */
+export function themeFactor(flags: string[]): number {
+  return flags.includes('energy') || flags.includes('ai') ? THEME_FACTOR : 1;
 }
 
 export function confidenceFor(weight: number): Confidence {
@@ -150,6 +157,7 @@ interface Weighted {
   clusterN: number;
   cluster: number;
   spec: number;
+  theme: number;
   /** The source cap's factor on `w` (1 when the cap did not touch the source); set by `aggregate`. */
   cap: number;
 }
@@ -163,11 +171,13 @@ function weigh(items: IndexItem[], asOf: number, p: IndexParams): Weighted[] {
     const decay = Math.pow(0.5, age / halfLifeMs);
     const n = clusterSize.get(it.clusterId) ?? 1;
     const spec = specFactor(it.flags);
-    const base = it.relevance * it.impact * it.sourceWeight * spec * decay;
+    const theme = themeFactor(it.flags);
+    // × theme: 1 for the others, so their weights stay the same to the last digit.
+    const base = it.relevance * it.impact * it.sourceWeight * spec * theme * decay;
     // In this order (as before FD-INDEXWHY): the same weights to the last digit, so the history stays as it was.
     const w = (base * (1 + p.clusterBoost * Math.log2(n))) / n;
     const cluster = (1 + p.clusterBoost * Math.log2(n)) / n;
-    return { item: it, w: Number.isFinite(w) && w > 0 ? w : 0, s: it.sentiment as number, decay, clusterN: n, cluster, spec, cap: 1 };
+    return { item: it, w: Number.isFinite(w) && w > 0 ? w : 0, s: it.sentiment as number, decay, clusterN: n, cluster, spec, theme, cap: 1 };
   });
 }
 
@@ -261,7 +271,7 @@ export function computeIndex(allItems: IndexItem[], window: { start: number; end
 }
 
 /** The rules besides `IndexParams` (FD-INDEXWHY: shown with the explanation). */
-export const INDEX_RULES = { labelT: LABEL_T, confidence: CONFIDENCE, spec: SPEC } as const;
+export const INDEX_RULES = { labelT: LABEL_T, confidence: CONFIDENCE, spec: SPEC, theme: THEME_FACTOR } as const;
 
 export interface ExplainItem {
   id: string;
@@ -276,11 +286,13 @@ export interface ExplainItem {
   impact: number;
   sourceWeight: number;
   spec: number;
+  /** FIX-SENTWEIGHT: the theme's factor (1 without one). */
+  theme: number;
   decay: number;
   clusterN: number;
   cluster: number;
   cap: number;
-  /** relevance × impact × sourceWeight × spec × decay × cluster × cap. */
+  /** relevance × impact × sourceWeight × spec × theme × decay × cluster × cap. */
   weight: number;
   /** weight ÷ the day's total weight. */
   share: number;
@@ -329,6 +341,7 @@ export function explainIndex(allItems: IndexItem[], window: { start: number; end
       impact: r.item.impact,
       sourceWeight: r.item.sourceWeight,
       spec: r.spec,
+      theme: r.theme,
       decay: r.decay,
       clusterN: r.clusterN,
       cluster: r.cluster,

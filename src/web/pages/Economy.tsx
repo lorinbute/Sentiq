@@ -1,6 +1,6 @@
 // The Economy page (FD-ECON): the latest economic indicators of the main markets, by country, with the next
 // release of each. Data: the TradingView economic calendar, through /api/economy.
-import { Fragment, useMemo, useState } from 'react';
+import { Fragment, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router';
 import { clsx } from 'clsx';
@@ -9,7 +9,7 @@ import type { EconIndicator, EconomyView } from '../../shared/api-types.ts';
 import { api, qs } from '../api.ts';
 import { filterEconomy, fmtEconChange, fmtEconPeriod, fmtEconValue, surprise, TONE_FILL, TONE_TEXT, toneOf, type Tone } from '../econ-format.ts';
 import { fmtAgo, fmtDate, fmtDateTime, fmtIn } from '../format.ts';
-import { useNow, useTz } from '../hooks.ts';
+import { useNow, useRevealInRow, useTz } from '../hooks.ts';
 import { sparkPath } from '../spark.ts';
 import { ErrorNote, Loading, Panel, Warning } from '../components/ui.tsx';
 
@@ -94,11 +94,19 @@ function Change({ i, className }: { i: EconIndicator; className?: string }) {
 const values = (i: EconIndicator) => i.history.map((h) => h[1]);
 
 /**
- * "15 oct., 15:30 · în 2 z 3 h", "în așteptare (trebuia la …)", or that it is not scheduled yet. `stacked`: the
- * countdown on its own line (a narrow card on a phone).
+ * "15 oct., 15:30 · în 2 z 3 h", "în așteptare (trebuia la …)", "publicat …, valoarea nu a venit încă de la sursă"
+ * (FD-CALACTUAL §4: the same institution's other values of that moment came), or that it is not scheduled yet.
+ * `stacked`: the countdown on its own line (a narrow card on a phone).
  */
 function NextRelease({ i, tz, now, stacked }: { i: EconIndicator; tz: string; now: number; stacked?: boolean }) {
   if (!i.next) return <span className="text-faint">nu e anunțată încă</span>;
+  if (i.next.overdue && i.next.released) {
+    return (
+      <span className="text-faint">
+        publicat <span className="num whitespace-nowrap">{fmtDateTime(i.next.ts, tz)}</span> · valoarea nu a venit încă de la sursă
+      </span>
+    );
+  }
   if (i.next.overdue) return <span className="text-warn">în așteptare (trebuia {fmtDateTime(i.next.ts, tz)})</span>;
   return (
     <span>
@@ -273,7 +281,8 @@ export default function EconomyPage() {
   const tz = useTz();
   // The countdowns are in minutes; hundreds of rows need no more than one render a minute.
   const now = useNow(60_000);
-  const q = useQuery({ queryKey: ['economy'], queryFn: () => api.get<EconomyView>('/api/economy'), refetchInterval: 5 * 60_000 });
+  // FD-CALACTUAL §4: as often as the Calendar, so a value shown there is here too (the server keeps the page a minute).
+  const q = useQuery({ queryKey: ['economy'], queryFn: () => api.get<EconomyView>('/api/economy'), refetchInterval: 60_000 });
   const [search, setSearch] = useState('');
   const [importantOnly, setImportantOnly] = useState(readImportantOnly);
   const toggleImportant = (on: boolean) => {
@@ -300,6 +309,9 @@ export default function EconomyPage() {
       { replace: true },
     );
 
+  // FD-MOBILESYM §3: the chosen country in view in the phone's scrolling row (once the row is there).
+  const countryRow = useRef<HTMLDivElement>(null);
+  useRevealInRow(countryRow, `${selected}|${q.isSuccess}`);
   if (q.isPending) return <Loading />;
   if (!q.data) return <ErrorNote error={q.error} onRetry={() => void q.refetch()} />;
   const withResults = countries.filter((c) => c.indicators.length > 0);
@@ -327,7 +339,8 @@ export default function EconomyPage() {
 
       {/* Two rows on purpose: the countries (filters) above, the search and "important only" under them. */}
       <div className="flex flex-col gap-2.5 rounded-[14px] border border-line bg-panel px-3 py-2.5">
-        <div role="group" aria-label="Filtrează după țară" className="flex flex-wrap gap-1.5">
+        {/* FD-MOBILESYM §3: on a phone one row, scrolling sideways, the chosen country brought into view. */}
+        <div ref={countryRow} role="group" aria-label="Filtrează după țară" className="flex flex-wrap gap-1.5 max-sm:row-fill">
           <button type="button" className="chip" aria-pressed={selected === null} onClick={() => choose(null)}>
             Toate <span className="num text-faint">{total}</span>
           </button>
@@ -341,9 +354,9 @@ export default function EconomyPage() {
             ))}
         </div>
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-          <label className="relative flex items-center">
+          <label className="relative flex items-center max-sm:w-full">
             <Search size={14} className="pointer-events-none absolute left-2.5 text-faint" aria-hidden />
-            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Caută un indicator" aria-label="Caută un indicator" className="w-60 max-w-full pl-8" />
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Caută un indicator" aria-label="Caută un indicator" className="w-60 max-w-full pl-8 max-sm:w-full" />
           </label>
           <label className="inline-flex items-center gap-2 text-[13px] whitespace-nowrap">
             <input type="checkbox" checked={importantOnly} onChange={(e) => toggleImportant(e.target.checked)} />

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { countRo, fmtBytes, fmtCountdown } from './format.ts';
+import { countRo, fmtBytes, fmtCountdown, positionAmount } from './format.ts';
 
 describe('fmtCountdown', () => {
   const now = Date.parse('2026-10-12T18:46:00Z');
@@ -34,5 +34,29 @@ describe('countRo', () => {
     expect(countRo(101, 'desen', 'desene')).toBe('101 desene');
     expect(countRo(120, 'desen', 'desene')).toBe('120 de desene');
     expect(countRo(200, 'desen', 'desene')).toBe('200 de desene');
+  });
+});
+
+// FD-TRADESMOBILE: on a phone's narrow card only the unit of an amount may go to the next line.
+describe('breakableUnit', () => {
+  it('turns only the no-break space before the unit into an ordinary one', async () => {
+    const { breakableUnit } = await import('./format.ts');
+    expect(breakableUnit('1.000,00\u00a0USD')).toBe('1.000,00 USD');
+    expect(breakableUnit('-1.234,50\u00a0USD')).toBe('-1.234,50 USD');
+    expect(breakableUnit('70\u00a0%')).toBe('70 %');
+    // The amount's own no-break spaces (none in ro-RO, but a group separator could be one) stay; a value without a unit too.
+    expect(breakableUnit('1\u00a0000,00\u00a0USD')).toBe('1\u00a0000,00 USD');
+    expect(breakableUnit('7')).toBe('7');
+    expect(breakableUnit('—')).toBe('—');
+  });
+});
+
+describe('positionAmount (FIX-POSAMOUNT)', () => {
+  it('the money a futures position took, without leverage: dollars for a dollar coin, else its settlement coin; a dash unknown', () => {
+    expect(positionAmount({ symbol: 'BTC/USDT:USDT', margin: 4080.4 })).toBe(`4.080,40\u00a0USD`);
+    expect(positionAmount({ symbol: 'BTC/USDT', margin: 25502.5 })).toBe(`25.502,50\u00a0USD`);
+    expect(positionAmount({ symbol: 'BTC/USD:BTC', margin: 0.04 })).toBe('0,04 BTC');
+    expect(positionAmount({ symbol: 'BTC/USDT:USDT', margin: null })).toBe('—');
+    expect(positionAmount({ symbol: 'BTC/USDT:USDT' })).toBe('—');
   });
 });
