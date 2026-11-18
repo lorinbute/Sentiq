@@ -4,8 +4,6 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { testDb } from '../test/db.ts';
 import { silentLogger } from '../log.ts';
 import { setFetchImpl } from '../net/http.ts';
-import type { AiService } from '../ai/service.ts';
-import type { AiClient } from '../ai/types.ts';
 import { MIGRATIONS } from '../db/schema.ts';
 import { DESCRIPTION_MAX, parseTvFundamentals, pickCoinId, plainDescription, SymbolProfiles } from './profile.ts';
 
@@ -88,7 +86,6 @@ describe("CoinGecko's description (FD-WATCHLISTS §3)", () => {
 
 describe('the profiles, on the test schema', () => {
   afterEach(() => setFetchImpl(null));
-  const noAi = {} as AiService;
 
   it("a coin's profile from CoinGecko, kept a week; one with a part that failed is not kept", async () => {
     const db = await testDb();
@@ -104,7 +101,7 @@ describe('the profiles, on the test schema', () => {
         { status: 200 },
       );
     }) as typeof fetch);
-    const p = new SymbolProfiles(db, noAi, silentLogger, { companyProfile: async () => null });
+    const p = new SymbolProfiles(db, silentLogger, { companyProfile: async () => null });
     const failed = await p.profile('crypto', 'SOL');
     expect(failed.problems).toEqual([{ part: 'description', message: 'CoinGecko: prea multe cereri acum' }]);
     fail = false;
@@ -129,41 +126,25 @@ describe('the profiles, on the test schema', () => {
   it('a stock Nasdaq has no description of (a fund, by TradingView): no results, no description', async () => {
     const db = await testDb();
     setFetchImpl((async () => new Response(tvBody(row('QQQ', { type: 'fund', rev: null, eps: null })), { status: 200 })) as typeof fetch);
-    const p = new SymbolProfiles(db, noAi, silentLogger, { companyProfile: async () => null });
+    const p = new SymbolProfiles(db, silentLogger, { companyProfile: async () => null });
     expect(await p.profile('stock', 'QQQ', 'Invesco QQQ Trust')).toMatchObject({ kind: 'fund', name: 'Invesco QQQ Trust', description: null, quarters: [], next: null, problems: [] });
     // Nasdaq down: said in its place, the results still there.
     setFetchImpl((async () => new Response(tvBody(row('TSLA')), { status: 200 })) as typeof fetch);
-    const down = new SymbolProfiles(db, noAi, silentLogger, { companyProfile: async () => Promise.reject(new Error('Nasdaq: HTTP 503')) });
+    const down = new SymbolProfiles(db, silentLogger, { companyProfile: async () => Promise.reject(new Error('Nasdaq: HTTP 503')) });
     const t = await down.profile('stock', 'TSLA');
     expect(t.problems).toEqual([{ part: 'description', message: 'Nasdaq: HTTP 503' }]);
     expect(t.quarters).toHaveLength(4);
   });
 
-  it('the translation: once per text, with the user’s AI, counted; then for everyone without asking again', async () => {
+  it('no translation (18 Nov 2026): a copy kept with one is served without it, and the service has no way to make one', async () => {
     const db = await testDb();
-    const asked: string[] = [];
-    const used: unknown[] = [];
-    const client: AiClient = {
-      provider: 'gemini',
-      model: 'gemini-3.8-flash',
-      generate: async (req) => {
-        asked.push(req.prompt);
-        return { parsed: { text: ' Tesla face mașini electrice. ' } as never, stop: 'done', usage: { input: 30, output: 12 } };
-      },
-    };
-    const ai = {
-      config: async (userId: number) => ({ provider: 'gemini', model: 'gemini-3.8-flash', key: userId === 1 ? 'AIza-k' : null, scoring: false }),
-      client: () => client,
-      usage: { record: async (...a: unknown[]) => void used.push(a) },
-    } as unknown as AiService;
-    const p = new SymbolProfiles(db, ai, silentLogger, { companyProfile: async () => null });
-    expect(await p.translate(1, 'Tesla makes electric cars.')).toBe('Tesla face mașini electrice.');
-    expect(used).toEqual([[1, 'translate', { items: 1, input: 30, output: 12, model: 'gemini-3.8-flash' }]]);
-    // Another user, even one without a key: the one made already.
-    expect(await p.translate(2, 'Tesla makes electric cars.')).toBe('Tesla face mașini electrice.');
-    expect(asked).toHaveLength(1);
-    await expect(p.translate(2, 'Another text.')).rejects.toThrow('Fără o cheie AI, descrierea rămâne în engleză');
-    expect(await p.translation('Tesla makes electric cars.')).toBe('Tesla face mașini electrice.');
+    const kept = { kind: 'stock', symbol: 'TSLA', name: 'Tesla', description: { text: 'Tesla makes electric cars.', source: 'Nasdaq', lang: 'en' }, translated: 'Tesla face mașini electrice.', facts: [], quarters: [], next: null, problems: [], fetchedAt: Date.now() };
+    await db.run('INSERT INTO market_cache([key], value, fetched_at) VALUES (?, ?, ?)', ['profile:v1:stock:TSLA', JSON.stringify(kept), Date.now()]);
+    const p = new SymbolProfiles(db, silentLogger, { companyProfile: async () => null });
+    const shown = await p.profile('stock', 'TSLA');
+    expect(shown.description).toEqual({ text: 'Tesla makes electric cars.', source: 'Nasdaq', lang: 'en' });
+    expect('translated' in shown).toBe(false);
+    expect('translate' in p).toBe(false);
   });
 });
 

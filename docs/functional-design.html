@@ -18072,4 +18072,52 @@ SHORT SL    103.880,00
 <tr><td>„Valorile implicite” + „Salvează”</td><td>bifată din nou</td></tr>
 <tr><td>în aplicația iOS</td><td>aceeași bifă în formularul nativ al setărilor Slingshot (vine din aceeași descriere a câmpurilor)</td></tr>
 </tbody></table>
+
+<h2 id="fd-stocklogos--logo-urile-acțiunilor-18-nov-2026">FD-STOCKLOGOS — logo-urile acțiunilor (18 nov 2026)</h2>
+<p>Cererea: „mi-ar plăcea să pot să descarc și imaginile simbolurilor din stock market. M-am săturat să văd imagini generice pentru fiecare simbol.” · „imaginile de la simboluri trebuie să le descarci și pentru site-ul web, nu doar pentru aplicație.”</p>
+<h3>Comportament</h3>
+<ul>
+<li>O acțiune (sau un fond, ETF) are logo-ul companiei, peste tot unde azi are pătratul cu inițiale: Azi, banda de sus, Liste de urmărire și fișa simbolului, Știri, Grafice, Tranzacții (poziții, dețineri, ordine, istoric), căutarea ⌘K, „Adaugă simboluri”; la fel în aplicația iOS / iPadOS (și în widget-uri).</li>
+<li>Forma rămâne cea a acțiunilor: pătrat cu colțuri rotunjite (monedele rămân rotunde, cu logo-urile lor de până acum). Indicii păstrează iconița lor cu graficul.</li>
+<li>Sursa: logo-urile TradingView, aceeași sursă din care vin deja rezultatele trimestriale ale fișei. Serverul descarcă logo-ul unei acțiuni prima dată când e cerut și îl păstrează: 30 de zile, apoi îl ia din nou (dacă s-a schimbat). Toți utilizatorii folosesc aceeași copie.</li>
+<li>O acțiune fără logo la TradingView, sau când TradingView nu răspunde: pătratul cu inițiale, ca acum. Fără logo: se întreabă din nou peste 7 zile; fără răspuns: peste 10 minute.</li>
+<li>Logo-urile acțiunilor se văd doar cu contul deschis (serverul descarcă la cerere; nu se descarcă pentru cereri anonime).</li>
+<li>O acțiune cu același simbol ca o monedă (de ex. COIN) ia logo-ul companiei, nu pe al monedei: forma pătrată spune deja că e acțiune.</li>
+</ul>
+
+<h2 id="fd-newskind--companiile-dintr-o-știre-18-nov-2026">FD-NEWSKIND — companiile dintr-o știre (18 nov 2026)</h2>
+<p>Cererea: „Datele despre simboluri nu le aduci de pe crypto. Există foarte multe acțiuni tokenizate … Dacă eu citesc o știre despre Nike, vreau să citesc despre Nike, nu despre tokenul lui Nike.” · „Știrea este despre Disney … și tu aduci simbolul DIS USDT, care este Distributed AI în loc de Disney.”</p>
+<ul>
+<li>Fiecare știre spune care dintre simbolurile ei sunt companii. Site-ul și aplicația le arată ca acțiuni: logo-ul companiei, datele ei (descriere, rezultate), graficul acțiunii (<code>/charts/s/DIS</code>), nu al unei monede sau al unei acțiuni tokenizate cu același simbol.</li>
+<li>Regula, în ordine: un simbol din lista ta de urmărire e ce ai ales acolo; monedele principale (BTC, ETH, SOL …) nu sunt niciodată companii; un membru al indicilor (S&amp;P 500, Nasdaq-100, Dow Jones …) e compania (DIS = Disney, NKE = Nike); o acțiune listată în SUA pe care lista de monede nu o are e compania (a apărut ca „$XYZ” sau „NYSE: XYZ”); altfel e o monedă. Un indice (<code>^SPX</code>) rămâne indice.</li>
+<li>Se aplică pe loc și știrilor deja salvate (regula se aplică la citire, nu la preluarea știrii).</li>
+</ul>
+<h2 id="fd-notranslate--fără-traducerea-descrierilor-18-nov-2026">FD-NOTRANSLATE — fără traducerea descrierilor (18 nov 2026)</h2>
+<p>Cererea: „nu mai fă traducerea în limba română, pentru că consumă tokena aiurea. Pot să citesc și în engleză.”</p>
+<ul>
+<li>Descrierea unui simbol (fișa din Liste de urmărire, panoul din știre în aplicație) rămâne cum a scris-o sursa, cu „Sursa: Nasdaq.” / „Sursa: CoinGecko.” sub ea. Nimic nu mai cere traducerea, pe site sau în aplicație, deci nu se mai consumă tokeni AI pentru ea.</li>
+<li>Traducerile făcute până acum nu se mai arată.</li>
+</ul>
+
+<h3>FD-NEWSKIND · „Ce mișcă piața” (18 nov 2026)</h3>
+<p>Raport: „Pe pagina Azi, în «Ce mișcă piața» nu se afișează iconițele companiilor.”</p>
+<ul>
+<li>Știrile din „Ce mișcă piața” (cardul din Azi și lista întreagă, pe site și în aplicație; și ziua aleasă din istoric) spun și ele care simboluri sunt companii, cu aceeași regulă ca știrile: iconița e logo-ul companiei, în pătratul rotunjit, și pentru o companie neurmărită.</li>
+</ul>
+
+<h2 id="fd-aione--trimite-la-analiză-18-nov-2026">FD-AIONE — „Trimite la analiză” (18 nov 2026)</h2>
+<p>Cererea: „Dacă dau tap pe o știre care nu a fost analizată de AI, vreau … sub acel buton de deschidere încă un buton care spune «Trimite la analiză» și atunci trimiți doar acel articol la analiză.”</p>
+<ul>
+<li>Cine folosește AI-ul propriu pentru scorul știrilor (cheia salvată, scorul ales în Setări › AI) poate trimite o singură știre la AI. Butonul apare în aplicație, sub „Deschide articolul”, la o știre pe care AI-ul lui nu a analizat-o (scorul e al modelului local sau doar al regulilor).</li>
+<li>Se trimite doar acel titlu, într-un apel, oricare ar fi știrea: și una din afara indicelui (relevanță 0, „Altele”), și una mai veche de două zile. Rundele obișnuite nu le trimit pe acestea.</li>
+<li>Cât lucrează AI-ul, butonul arată „Se analizează…”. La răspuns, știrea are scorul AI-ului, motorul lui, importanța lui și „De ce”, iar rândul ei din listă are noul scor. Butonul dispare.</li>
+<li>O știre deja analizată nu se trimite din nou. Un răspuns fără scor, un AI care nu răspunde sau unul în pauză după o eroare sunt spuse sub buton, cu motivul. Nimic nu se păstrează, iar butonul rămâne pentru o nouă încercare. Fără AI propriu, butonul nu apare.</li>
+<li>Scorul intră unde intră și cele din runde: știrea, lista, indicele zilei (o știre din afara indicelui nu cântărește, ca până acum).</li>
+</ul>
+
+<h3>FD-STOCKLOGOS · Calendarul (18 nov 2026)</h3>
+<ul>
+<li>„Adaugi logo-ul companiilor la rezultate în calendar pe site.” Rezultatele trimestriale ale unei companii au logo-ul ei în locul iconiței evenimentului: în calendar, în „Urmează” pe Azi, în banda de sus a pieței și la „Următorul major”.</li>
+<li>Logo-urile au acum mereu mărimea cerută: în celula calendarului, logo-ul ieșea întins pe verticală, cât rândurile titlului.</li>
+</ul>
 </body></html>

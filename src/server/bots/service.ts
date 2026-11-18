@@ -124,7 +124,8 @@ function levelPositions(run: BotInput, st: BotState): BotPositionView[] {
   return exposure(run, st).positions.map((p) => (grid ? { ...p, sl: p.side === 'long' ? grid.stopBelow : grid.stopAbove, tp: null } : p));
 }
 
-const COLUMNS = 'id, user_id, name, strategy, execution, account_id, market, area, symbols, tf, config, status, status_reason, command, state, starts_at, ends_at, created_at, updated_at, ran_at';
+// FD-PUSH: `notify` too (the bell read from here; without it the list said „off” after it was turned on).
+const COLUMNS = 'id, user_id, name, strategy, execution, account_id, market, area, symbols, tf, config, status, status_reason, command, state, starts_at, ends_at, created_at, updated_at, ran_at, notify';
 
 /**
  * FD-BOTEDIT: what the engine runs the open positions with: the settings of the positions (`state.basis`) during a
@@ -189,6 +190,8 @@ export class BotService {
     return {
       id: row.id,
       name: row.name,
+      // FD-PUSH: its bell (its trades on the owner's devices).
+      notify: Boolean(row.notify),
       strategy: row.strategy,
       exec: row.execution,
       market: row.market,
@@ -348,8 +351,8 @@ export class BotService {
     // FIX-BOTDRAG: with the levels dragged on the chart that the engine has not read yet.
     const st = stateOf(row)?.st ?? parseState(row.state);
     const accounts = row.account_id !== null ? await this.accountsOf(userId) : new Map();
-    const history = await this.db.all<{ id: number; symbol: string; side: 'long' | 'short'; qty: number; entry: number; exit: number; pnl: number; fees: number; opened_at: number; closed_at: number; reason: BotTradeRow['reason'] }>(
-      'SELECT TOP (200) id, symbol, side, qty, entry, [exit], pnl, fees, opened_at, closed_at, reason FROM bot_trades WHERE bot_id = ? ORDER BY closed_at DESC, id DESC',
+    const history = await this.db.all<{ id: number; symbol: string; side: 'long' | 'short'; qty: number; entry: number; exit: number; pnl: number; fees: number; opened_at: number; closed_at: number; reason: BotTradeRow['reason']; lev: number | null }>(
+      'SELECT TOP (200) id, symbol, side, qty, entry, [exit], pnl, fees, opened_at, closed_at, reason, lev FROM bot_trades WHERE bot_id = ? ORDER BY closed_at DESC, id DESC',
       [id],
     );
     const events = await this.db.all<{ id: number; at: number; kind: BotEventRow['kind']; symbol: string | null; message: string; detail: string | null }>(
@@ -376,7 +379,7 @@ export class BotService {
               deal: deal ? { side: deal.side, basePrice: deal.basePrice, avg: dealAvg(deal), qty: deal.qty, filled: deal.filled, ...dealLevels(run.dca, deal), next: nextSafety(run.dca, deal) } : null,
             }
           : null,
-      history: history.map((t) => ({ id: t.id, symbol: t.symbol, side: t.side, qty: t.qty, entry: t.entry, exit: t.exit, pnl: t.pnl, fees: t.fees, openedAt: t.opened_at, closedAt: t.closed_at, reason: t.reason })),
+      history: history.map((t) => ({ id: t.id, symbol: t.symbol, side: t.side, qty: t.qty, entry: t.entry, exit: t.exit, pnl: t.pnl, fees: t.fees, openedAt: t.opened_at, closedAt: t.closed_at, reason: t.reason, lev: t.lev ?? null })),
       events: events.map((e) => {
         let detail = null;
         try {

@@ -47,18 +47,23 @@ import {
 } from 'lucide-react';
 import { coinHue, eventKind, newsTopic, type EventKind, type NewsTopic } from '../icons.ts';
 
-/** Tickers whose logo failed once in this page: shown as a badge from then on, without asking again. */
+/** Logos that failed once in this page (a coin's ticker, a stock's "s:" ticker): initials from then on, not asked again. */
 const failedLogos = new Set<string>();
 
+const COIN_TICKER = /^[A-Z0-9]{1,15}$/;
+/** A stock's ticker as TradingView writes it (AAPL, BRK.B): the server's rule for its logo (FD-STOCKLOGOS). */
+const STOCK_TICKER = /^[A-Z][A-Z0-9]*(?:\.[A-Z0-9]+)?$/;
+
 /**
- * The coin's real logo (served by /api/logo), or a badge with its initials in a stable colour. `badge` skips the
- * logo lookup: a stock ticker must not show the logo of a coin that happens to share it (FD-SENTIQ §4).
+ * A symbol's real logo, or a badge with its initials in a stable colour. A coin: its logo (/api/logo/SYM, round); `badge`
+ * keeps it to initials. `square`, a stock: the company's logo (FD-STOCKLOGOS, /api/logo/s/SYM, a rounded square), never
+ * the logo of a coin that happens to share the ticker (FD-SENTIQ §4).
  */
-/** `badge`: initials instead of a logo (stocks: logos come from crypto sources); `square`: the shape stocks use. */
 export function CoinLogo({ coin, size = 20, className, badge = false, square = false }: { coin: string; size?: number; className?: string; badge?: boolean; square?: boolean }) {
   const sym = coin.toUpperCase();
   const [failedNow, setFailedNow] = useState<string | null>(null);
-  const valid = /^[A-Z0-9]{1,15}$/.test(sym);
+  const key = square ? `s:${sym}` : sym;
+  const valid = sym.length <= 15 && (square ? STOCK_TICKER : COIN_TICKER).test(sym);
   // An index (FD-INDICES, id "^SPX"): a chart in a square, never initials that could pass for a coin or a share.
   if (sym.startsWith('^')) {
     const hue = coinHue(sym);
@@ -72,7 +77,7 @@ export function CoinLogo({ coin, size = 20, className, badge = false, square = f
       </span>
     );
   }
-  if (badge || !valid || failedNow === sym || failedLogos.has(sym)) {
+  if ((badge && !square) || !valid || failedNow === key || failedLogos.has(key)) {
     const hue = coinHue(sym);
     return (
       <span
@@ -86,16 +91,18 @@ export function CoinLogo({ coin, size = 20, className, badge = false, square = f
   }
   return (
     <img
-      src={`/api/logo/${sym}`}
+      src={square ? `/api/logo/s/${encodeURIComponent(sym)}` : `/api/logo/${sym}`}
       alt=""
       width={size}
       height={size}
+      // Its size held (the base style's `height: auto` let a flex row stretch it, as a calendar cell did).
+      style={{ width: size, height: size }}
       loading="lazy"
       decoding="async"
-      className={clsx('shrink-0 rounded-full', className)}
+      className={clsx('shrink-0', square ? 'rounded-[28%]' : 'rounded-full', className)}
       onError={() => {
-        failedLogos.add(sym);
-        setFailedNow(sym);
+        failedLogos.add(key);
+        setFailedNow(key);
       }}
     />
   );
@@ -229,7 +236,18 @@ export const EVENT_LABEL: Record<EventKind, string> = {
   other: 'eveniment',
 };
 
-export function EventIcon({ title, impact, source, size = 15, className }: { title: string; impact: string; source: string; size?: number; className?: string }) {
+/**
+ * An event's icon by its kind; FD-STOCKLOGOS: a company's results (`source` earn, `symbol` its ticker: the event's
+ * currency) with the company's logo.
+ */
+export function EventIcon({ title, impact, source, symbol, size = 15, className }: { title: string; impact: string; source: string; symbol?: string; size?: number; className?: string }) {
+  if (source === 'earn' && symbol) {
+    return (
+      <span className={clsx('inline-flex shrink-0', className)} aria-hidden>
+        <CoinLogo coin={symbol} size={size} badge square />
+      </span>
+    );
+  }
   const kind = eventKind(title, impact, source);
   const Icon = EVENT_ICON[kind];
   return (

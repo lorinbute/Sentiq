@@ -66,6 +66,17 @@ export function registerJobs(ctx: AppContext): void {
   const { scheduler, db, log } = ctx;
 
   // FD-PAPER §5: the Paper Trading profiles' waiting orders, stop losses / take profits and liquidations.
+  // FD-PUSH: the positions watched for their stop loss / take profit (an order sent with the form's bell).
+  scheduler.add({
+    name: 'push.watches',
+    everyMs: MIN,
+    firstDelayMs: 45_000,
+    timeoutMs: 5 * MIN,
+    run: async (signal) => {
+      await ctx.push.checkWatches(signal);
+    },
+  });
+
   scheduler.add({
     name: PAPER_JOB,
     everyMs: 10_000,

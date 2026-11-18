@@ -25,8 +25,10 @@ const FLAG_LABEL: Record<string, string> = { sponsored: 'sponsorizat', speculati
 /** FIX-SENTWEIGHT: the themes that weigh more in the sentiment (not a warning). */
 const THEME_LABEL: Record<string, string> = { energy: 'energie', ai: 'AI' };
 
-function NewsRow({ item, tz, stocks }: { item: NewsItemDto; tz: string; stocks: ReadonlySet<string> }) {
+function NewsRow({ item, tz, stocks: followed }: { item: NewsItemDto; tz: string; stocks: ReadonlySet<string> }) {
   const [open, setOpen] = useState(false);
+  // FD-NEWSKIND: the companies the server recognised in the story (DIS is Disney, not a coin), with the stocks followed.
+  const stocks = new Set([...followed, ...(item.stocks ?? [])]);
   const today = dayKey(item.publishedAt, tz) === dayKey(Date.now(), tz);
   return (
     <li

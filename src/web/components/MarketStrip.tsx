@@ -190,7 +190,7 @@ export function MarketStrip() {
       {all.length > 0 && <span className="h-4 w-px shrink-0 bg-line-strong" aria-hidden />}
       {next && (
         <Link to="/calendar" className={TICKER_LINK} title="Următorul eveniment cu impact mare">
-          <EventIcon title={next.title} impact={next.impact} source={next.source} className="text-impact-high" />
+          <EventIcon title={next.title} impact={next.impact} source={next.source} symbol={next.currency} className="text-impact-high" />
           <span>
             {next.currency === 'ALL' ? 'Global' : next.currency} {next.title}
           </span>

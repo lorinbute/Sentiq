@@ -40,6 +40,10 @@ const PUBLIC = new Set([
   'POST /api/auth/reset',
   'POST /api/auth/passkey/options',
   'POST /api/auth/passkey',
+  // FD-PUSH: a coin's logo (public icons) for the notifications' pictures, fetched without a session.
+  'GET /api/logo/:symbol',
+  // FD-STOCKLOGOS: a company's, the same way; without a session only one kept already (the route says it).
+  'GET /api/logo/s/:symbol',
 ]);
 
 /**

@@ -503,6 +503,8 @@ export interface BotAccountView {
 export interface BotView {
   id: number;
   name: string;
+  /** FD-PUSH: its trades opened and closed are sent to the owner's devices. */
+  notify: boolean;
   strategy: BotStrategy;
   exec: BotExec;
   market: BotMarket;
@@ -576,6 +578,8 @@ export interface BotTradeRow {
   openedAt: number;
   closedAt: number;
   reason: BotTradeReason;
+  /** The leverage it ran with (the money it took from the account: its value at entry over it); null before it was kept. */
+  lev: number | null;
 }
 
 export interface ScorePart {

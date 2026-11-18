@@ -266,6 +266,25 @@ describe('the stock news and score limited to indices', () => {
     expect(await usersWithStockScope(db)).toEqual([1]);
   });
 
+  it('FD-NEWSKIND: each item says which of its symbols are companies (Disney is DIS the company, not a coin)', async () => {
+    const { db } = await newsSetup();
+    const now = Date.now();
+    await addNews(db, 'disney', 'stocks', now - 60_000, 0.5, ['#CO', '#SPX', 'DIS']);
+    await addNews(db, 'mixed', 'crypto', now - 70_000, 0.5, ['#CO', 'BTC', 'COIN', 'LINK', 'SMCO']);
+    await db.run("INSERT INTO watchlist(user_id, coin, position, kind, aliases, added_at) VALUES (1, 'SMCO', 0, 'stock', '[]', ?)", [now]);
+    const known = {
+      members: { byTicker: new Map([['DIS', { aliases: ['Disney'], indices: ['SPX' as const] }], ['COIN', { aliases: ['Coinbase'], indices: ['SPX' as const] }]]), listed: new Set(['BTC', 'LINK']) },
+      isCoin: (s: string) => ['DIS', 'BTC', 'LINK', 'COIN'].includes(s),
+    };
+    const page = await queryNews(db, newsQuerySchema.parse({ range: '24h' }), 'UTC', 1, now, false, null, known);
+    const of = (id: string) => page.items.find((i) => i.id === id);
+    expect(of('disney')).toMatchObject({ coins: ['DIS'], stocks: ['DIS'] });
+    expect(of('mixed')).toMatchObject({ coins: ['BTC', 'COIN', 'LINK', 'SMCO'], stocks: ['COIN', 'SMCO'] });
+    // Without what the server knows (a caller that gives nothing): only the favourites.
+    const bare = await queryNews(db, newsQuerySchema.parse({ range: '24h' }), 'UTC', 1, now);
+    expect(bare.items.find((i) => i.id === 'disney')?.stocks).toEqual([]);
+  });
+
   it("the user's own score: only the stock news kept count; a change of filter computes their days again", async () => {
     const { db, settings } = await newsSetup();
     const daily = new DailySentimentService(db, settings, null, (u) => stockScopeFor(db, settings, u));

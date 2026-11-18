@@ -17,6 +17,10 @@ import { READ_AS_LABEL, resolveSource, type ReadAs } from '../news/page-feed.ts'
 import type { FeedTest } from '../../shared/api-types.ts';
 import { queryNews, newsQuerySchema } from '../news/query.ts';
 import { stockScopeFor } from '../news/stock-scope.ts';
+import { memberIndex } from '../news/coin-registry.ts';
+import type { MemberIndex } from '../news/coins.ts';
+import { stocksOf, type SymbolKinds } from '../news/symbol-kinds.ts';
+import type { Driver } from '../sentiment/daily-index.ts';
 import { FILTER_INDICES } from '../../shared/stock-indices.ts';
 import { safeHttpUrl } from '../news/normalize.ts';
 import { SOURCE_COLUMNS, syncStockSources, type SourceRow } from '../news/sources.ts';
@@ -140,8 +144,28 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   const scope = (req: FastifyRequest) => ctx.daily.scopeFor(me(req).id);
   /** The user's own AI scores the news (FD-AIKEYS): its score is shown where it gave one. */
   const ownAiScores = async (req: FastifyRequest) => ctx.ai.isScoring(me(req).id);
+  // FD-NEWSKIND: which symbols of the news are companies' (the member index made once per version of the lists).
+  let memberCache: { asOf: number; index: MemberIndex } | null = null;
+  const symbolKinds = async () => {
+    const m = await ctx.indexMembers.get();
+    if (!memberCache || memberCache.asOf !== m.asOf) memberCache = { asOf: m.asOf, index: memberIndex(m) };
+    const detector = await ctx.coins.get();
+    return { members: memberCache.index, isCoin: (s: string) => detector.isCrypto(s) };
+  };
+
+  /**
+   * FD-NEWSKIND: "Ce mișcă piața" with the companies among each story's symbols, for this user (their favourites first);
+   * on copies: the day may be the one kept for everybody.
+   */
+  const withDriverStocks = async <T extends { drivers: { positive: Driver[]; negative: Driver[] } }>(req: FastifyRequest, day: T): Promise<T> => {
+    const watched = await db.all<{ coin: string; kind: string }>('SELECT coin, kind FROM watchlist WHERE user_id = ?', [me(req).id]);
+    const kinds: SymbolKinds = { ...(await symbolKinds()), watch: new Map(watched.map((r) => [r.coin, r.kind])) };
+    const mark = (list: Driver[]) => list.map((d) => ({ ...d, stocks: stocksOf(d.coins ?? [], kinds) }));
+    return { ...day, drivers: { positive: mark(day.drivers.positive), negative: mark(day.drivers.negative) } };
+  };
+
   // FD-SCOREWHY / FD-WHYPLAIN: with "Ce mișcă piața" explained (after the snapshot is saved: never stored with it).
-  app.get('/api/sentiment/today', async (req) => ctx.daily.todayExplained((await mine(req)).timezone, Date.now(), await scope(req)));
+  app.get('/api/sentiment/today', async (req) => withDriverStocks(req, await ctx.daily.todayExplained((await mine(req)).timezone, Date.now(), await scope(req))));
 
   // FD-INDEXWHY: "Cum s-a calculat?": today's index step by step, for the same user and items as the card.
   app.get('/api/sentiment/today/explain', async (req) => ctx.daily.explainToday((await mine(req)).timezone, Date.now(), await scope(req)));
@@ -154,7 +178,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
 
   app.get('/api/sentiment/day/:day', async (req) => {
     const { day } = parse(z.object({ day: z.string().refine(isDayKey, 'YYYY-MM-DD') }), req.params);
-    return ctx.daily.computeDay(day, (await mine(req)).timezone, Date.now(), true, await scope(req));
+    return withDriverStocks(req, await ctx.daily.computeDay(day, (await mine(req)).timezone, Date.now(), true, await scope(req)));
   });
 
   app.post('/api/sentiment/rescore', async (req) => {
@@ -174,7 +198,16 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   });
 
   app.get('/api/news', async (req) =>
-    queryNews(db, parse(newsQuerySchema, req.query), (await mine(req)).timezone, me(req).id, Date.now(), await ownAiScores(req), await stockScopeFor(db, ctx.settings, me(req).id)),
+    queryNews(
+      db,
+      parse(newsQuerySchema, req.query),
+      (await mine(req)).timezone,
+      me(req).id,
+      Date.now(),
+      await ownAiScores(req),
+      await stockScopeFor(db, ctx.settings, me(req).id),
+      await symbolKinds(),
+    ),
   );
 
   // ---------------- sources ----------------
@@ -448,27 +481,13 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     return r;
   });
 
-  // FD-WATCHLISTS §3: the "Date financiare" popup of a symbol, and its description in Romanian with the user's AI.
+  // FD-WATCHLISTS §3: the "Date financiare" popup of a symbol (its description as the source wrote it: no translation).
   const profileQuery = z.object({ kind: z.enum(['crypto', 'stock', 'index']), symbol: z.string().trim().toUpperCase().regex(symbolRe) });
   const nameOf = async (userId: number, coin: string) => (await db.get<{ name: string | null }>('SELECT name FROM watchlist WHERE user_id = ? AND coin = ?', [userId, coin]))?.name ?? null;
 
   app.get('/api/symbols/profile', async (req) => {
     const q = parse(profileQuery, req.query);
     return ctx.profiles.profile(q.kind, q.symbol, await nameOf(me(req).id, q.symbol));
-  });
-
-  app.post('/api/symbols/translate', async (req) => {
-    const user = me(req);
-    const q = parse(profileQuery, req.body);
-    const p = await ctx.profiles.profile(q.kind, q.symbol, await nameOf(user.id, q.symbol));
-    if (!p.description || p.description.lang !== 'en') throw new ValidationError('Nu e nimic de tradus');
-    try {
-      return { text: await ctx.profiles.translate(user.id, p.description.text), error: null };
-    } catch (err) {
-      if (err instanceof ValidationError) throw err;
-      // The provider's refusal (no credit, a limit, too slow) is said as it is; the original stays on screen.
-      return { text: null, error: describeAiError(err) };
-    }
   });
 
   // ---------------- calendar ----------------
@@ -636,7 +655,19 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     return { description };
   });
 
-  // Coin logo as an image (TD-ICONS). A missing logo is cached by the browser too, so it is asked once a day.
+  // FD-STOCKLOGOS: a company's logo (TradingView's, downloaded once and kept). With a session a new symbol makes this
+  // server ask TradingView; without one (FD-PUSH: the notifications' extension) only a logo kept already is given, so an
+  // anonymous caller can never make it ask anybody.
+  app.get('/api/logo/s/:symbol', async (req, reply) => {
+    const { symbol } = req.params as { symbol: string };
+    const svg = req.user ? await ctx.stockLogos.logo(symbol) : await ctx.stockLogos.kept(symbol);
+    reply.header('Cache-Control', 'private, max-age=86400');
+    if (!svg) return reply.code(404).type('text/plain; charset=utf-8').send('');
+    return reply.header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'").type('image/svg+xml; charset=utf-8').send(svg);
+  });
+
+  // Coin logo as an image (TD-ICONS). A missing logo is cached by the browser too, so it is asked once a day. Public
+  // (FD-PUSH): the iOS app's notification extension shows it without a session; the icons are public ones (web3icons).
   app.get('/api/logo/:symbol', async (req, reply) => {
     const { symbol } = req.params as { symbol: string };
     const svg = await coinLogo(symbol);
@@ -771,6 +802,36 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     // FD-AISLOW §4: how far it got, while it scores.
     const progress = scoring ? await ctx.sentiment.aiProgress(u.id) : null;
     return { provider: c.provider, model: c.model, keySet: c.key !== null, scoring: c.scoring, scorer: scoring, usage, progress };
+  });
+
+  /**
+   * FD-AIONE: the user's AI scores one news item now („Trimite la analiză”, on a story it has not scored). Answers the
+   * item's score as the news list gives it to this user (their AI's, its impact).
+   */
+  app.post('/api/news/:id/analyze', async (req) => {
+    const u = me(req);
+    const { id } = parse(z.object({ id: z.string().min(1).max(64) }), req.params);
+    const r = await ctx.sentiment.scoreOne(u.id, id);
+    if (!r.ok) {
+      if (r.reason === 'noAi') throw new ValidationError('Scorul știrilor nu folosește AI-ul tău: alege-l întâi în Setări › AI, cu cheia salvată.');
+      if (r.reason === 'missing') throw new NotFoundError('Știrea nu mai există.');
+      if (r.reason === 'noScore') throw new ConflictError('AI-ul nu a dat un scor pentru această știre. Încearcă din nou mai târziu.');
+      const why = 'message' in r && r.message ? ` ${r.message}` : '';
+      throw new ConflictError(r.reason === 'paused' ? `AI-ul tău e în pauză după o eroare.${why}` : `AI-ul nu a răspuns.${why}`);
+    }
+    const s = await db.get<{ score: number; label: string; engine: string; reason: string | null; impact: number | null; common_impact: number | null; rule_impact: number }>(
+      `SELECT a.score, a.label, a.engine, a.reason, a.impact, n.sentiment_impact AS common_impact, n.impact AS rule_impact
+       FROM news_ai_scores a JOIN news n ON n.id = a.news_id WHERE a.user_id = ? AND a.news_id = ? AND a.score IS NOT NULL`,
+      [u.id, id],
+    );
+    if (!s) throw new ConflictError('Știrea și-a schimbat titlul între timp: se analizează din nou cu următoarele știri.');
+    const impact = s.impact ?? s.common_impact;
+    return {
+      sentiment: { score: s.score, label: s.label, engine: s.engine, meta: null, reason: s.reason },
+      impact: impact ?? s.rule_impact,
+      impactSource: impact !== null ? 'ai' : 'rules',
+      already: r.already,
+    };
   });
 
   /** The user's AI scores the last hours' news again (after another model, say). */
@@ -989,7 +1050,11 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   app.post('/api/trading/:id/orders', async (req) => {
     const { id } = parse(idParam, req.params);
     await ownAccount(req, id);
-    return ctx.trading.place(me(req).id, ticketFor(id, req.body));
+    const ticket = ticketFor(id, req.body);
+    const result = await ctx.trading.place(me(req).id, ticket);
+    // FD-PUSH: the form's bell: the position is watched until its stop loss / take profit closes it (never fails the order).
+    if (ticket.notify) await ctx.push.watch(me(req).id, ticket, result).catch((err: Error) => ctx.log.warn(`push: watch of an order: ${err.message}`));
+    return result;
   });
 
   // FD-ORDEREDIT: changing open orders and a position's stop loss / take profit (checked, then sent once).
@@ -1008,7 +1073,15 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   app.post('/api/trading/:id/modify', async (req) => {
     const { id } = parse(idParam, req.params);
     await ownAccount(req, id);
-    return ctx.trading.modify(me(req).id, modifyFor(id, req.body));
+    const t = modifyFor(id, req.body);
+    const result = await ctx.trading.modify(me(req).id, t);
+    // FD-PUSH: a watched position's new stop loss / take profit (its close is told by the levels it had then).
+    const level = (what: 'sl' | 'tp') => {
+      const c = t.changes.filter((x) => x.what === what).at(-1);
+      return c && c.what !== 'order' ? c.level : undefined;
+    };
+    if (t.position) await ctx.push.levelsChanged(me(req).id, id, t.symbol, { sl: level('sl'), tp: level('tp') }).catch((err: Error) => ctx.log.warn(`push: levels: ${err.message}`));
+    return result;
   });
 
   // FD-REVERSE: a futures position turned the other way (checked, then sent once).

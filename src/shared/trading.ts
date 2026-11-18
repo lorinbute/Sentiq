@@ -256,6 +256,8 @@ export const orderTicketSchema = z
     extendedHours: z.boolean().optional(),
     /** Closing given positions (eToro: by position id, all or `units` of them). */
     close: z.object({ positionIds: z.array(z.string().min(1).max(40)).min(1).max(50), units: positive('Unitățile').optional() }).optional(),
+    /** FD-PUSH: the form's bell: a notification when the position closes by its stop loss / take profit. */
+    notify: z.boolean().optional(),
   })
   .superRefine((t, ctx) => {
     const need = (ok: boolean, path: string, message: string) => {

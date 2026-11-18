@@ -296,11 +296,27 @@ describe('settings API', () => {
     const status = async () => (await app.inject({ url: '/api/ai/status', headers: H })).json();
     expect(await status()).toMatchObject({ provider: 'anthropic', model: 'claude-opus-5-5', keySet: true, scoring: false, scorer: null, usage: { summary: { calls: 0 } }, progress: null });
     expect((await app.inject({ method: 'POST', url: '/api/ai/rescore', headers: M, payload: {} })).statusCode).toBe(400);
+    // FD-AIONE: „Trimite la analiză”: not without their AI scoring the news.
+    await ctx.db.run(
+      "INSERT INTO news(id, source_id, title, published_at, fetched_at, category, relevance, impact, cluster_id) VALUES ('ai-one', 'coindesk', 'Plug Power rises after six sessions', ?, ?, 'other', 0, 1, 'ai-one')",
+      [Date.now(), Date.now()],
+    );
+    const analyze = (id: string) => app.inject({ method: 'POST', url: `/api/news/${id}/analyze`, headers: M, payload: {} });
+    const noAi = await analyze('ai-one');
+    expect(noAi.statusCode).toBe(400);
+    expect(noAi.json().error.message).toBe('Scorul știrilor nu folosește AI-ul tău: alege-l întâi în Setări › AI, cu cheia salvată.');
     await app.inject({ method: 'PUT', url: '/api/settings', headers: M, payload: { ai: { provider: 'openai', model: 'gpt-6-luna', scoring: true } } });
     expect(await status()).toMatchObject({ provider: 'openai', model: 'gpt-6-luna', keySet: true, scoring: true, scorer: { provider: 'openai', model: 'gpt-6-luna', lastError: null } });
     // FD-AISLOW §4: how far it got with the last 48 hours, while it scores.
     expect((await status()).progress).toEqual({ total: expect.any(Number), scored: 0, lastAt: null });
     expect((await app.inject({ method: 'POST', url: '/api/ai/rescore', headers: M, payload: {} })).json()).toEqual({ reset: 0 });
+    // FD-AIONE: an item gone; their AI unreachable, then paused: said, never a score.
+    expect((await analyze('nope')).statusCode).toBe(404);
+    const down = await analyze('ai-one');
+    expect(down.statusCode).toBe(409);
+    expect(down.json().error.message).toMatch(/^AI-ul nu a răspuns\. /);
+    expect((await analyze('ai-one')).json().error.message).toMatch(/^AI-ul tău e în pauză după o eroare\. /);
+    expect(await ctx.db.get("SELECT 1 AS x FROM news_ai_scores WHERE news_id = 'ai-one'")).toBeUndefined();
     // A model of another provider is not used: the provider's default is.
     await app.inject({ method: 'PUT', url: '/api/settings', headers: M, payload: { ai: { model: 'claude-haiku-5-5' } } });
     expect((await status()).model).toBe('gpt-6.1-sol');
@@ -522,6 +538,8 @@ describe('news & sentiment API', () => {
     expect(all.items).toHaveLength(2);
     const btc = all.items.find((i: { title: string }) => i.title.startsWith('Bitcoin'));
     expect(btc.coins).toEqual(['BTC']);
+    // FD-NEWSKIND: BTC is a coin (a major one, never a company).
+    expect(btc.stocks).toEqual([]);
     expect(btc.sentiment.label).toBe('positive');
 
     const fav = (await app.inject({ method: 'GET', url: '/api/news?range=24h&favorites=1&coins=SOL', headers: H })).json();
@@ -533,8 +551,9 @@ describe('news & sentiment API', () => {
     const today = (await app.inject({ method: 'GET', url: '/api/sentiment/today', headers: H })).json();
     expect(today.counts).toMatchObject({ positive: 1, negative: 1, pending: 0 });
     // Drivers carry their category and coins, for the topic icon (FD-ICONS).
-    expect(today.drivers.positive[0]).toMatchObject({ title: 'Bitcoin surges to a record', category: 'crypto', coins: ['BTC'] });
-    expect(today.drivers.negative[0]).toMatchObject({ title: 'Solana exchange hacked, funds stolen', category: 'crypto', coins: ['SOL'] });
+    // FD-NEWSKIND: and which of the coins are companies' (none here: BTC and SOL are coins).
+    expect(today.drivers.positive[0]).toMatchObject({ title: 'Bitcoin surges to a record', category: 'crypto', coins: ['BTC'], stocks: [] });
+    expect(today.drivers.negative[0]).toMatchObject({ title: 'Solana exchange hacked, funds stolen', category: 'crypto', coins: ['SOL'], stocks: [] });
     // The index ignores news filters: it is the same object no matter what the news list shows.
     const again = (await app.inject({ method: 'GET', url: '/api/sentiment/today', headers: H })).json();
     expect(again.index).toBe(today.index);
@@ -1411,10 +1430,34 @@ describe('log retention', () => {
   });
 });
 
+describe('stock logos (FD-STOCKLOGOS)', () => {
+  it('downloaded only with a session; without one only a logo kept already (the notifications); none: 404', async () => {
+    setFetchImpl(async (url) =>
+      String(url).includes('scanner')
+        ? new Response(JSON.stringify({ data: [{ s: 'NASDAQ:MSFT', d: ['MSFT', true, 'microsoft'] }] }), { status: 200 })
+        : new Response('<!-- by TradingView --><svg width="18" height="18" xmlns="http://www.w3.org/2000/svg"><path fill="#F0F3FA" d="M0 0h18v18H0z"/></svg>', { status: 200 }),
+    );
+    const anon = { host: '127.0.0.1:4317' };
+    // Not kept yet: an anonymous caller makes nobody ask TradingView.
+    expect((await app.inject({ url: '/api/logo/s/MSFT', headers: anon })).statusCode).toBe(404);
+    const msft = await app.inject({ url: '/api/logo/s/MSFT', headers: H });
+    expect(msft.statusCode).toBe(200);
+    expect(msft.headers['content-type']).toMatch(/image\/svg\+xml/);
+    expect(msft.headers['content-security-policy']).toBe("default-src 'none'; style-src 'unsafe-inline'");
+    expect(msft.headers['cache-control']).toBe('private, max-age=86400');
+    expect(msft.body.startsWith('<svg')).toBe(true);
+    // Kept now: the notifications' extension gets it without a session.
+    expect((await app.inject({ url: '/api/logo/s/MSFT', headers: anon })).body).toBe(msft.body);
+    expect((await app.inject({ url: '/api/logo/s/NOLOGO', headers: H })).statusCode).toBe(404);
+    expect((await app.inject({ url: '/api/logo/s/BTC%2FUSDT', headers: H })).statusCode).toBe(404);
+    setFetchImpl(null);
+  });
+});
+
 describe('coin logos (TD-ICONS)', () => {
   it('serves branded SVGs locally, resolves aliases and rejects unknown or unsafe symbols', async () => {
-    // Behind the sign-in like the rest of the API (FD-USERS).
-    expect((await app.inject({ url: '/api/logo/btc', headers: { host: '127.0.0.1:4317' } })).statusCode).toBe(401);
+    // Public (FD-PUSH): the iOS notifications' extension shows them without a session; the icons are public ones.
+    expect((await app.inject({ url: '/api/logo/btc', headers: { host: '127.0.0.1:4317' } })).statusCode).toBe(200);
     const h = H;
     const btc = await app.inject({ url: '/api/logo/btc', headers: h });
     expect(btc.statusCode).toBe(200);
@@ -1811,7 +1854,7 @@ describe('watch lists API (FD-WATCHLISTS)', () => {
     expect((await post('/api/watchlists', { name: 'A 21-a' })).json().error.message).toBe('Poți avea cel mult 20 de liste');
   });
 
-  it('the "Date financiare" of a symbol: an index without asking anyone; a stock from Nasdaq and TradingView; no translation without a key', async () => {
+  it('the "Date financiare" of a symbol: an index without asking anyone; a stock from Nasdaq and TradingView; no translation (FD-NOTRANSLATE)', async () => {
     const idx = (await app.inject({ url: '/api/symbols/profile?kind=index&symbol=%5ESPX', headers: H })).json();
     expect(idx).toMatchObject({ kind: 'index', name: 'S&P 500', description: { source: 'Sentiq', lang: 'ro' }, quarters: [] });
     const asked: string[] = [];
@@ -1831,7 +1874,6 @@ describe('watch lists API (FD-WATCHLISTS)', () => {
       kind: 'stock',
       name: 'Tesla, Inc.',
       description: { text: 'Tesla makes electric cars.', source: 'Nasdaq', lang: 'en' },
-      translated: null,
       facts: [
         { label: 'Sector', value: 'Industrials' },
         { label: 'Industrie', value: 'Auto Manufacturing' },
@@ -1839,13 +1881,14 @@ describe('watch lists API (FD-WATCHLISTS)', () => {
       next: { day: '2026-10-21', time: 'after', confirmed: true, eps: 0.45 },
       problems: [],
     });
+    expect('translated' in tsla).toBe(false);
     expect(tsla.quarters.map((q: { end: string }) => q.end)).toEqual(['2026-06-30', '2026-03-31']);
     // Kept: a second opening asks nobody.
     const n = asked.length;
     await app.inject({ url: '/api/symbols/profile?kind=stock&symbol=TSLA', headers: H });
     expect(asked).toHaveLength(n);
-    expect((await post('/api/symbols/translate', { kind: 'stock', symbol: 'TSLA' })).json().error.message).toBe('Fără o cheie AI, descrierea rămâne în engleză');
-    expect((await post('/api/symbols/translate', { kind: 'index', symbol: '^SPX' })).json().error.message).toBe('Nu e nimic de tradus');
+    // No translation any more (18 Nov 2026): the route is gone.
+    expect((await post('/api/symbols/translate', { kind: 'stock', symbol: 'TSLA' })).statusCode).toBe(404);
     expect((await app.inject({ url: '/api/symbols/profile?kind=bond&symbol=X', headers: H })).statusCode).toBe(400);
   });
 });

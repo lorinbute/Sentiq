@@ -1,4 +1,5 @@
 // News listing with filters (FD §2.2). Filters affect only what is shown, never the daily sentiment.
+import { stocksOf, type SymbolKinds } from './symbol-kinds.ts';
 import type { FilterIndexId } from '../../shared/stock-indices.ts';
 import { stockScopeSql, type StockScope } from './stock-scope.ts';
 import { z } from 'zod';
@@ -41,6 +42,8 @@ export interface NewsItemDto {
   /** When Sentiq first saw the item (drives the "nou" badge). */
   fetchedAt: number;
   coins: string[];
+  /** FD-NEWSKIND: the symbols of `coins` that are companies' stocks (the others: coins, or an index with "^"). */
+  stocks: string[];
   relevance: number;
   /** The importance the daily index uses (FD-IMPACT §1): the engine's (Claude) when it gave one, else the keywords'. */
   impact: number;
@@ -117,9 +120,21 @@ const escapeLike = (s: string) => s.replace(/[\\%_[]/g, (m) => `\\${m}`);
  * `userId`: whose favourites the "favourites only" filter uses (FD-USERS §2); the news themselves are common. `ownAi`:
  * the user's own AI scores the news (FD-AIKEYS), so its score is shown (and filtered on) where it gave one.
  */
-export async function queryNews(db: Db, q: NewsQuery, tz: string, userId: number, now = Date.now(), ownAi = false, stock: StockScope | null = null): Promise<NewsPage> {
+export async function queryNews(
+  db: Db,
+  q: NewsQuery,
+  tz: string,
+  userId: number,
+  now = Date.now(),
+  ownAi = false,
+  stock: StockScope | null = null,
+  known: Omit<SymbolKinds, 'watch'> = { members: null, isCoin: () => true },
+): Promise<NewsPage> {
   const { from, to } = rangeBounds(q.range, tz, now);
-  const favorites = (await db.all<{ coin: string }>('SELECT coin FROM watchlist WHERE user_id = ? ORDER BY position, coin', [userId])).map((r) => r.coin);
+  const watched = await db.all<{ coin: string; kind: string }>('SELECT coin, kind FROM watchlist WHERE user_id = ? ORDER BY position, coin', [userId]);
+  const favorites = watched.map((r) => r.coin);
+  // FD-NEWSKIND: which symbols are companies', the user's own favourites first.
+  const kinds: SymbolKinds = { ...known, watch: new Map(watched.map((r) => [r.coin, r.kind])) };
   let coins = q.coins;
   if (q.favorites) coins = coins.length ? coins.filter((c) => favorites.includes(c)) : favorites;
   // The score shown: the user's AI's where it gave one (a.score), else the common one.
@@ -210,6 +225,7 @@ export async function queryNews(db: Db, q: NewsQuery, tz: string, userId: number
       publishedAt: r.published_at,
       fetchedAt: r.fetched_at,
       coins: r.coins ? r.coins.split(',').sort() : [],
+      stocks: r.coins ? stocksOf(r.coins.split(',').sort(), kinds) : [],
       relevance: r.relevance,
       impact: r.sentiment_impact ?? r.impact,
       impactSource: r.sentiment_impact !== null ? 'ai' : 'rules',

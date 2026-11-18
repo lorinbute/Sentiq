@@ -13,6 +13,8 @@ const NOW_MS = "DATEDIFF_BIG(MILLISECOND, '19700101', SYSUTCDATETIME())";
 
 /** Every table, children before parents: the order to empty them (tests, import); reversed, the order to fill them. */
 export const TABLES = [
+  'trade_watches',
+  'push_devices',
   'bot_events',
   'bot_trades',
   'bots',
@@ -52,7 +54,7 @@ export const TABLES = [
 ] as const;
 
 /** Tables whose `id` is an IDENTITY column. */
-export const IDENTITY_TABLES = new Set(['users', 'calendar_custom', 'exchange_accounts', 'passkeys', 'account_requests', 'trade_log', 'watch_lists', 'bots', 'bot_trades', 'bot_events', 'paper_positions', 'paper_orders', 'paper_trades']);
+export const IDENTITY_TABLES = new Set(['users', 'calendar_custom', 'exchange_accounts', 'passkeys', 'account_requests', 'trade_log', 'watch_lists', 'bots', 'bot_trades', 'bot_events', 'paper_positions', 'paper_orders', 'paper_trades', 'push_devices', 'trade_watches']);
 
 /** The admin (id 1) every new database starts with, without e-mail or password (FD-USERS §3). */
 export const SEED_ADMIN = `SET IDENTITY_INSERT users ON;
@@ -633,6 +635,40 @@ export const MIGRATIONS: string[][] = [
   // 15 — FIX-SOURCES: FXStreet answers Azure with 403 (Cloudflare blocks its data-center addresses, since 16 Oct 2026):
   // the built-in source is turned off once; the user may turn it on again (Setări → Admin → Surse).
   [`UPDATE sources SET enabled = 0 WHERE id = N'fxstreet' AND builtin = 1;`],
+  // 16 — FD-PUSH: the user's devices for notifications (APNs), a bot's bell, and the positions watched until their stop
+  // loss / take profit closes them (an order sent with the form's bell). `account_id` without a key, as in trade_log
+  // (a watch of a deleted account ends at its next look).
+  [
+    `CREATE TABLE push_devices (
+      id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+      user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token ${t(200)} NOT NULL,
+      env ${t(16)} NOT NULL,
+      created_at BIGINT NOT NULL,
+      updated_at BIGINT NOT NULL
+    );
+    CREATE UNIQUE INDEX push_devices_token ON push_devices(token);
+    CREATE INDEX push_devices_user ON push_devices(user_id);`,
+    `ALTER TABLE bots ADD notify BIT NOT NULL CONSTRAINT bots_notify_default DEFAULT 0;`,
+    `CREATE TABLE trade_watches (
+      id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+      user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      account_id INT NOT NULL,
+      idem_key ${t(64)} NULL,
+      market ${t(16)} NOT NULL,
+      symbol ${t(80)} NOT NULL,
+      side ${t(8)} NOT NULL,
+      sl FLOAT NULL,
+      tp FLOAT NULL,
+      state ${t(16)} NOT NULL,
+      seen_open BIT NOT NULL DEFAULT 0,
+      created_at BIGINT NOT NULL,
+      checked_at BIGINT NULL,
+      ended_at BIGINT NULL,
+      result ${t('MAX')} NULL
+    );
+    CREATE INDEX trade_watches_open ON trade_watches(state, account_id);`,
+  ],
 ];
 
 const VERSION_TABLE = "OBJECT_ID(QUOTENAME(SCHEMA_NAME()) + N'.schema_version', N'U')";

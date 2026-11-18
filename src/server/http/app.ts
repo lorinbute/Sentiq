@@ -13,6 +13,7 @@ import { registerRoutes } from './routes.ts';
 import { registerAuth } from './auth.ts';
 import { registerAuthRoutes } from './auth-routes.ts';
 import { registerBotRoutes } from './bot-routes.ts';
+import { registerPushRoutes } from './push-routes.ts';
 import { ConflictError, NotFoundError } from './errors.ts';
 import { UserError, UserMissingError } from '../auth/users.ts';
 import { PasskeyError } from '../auth/passkeys.ts';
@@ -83,6 +84,7 @@ export async function buildApp(ctx: AppContext): Promise<FastifyInstance> {
   await registerAuthRoutes(app, ctx);
   await registerRoutes(app, ctx);
   await registerBotRoutes(app, ctx);
+  await registerPushRoutes(app, ctx);
 
   // FD-PASSKEYAPP: Apple's link between this domain and the iOS app, so the app may use the site's passkeys. Public (no
   // session: it is outside /api), JSON, never a redirect.

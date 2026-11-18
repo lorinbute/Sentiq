@@ -66,6 +66,8 @@ export interface BotRow {
   created_at: number;
   updated_at: number;
   ran_at: number | null;
+  /** FD-PUSH: the bot's bell (its trades on its owner's devices). */
+  notify?: boolean | number | null;
 }
 
 /**
@@ -109,6 +111,8 @@ export interface BotEngineDeps {
   uuid?: () => string;
   /** Tests: the closed bar and Slingshot on it, made by hand (as `runSlingshot` takes hand-made series). */
   bars?: (userId: number, input: BotInput, sym: string, now: number) => Promise<Bar | null>;
+  /** FD-PUSH: after a look is saved, what it opened and closed (the bot's bell sends them to its owner's devices). */
+  ran?: (row: BotRow, events: { kind: BotEventKind; symbol: string | null; message: string; detail: BotEventDetail | null }[], trades: ClosedTrade[]) => Promise<void>;
 }
 
 // FD-PAPER §7: a bot still simulating (from before Paper Trading) does not run: it waits to be moved onto a profile.
@@ -176,6 +180,11 @@ export class BotEngine {
       run.unexpected(err as Error);
     }
     await run.save();
+    // FD-PUSH: told once saved (a look that failed to save tells nothing); a failure to tell never stops the bots.
+    if (this.deps.ran) {
+      const { events, trades } = run.outcome();
+      if (events.length || trades.length) await this.deps.ran(row, events, trades).catch((err: Error) => this.deps.log.warn(`push: bot ${row.id}: ${err.message}`));
+    }
     const last = this.pruned.get(row.id) ?? 0;
     if (this.now() - last > PRUNE_EVERY_MS) {
       this.pruned.set(row.id, this.now());
@@ -238,6 +247,11 @@ class BotRun {
 
   private get d() {
     return this.e.deps;
+  }
+
+  /** FD-PUSH: what this look opened (its notes) and closed (its trades). */
+  outcome(): { events: { kind: BotEventKind; symbol: string | null; message: string; detail: BotEventDetail | null }[]; trades: ClosedTrade[] } {
+    return { events: this.events, trades: this.trades };
   }
 
   private note(kind: BotEventKind, message: string, symbol: string | null = null, detail: BotEventDetail | null = null): void {

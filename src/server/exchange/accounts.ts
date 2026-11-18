@@ -1007,6 +1007,29 @@ export class AccountsService {
   }
 
   /**
+   * FD-PUSH: a futures position's closing fills since `since` (Binance has no history of closed positions; its fills
+   * carry the result each realized, `realizedPnl`, in the quote). A long closes with sells, a short with buys.
+   */
+  async closingFills(id: number, symbol: string, side: 'long' | 'short', since: number): Promise<{ price: number; qty: number; pnl: number | null; fee: number; at: number }[]> {
+    const row = await this.row(id);
+    if (!row || isPaperExchange(row.exchange) || isBroker(row.exchange)) return [];
+    const { spot } = this.clientsFor(id, row);
+    await this.ensureMarkets(spot);
+    const trades = await this.retryOn(spot, () => spot.fetchMyTrades(symbol, since, 100));
+    const closing = side === 'long' ? 'sell' : 'buy';
+    const quote = (symbol.split(':')[0]?.split('/')[1] ?? '').toUpperCase();
+    return trades
+      .filter((t) => t.side === closing && (t.timestamp ?? 0) >= since)
+      .map((t) => {
+        const info = (t.info ?? {}) as Record<string, unknown>;
+        const realized = Number(info.realizedPnl);
+        const fee = t.fee && String(t.fee.currency ?? '').toUpperCase() === quote ? Number(t.fee.cost ?? 0) : 0;
+        return { price: Number(t.price), qty: Number(t.amount), pnl: Number.isFinite(realized) ? realized : null, fee: Number.isFinite(fee) ? fee : 0, at: t.timestamp ?? Date.now() };
+      })
+      .filter((f) => f.price > 0 && f.qty > 0);
+  }
+
+  /**
    * FD-TRADES: the account's own history of closed trades, as rows (the bots' are added by the route): a crypto
    * account's futures positions of the period, a broker's trades of its 90 days (the route keeps the period's). Where
    * the platform gives none, `supported` is false; a read that fails is `error` (the bots' rows are listed all the same).

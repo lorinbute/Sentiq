@@ -383,6 +383,14 @@ describe('a grid on a Paper Trading profile, end to end (FD-BOT §4, FD-PAPER)',
     expect(d.grid?.slots.map((s) => s.entry)).toEqual([null, 94, 94, 101]);
     expect(d.events.find((e) => e.kind === 'enter')?.message).toMatch(/Grila la 94: 2 intervale umplute/);
 
+    // FD-PUSH: the bell is kept and read back by the list and the detail (it was lost from them once).
+    expect(d.notify).toBe(false);
+    expect((await post(`/api/bots/${bot.id}/notify`, { on: true })).json()).toEqual({ notify: true });
+    expect((await detail(bot.id)).notify).toBe(true);
+    expect(((await get('/api/bots')).json() as { id: number; notify: boolean }[]).find((b) => b.id === bot.id)?.notify).toBe(true);
+    expect((await post(`/api/bots/${bot.id}/notify`, { on: false })).json()).toEqual({ notify: false });
+    expect((await detail(bot.id)).notify).toBe(false);
+
     // Grids cannot be finished; stopping closes them.
     expect((await post(`/api/bots/${bot.id}/stop`, { action: 'finish' })).statusCode).toBe(400);
     expect((await del(`/api/bots/${bot.id}`)).statusCode).toBe(409);

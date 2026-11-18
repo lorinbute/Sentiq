@@ -8,6 +8,7 @@ import { WatchlistService } from './watchlists/service.ts';
 import { RetagQueue } from './news/retag-queue.ts';
 import { retagRecent } from './news/ingest.ts';
 import { SymbolProfiles } from './market/profile.ts';
+import { StockLogos } from './market/stock-logos.ts';
 import { EconomyService } from './economy/service.ts';
 import { buildDayContext } from './summary/context.ts';
 import { SummaryService } from './summary/service.ts';
@@ -36,6 +37,8 @@ import { Sessions } from './auth/sessions.ts';
 import { Throttle } from './auth/throttle.ts';
 import { UserService } from './auth/users.ts';
 import { PaperService } from './paper/service.ts';
+import { Apns, apnsConfig } from './push/apns.ts';
+import { PushService } from './push/service.ts';
 
 export interface AppContext {
   config: AppConfig;
@@ -65,6 +68,8 @@ export interface AppContext {
   /** FD-BOT: the trading bots (the engine runs them in the `bots` job). */
   botEngine: BotEngine;
   bots: BotService;
+  /** FD-PUSH: notifications on the user's devices (bots' trades, positions closed by their stop loss / take profit). */
+  push: PushService;
   scheduler: Scheduler;
   /** FD-ECON. */
   economy: EconomyService;
@@ -82,6 +87,8 @@ export interface AppContext {
   watchlists: WatchlistService;
   /** FD-WATCHLISTS §3: a symbol's description and quarterly results. */
   profiles: SymbolProfiles;
+  /** FD-STOCKLOGOS: the companies' logos, downloaded once from TradingView and kept for everyone. */
+  stockLogos: StockLogos;
   /** The last 7 days of news tagged again after the symbols followed change, in the background. */
   retag: RetagQueue;
 }
@@ -193,7 +200,16 @@ export async function createContext(config: AppConfig, log: Logger, overrides: C
   accounts.attachPaper(paper);
   const trading = new TradingService({ db, accounts, log, traderFactory: overrides.traderFactory, paper });
   const scheduler = new Scheduler(db, log);
-  const botEngine = new BotEngine({ db, log, settings, market, stocks, source: marketSource, daily, calendar, ai, trading, accounts });
+  // FD-PUSH: notifications through Apple (the key from the App Service settings; without it, nothing is sent).
+  let apns: Apns | null = null;
+  try {
+    const cfg = apnsConfig(process.env, { teamId: '25H945694A', topic: 'com.dustyenterprise.sentiq' });
+    if (cfg) apns = new Apns(cfg);
+  } catch (err) {
+    log.error(`push: APNS_KEY could not be read: ${(err as Error).message}`);
+  }
+  const push = new PushService({ db, log, apns, accounts });
+  const botEngine = new BotEngine({ db, log, settings, market, stocks, source: marketSource, daily, calendar, ai, trading, accounts, ran: (row, events, trades) => push.botRan(row, events, trades) });
   const bots = new BotService(db, botEngine);
   const summary = new SummaryService({ db, ai, log, build: (userId, now) => buildDayContext({ db, settings, daily, calendar, economy, scanner }, userId, now) });
   const sessions = new Sessions(db);
@@ -201,7 +217,8 @@ export async function createContext(config: AppConfig, log: Logger, overrides: C
   const mailer = new Mailer(() => settings.getResend(), log);
   const throttle = new Throttle();
   const watchlists = new WatchlistService(db);
-  const profiles = new SymbolProfiles(db, ai, log, stocks.nasdaq);
+  const profiles = new SymbolProfiles(db, log, stocks.nasdaq);
+  const stockLogos = new StockLogos(db, log);
   const retag = new RetagQueue(async () => retagRecent(db, await coins.get(), Date.now() - 7 * 86_400_000, await coins.classifier()), log);
   return {
     config,
@@ -227,6 +244,7 @@ export async function createContext(config: AppConfig, log: Logger, overrides: C
     paper,
     botEngine,
     bots,
+    push,
     scheduler,
     users,
     sessions,
@@ -236,6 +254,7 @@ export async function createContext(config: AppConfig, log: Logger, overrides: C
     throttle,
     watchlists,
     profiles,
+    stockLogos,
     retag,
   };
 }

@@ -1,14 +1,12 @@
-// FD-WATCHLISTS §3: the "Date financiare" popup of a watch-list row. The description first (in Romanian with the user's
-// AI, when they have a key), then, for a stock, its last four quarters and the next results; a coin or an index has
+// FD-WATCHLISTS §3: the "Date financiare" popup of a watch-list row. The description first (as its source wrote it, no
+// translation since 18 Nov 2026), then, for a stock, its last four quarters and the next results; a coin or an index has
 // its description only.
-import { useEffect } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { clsx } from 'clsx';
 import type { ProfileQuarter, SymbolProfile, WatchItem } from '../../shared/api-types.ts';
 import { plainSymbol } from '../../shared/indices.ts';
-import { api, errorMessage, qs } from '../api.ts';
+import { api, qs } from '../api.ts';
 import { fmtPct, fmtUsd } from '../format.ts';
-import { useSettings } from '../hooks.ts';
 import { CoinLogo } from './icons.tsx';
 import { Modal } from './Modal.tsx';
 import { ErrorNote, Loading } from './ui.tsx';
@@ -69,46 +67,20 @@ function Rows({ quarters }: { quarters: ProfileQuarter[] }) {
   );
 }
 
-function Description({ p, item }: { p: SymbolProfile; item: WatchItem }) {
-  const settings = useSettings();
-  const qc = useQueryClient();
-  const hasKey = Boolean(settings.data?.aiKeys?.[settings.data.ai.provider]?.set);
-  const english = p.description?.lang === 'en' ? p.description.text : null;
-  const translate = useMutation({
-    mutationFn: () => api.post<{ text: string | null; error: string | null }>('/api/symbols/translate', { kind: item.kind, symbol: item.coin }),
-    onSuccess: (r) => {
-      if (r.text) qc.setQueryData<SymbolProfile>(['profile', item.kind, item.coin], (old) => (old ? { ...old, translated: r.text } : old));
-    },
-  });
-  const needs = english !== null && !p.translated && hasKey;
-  const { mutate, isIdle } = translate;
-  useEffect(() => {
-    if (needs && isIdle) mutate();
-  }, [needs, isIdle, mutate]);
+/** The description as its source wrote it (18 Nov 2026: no translation into Romanian, it spent the user's AI tokens). */
+function Description({ p }: { p: SymbolProfile }) {
   if (!p.description) {
     const problem = p.problems.find((x) => x.part === 'description');
     return <p className="text-[13px] text-faint">{problem ? `Descrierea nu s-a putut încărca acum (${problem.message}).` : 'Descrierea nu e disponibilă.'}</p>;
   }
-  const failed = translate.data?.error ?? (translate.isError ? errorMessage(translate.error) : null);
-  const text = p.translated ?? p.description.text;
   return (
     <div className="flex flex-col gap-2">
-      {text.split('\n\n').map((para, i) => (
+      {p.description.text.split('\n\n').map((para, i) => (
         <p key={i} className="text-[13.5px] leading-relaxed text-text">
           {para}
         </p>
       ))}
-      <p className="text-[12px] text-faint">
-        {p.translated
-          ? `Tradus în română cu AI-ul tău, din textul ${p.description.source}.`
-          : english === null
-            ? `Sursa: ${p.description.source}.`
-            : translate.isPending
-              ? 'Se traduce în română…'
-              : failed
-                ? `În engleză (${p.description.source}). Traducerea nu s-a putut face: ${failed}.`
-                : `În engleză (${p.description.source}). Cu o cheie AI (Setări → Inteligență artificială), descrierea apare în română.`}
-      </p>
+      <p className="text-[12px] text-faint">Sursa: {p.description.source}.</p>
     </div>
   );
 }
@@ -148,7 +120,7 @@ export function SymbolInfo({ item, onClose }: { item: WatchItem; onClose: () => 
             <h3 id="info-desc" className="text-[13px] font-semibold text-muted">
               Descriere
             </h3>
-            <Description p={p} item={item} />
+            <Description p={p} />
             {p.facts.length > 0 && (
               <dl className="mt-1 grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-[13px]">
                 {p.facts.map((f) => (

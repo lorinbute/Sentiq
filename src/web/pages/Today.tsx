@@ -283,7 +283,7 @@ function NextEventTile() {
       {next ? (
         <>
           <div className="flex items-center gap-2.5">
-            <EventIcon title={next.title} impact={next.impact} source={next.source} size={20} className="text-impact-high" />
+            <EventIcon title={next.title} impact={next.impact} source={next.source} symbol={next.currency} size={20} className="text-impact-high" />
             <span className="text-[20px] font-semibold tracking-[-0.02em]">
               {next.currency === 'ALL' ? 'Global' : next.currency} {next.title}
             </span>
@@ -327,7 +327,7 @@ function NextEventTile() {
               {(left.length ? left : events).slice(0, 3).map((e) => (
                 <li key={e.id} className={clsx('grid grid-cols-[44px_14px_minmax(0,1fr)_auto] items-center gap-2.5', e.ts <= now && !e.allDay && 'text-muted')}>
                   <span className="num text-faint">{e.allDay ? 'ziua' : fmtTime(e.ts, tz)}</span>
-                  <EventIcon title={e.title} impact={e.impact} source={e.source} size={14} className={e.impact === 'High' ? 'text-impact-high' : 'text-impact-medium'} />
+                  <EventIcon title={e.title} impact={e.impact} source={e.source} symbol={e.currency} size={14} className={e.impact === 'High' ? 'text-impact-high' : 'text-impact-medium'} />
                   <span className="truncate">
                     {e.currency === 'ALL' ? 'Global' : e.currency} {e.title}
                   </span>
@@ -382,7 +382,8 @@ function LiveNewsTile() {
           {q.data.items.map((n) => (
             <li key={n.clusterId} className="grid grid-cols-[44px_16px_minmax(0,1fr)_48px] items-center gap-2.5 px-5 py-2 text-[13px]">
               <span className="num text-faint">{fmtTime(n.publishedAt, tz)}</span>
-              <TopicIcon title={n.title} summary={n.summary} category={n.category} coins={n.coins} size={16} stocks={stocks} />
+              {/* FD-NEWSKIND: the companies the server recognised, with the stocks followed. */}
+              <TopicIcon title={n.title} summary={n.summary} category={n.category} coins={n.coins} size={16} stocks={new Set([...stocks, ...(n.stocks ?? [])])} />
               {n.url ? (
                 <a href={n.url} target="_blank" rel="noopener noreferrer" className="truncate text-text" title={`${n.title} (${n.source.name})`}>
                   {n.title}
@@ -622,7 +623,8 @@ function DriversTile() {
           {list.map((x) => (
             <li key={x.id} className="grid grid-cols-[16px_46px_minmax(0,1fr)] gap-2.5 text-[13px] leading-snug">
               <span className="pt-px">
-                <TopicIcon title={x.title} category={x.category} coins={x.coins} size={16} stocks={stocks} />
+                {/* FD-NEWSKIND: the companies among the story's symbols (their logos), with the stocks followed. */}
+                <TopicIcon title={x.title} category={x.category} coins={x.coins} size={16} stocks={new Set([...stocks, ...(x.stocks ?? [])])} />
               </span>
               <span className={clsx('num', SCORE_TEXT(x.sentiment))}>{fmtScore(x.sentiment)}</span>
               <div className="flex min-w-0 flex-col gap-0.5">

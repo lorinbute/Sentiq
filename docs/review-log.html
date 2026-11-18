@@ -9917,4 +9917,24 @@ Suita completă: 120 de fișiere, 1.226 de teste, toate trec; <code>tsc</code> c
 </ul>
 <h2 id="runda-353--zero-probleme-fix-posmargin-fix-secname">Runda 353 — zero probleme (FIX-POSMARGIN, FIX-SECNAME)</h2>
 <p>Recitit diff-ul celor două fișiere și FD / TD: nimic de reparat.</p>
+<h2 id="runda-354--fd-newskind-fd-stocklogos-fd-notranslate">Runda 354 — FD-NEWSKIND, FD-STOCKLOGOS, FD-NOTRANSLATE (18 nov 2026)</h2>
+<ul>
+<li><strong>Logo-urile cerute în același moment nu ajungeau într-o singură cerere la TradingView:</strong> fiecare cerere citea întâi baza, iar latența ei le împrăștia peste fereastra de 25 ms (testul a prins două cereri la screener pentru două simboluri). Acum simbolurile intră în coadă imediat; lotul citește baza o dată pentru toate, apoi întreabă screener-ul o dată pentru cele lipsă.</li>
+<li><strong>Același simbol cerut de două ori deodată</strong> se descărca de două ori (cererea în curs se înregistra după citirea bazei). Acum se înregistrează înainte.</li>
+<li>Testul vechi al fișei aștepta câmpul <code>translated</code>; scos odată cu traducerea.</li>
+<li>Verificat pe serverul de audit (schemă de test), cu o monedă „DIS” în lista de monede și Disney / Nike ca membri: știrea „Disney shares jump…” → <code>stocks: ['DIS']</code>, „Nike stock falls…” → <code>['NKE']</code>, BTC / ETH / SOL → monede; <code>/api/logo/s/DIS</code>, <code>NKE</code>, <code>MSFT</code> → SVG-urile TradingView (200). Site (Chrome fără sunet, construit în scratchpad): Știri cu logo-urile Disney, Nike, Nvidia lângă știri și pe etichete; Liste de urmărire cu NVDA, AAPL. Aplicația iOS: lista de știri cu aceleași logo-uri; panoul DIS: Walt Disney Company (The), Acțiune, descrierea Nasdaq în engleză („Sursa: Nasdaq.”), trimestrele; „Deschide graficul” → acțiunea DIS (1d, Nasdaq).</li>
+</ul>
+<h2 id="runda-355--fd-newskind-ce-mișcă-piața">Runda 355 — FD-NEWSKIND, „Ce mișcă piața” (18 nov 2026)</h2>
+<ul>
+<li>Știrile-motor nu aveau tipul simbolurilor: o companie neurmărită primea iconița unei monede (sau inițialele). Acum au <code>stocks</code>, ca știrile.</li>
+<li>Verificat pe serverul de audit, cu NVDA scos din listă: <code>/api/sentiment/today</code> → NVDA cu <code>stocks: ['NVDA']</code>; site (Chrome fără sunet): lista întreagă cu logo-urile Disney și NVIDIA (o dată, NVIDIA în inițiale: o descărcare eșuată la TradingView, cu pauza de 10 minute dinainte de o nouă încercare; după ea, 200); aplicația: lista întreagă cu logo-urile NVIDIA și Disney.</li>
+<li>„Știrea cu Disney încă arată DIS/USDT” (utilizatorul): lista de știri păstrată pe telefon dinainte de deploy; după prima reîmprospătare a fost bine (confirmat de utilizator). Producția, citită doar cu SELECT: <code>stocks: ["DIS"]</code> pentru ambii utilizatori.</li>
+</ul>
+<h2 id="runda-356--fd-aione-fd-stocklogos-calendar">Runda 356 — FD-AIONE, FD-STOCKLOGOS în calendar (18 nov 2026)</h2>
+<ul>
+<li><strong>Găsit la teste:</strong> după un apel eșuat, a doua cerere găsea starea de pauză nesalvată (scrierea era încă în curs) și chema AI-ul din nou. Acum starea se scrie înainte de răspuns.</li>
+<li><strong>Găsit la audit:</strong> în celula calendarului, logo-ul NVIDIA ieșea întins pe verticală. Mărimea logo-ului e acum fixă.</li>
+<li>Verificat pe serverul de audit, cu un AI simulat (fără niciun furnizor real; răspunde doar unui titlu trimis singur). Aplicația pe iPad: „Bitcoin ETF inflows…” (doar reguli) → „Trimite la analiză” → „Se analizează…” → −0,35, Gemini, importanța 2 (AI), „De ce”; rândul din listă −0,35; butonul dispare. Site (Chrome fără sunet): „Rezultate trimestriale NVIDIA” cu logo-ul pătrat de 14 px.</li>
+<li>Teste: suita întreagă 1274 / 1274 (cu <code>ai-one.test.ts</code> și ruta din <code>server.test.ts</code>), typecheck curat; iOS 185 / 185.</li>
+</ul>
 </body></html>

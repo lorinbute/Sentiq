@@ -10066,4 +10066,55 @@ Hash-ul e hex, deci fără caractere speciale pentru <code>LIKE</code>. O sesiun
 <li>Motorul aplicației e în <code>src/ios-core</code> (<code>vite.ios-core.config.ts</code>). Nu face parte din pachetul site-ului.</li>
 <li>Publicat cu deploy-ul 4a237507 (17 nov. 2026), împreună cu FD-SSTABLE.</li>
 </ul>
+<h2 id="td-stocklogos--implementează-fd-stocklogos">TD-STOCKLOGOS — implementează FD-STOCKLOGOS</h2>
+<ul>
+<li><code>src/server/market/stock-logos.ts</code>, <code>StockLogos</code>:
+<ul>
+<li><code>logo(symbol)</code>: simbolul după regula TradingView (<code>isTvSymbol</code>: <code>AAPL</code>, <code>BRK.B</code>); din <code>market_cache</code> (<code>logo:v1:stock:SYM</code>; valoarea e SVG-ul, sau gol pentru „fără logo”) cât timp e proaspăt (30 de zile cu logo, 7 fără); altfel descărcat. O eroare de rețea nu se scrie în bază: simbolul nu se mai întreabă 10 minute (în memorie).</li>
+<li>Cererile din aceeași clipă (o listă cu multe acțiuni) se adună 25 ms și pleacă într-o singură cerere la screener (<code>tvScan(names, ['name', 'is_primary', 'logoid'])</code>, până la 50 de nume); dintre listările cu același nume, cea principală. Cererile pentru același simbol în curs se așteaptă una pe alta.</li>
+<li>SVG-ul: <code>https://s3-symbol-logo.tradingview.com/&lt;logoid&gt;.svg</code> (<code>logoid</code> doar <code>[a-z0-9]</code>, <code>-</code>, <code>/</code>), cel mult 6 descărcări deodată, cel mult 64 KB.</li>
+<li><code>cleanSvg</code>: scoate comentariile și declarația XML de la început; trebuie să înceapă cu <code>&lt;svg</code> și să se termine cu <code>&lt;/svg&gt;</code>; respins dacă are <code>&lt;script</code>, <code>&lt;foreignObject</code>, <code>&lt;image</code>, atribute <code>on…=</code>, <code>javascript:</code> sau trimiteri în afara fișierului (<code>href</code> / <code>url(</code> spre altceva decât <code>#…</code>).</li>
+</ul></li>
+<li>Ruta <code>GET /api/logo/s/:symbol</code> (cu sesiune, nu publică ca a monedelor): <code>image/svg+xml</code> cu aceeași <code>Content-Security-Policy</code> ca logo-urile monedelor, <code>Cache-Control: private, max-age=86400</code>; 404 fără logo.</li>
+<li>Site: <code>CoinLogo</code> cu <code>square</code> (acțiunile, peste tot) cere <code>/api/logo/s/SYM</code> într-un <code>&lt;img&gt;</code> tăiat la pătratul rotunjit; o eroare îl trece pe inițiale, ținut minte în pagină (ca la monede).</li>
+<li>Teste: <code>cleanSvg</code> (acceptă SVG-urile TradingView, respinge scripturi, imagini, trimiteri externe), alegerea listării principale și a <code>logoid</code>-ului, cache-ul (proaspăt, expirat, „fără logo”), adunarea cererilor într-o singură cerere la screener, eroarea de rețea nescrisă; ruta (sesiune, 404, antetele).</li>
+</ul>
+<h2 id="td-newskind--implementează-fd-newskind">TD-NEWSKIND — implementează FD-NEWSKIND</h2>
+<ul>
+<li><code>src/server/news/symbol-kinds.ts</code>: <code>isStockSymbol(symbol, kinds)</code> / <code>stocksOf(coins, kinds)</code>; <code>kinds</code> = lista utilizatorului (simbol → fel), <code>MemberIndex</code> (membrii și acțiunile listate, <code>memberIndex(indexMembers.get())</code>), <code>isCoin</code> (detectorul: <code>isCrypto</code>); monedele principale din <code>CORE_COINS</code>.</li>
+<li><code>queryNews(…, known)</code> citește și felul simbolurilor din lista utilizatorului; <code>NewsItemDto.stocks</code>. Ruta <code>/api/news</code> dă <code>known</code> (indexul membrilor refăcut doar când se schimbă listele, <code>asOf</code>; detectorul din <code>CoinRegistry</code>, deja ținut în memorie).</li>
+<li>Site: <code>News</code> (rândurile și pictograma) și știrile din Azi folosesc <code>item.stocks</code> împreună cu acțiunile urmărite.</li>
+<li>Teste: regula (<code>symbol-kinds.test.ts</code>: DIS cu o monedă cu același simbol, monedele principale listate, LINK listat dar monedă, lista utilizatorului, fără liste); <code>queryNews</code> pe schema de test; <code>/api/news</code> (BTC monedă).</li>
+</ul>
+<h2 id="td-notranslate--implementează-fd-notranslate">TD-NOTRANSLATE — implementează FD-NOTRANSLATE</h2>
+<ul>
+<li>Scoase: ruta <code>POST /api/symbols/translate</code> (acum 404), <code>SymbolProfiles.translate</code> / <code>translation</code>, câmpul <code>translated</code> (o copie veche din <code>market_cache</code> care îl are e trimisă fără el), dependența de <code>AiService</code> a serviciului.</li>
+<li>Site: <code>SymbolInfo</code> arată textul sursei cu „Sursa: …”. Aplicația: la fel (<code>SymbolProfileModel</code>).</li>
+</ul>
+<h3>TD-NEWSKIND · „Ce mișcă piața”</h3>
+<ul>
+<li><code>Driver.stocks</code> (servit, niciodată păstrat). Rutele <code>/api/sentiment/today</code> și <code>/api/sentiment/day/:day</code> trec ziua prin <code>withDriverStocks</code>: copii ale știrilor-motor cu <code>stocksOf(coins, kinds)</code> pentru utilizatorul care cere (ziua poate fi cea ținută pentru toți, deci nu se modifică). Site: <code>TopicIcon</code> din „Ce mișcă piața” primește <code>x.stocks</code>; aplicația: <code>Driver.stocks</code>, în cardul din Azi și în listă. Test: <code>/api/sentiment/today</code> (BTC, SOL: <code>stocks: []</code>).</li>
+</ul>
+
+<h2 id="td-aione--implementează-fd-aione">TD-AIONE — implementează FD-AIONE</h2>
+<ul>
+<li><code>SentimentService.scoreOne(userId, newsId)</code> → <code>OneScoreResult</code>:
+<ul>
+<li><code>noAi</code>: fără scorer, adică fără scor ales sau fără cheie.</li>
+<li><code>missing</code>: știrea nu există.</li>
+<li><code>already</code>: un scor păstrat.</li>
+<li><code>paused</code> (cu ultima eroare): scorer-ul e în pauză; nu se face niciun apel.</li>
+<li>Altfel, <code>scorer.score([știrea])</code>, un apel cu un singur titlu. Apoi se așteaptă scrierea stării scorer-ului (<code>stateWrites</code>), ca într-o rundă. Fără ea, a doua cerere găsea starea nesalvată și relua pauza.</li>
+<li><code>failed</code> (cu eroarea) și <code>noScore</code>: nu se scrie nimic.</li>
+<li>Scorul: rândul fără scor al unei runde vechi se șterge, apoi <code>INSERT … WHERE NOT EXISTS</code>, doar pentru același titlu (ca rundele).</li>
+</ul></li>
+<li><code>POST /api/news/:id/analyze</code> (sesiune): <code>noAi</code> → 400, <code>missing</code> → 404, celelalte → 409 cu motivul. Răspunsul: <code>{ sentiment: { score, label, engine, meta: null, reason }, impact, impactSource, already }</code>, impactul ca în <code>queryNews</code> (al AI-ului, altfel cel comun, altfel al regulilor).</li>
+<li>Teste: <code>sentiment/ai-one.test.ts</code> (o știre din afara indicelui, veche de o săptămână, singură în apel; din nou → <code>already</code>; un rând gol al unei runde reîncercat; un răspuns fără scor; eroarea, apoi pauza fără apel; fără AI; știre lipsă); <code>server.test.ts</code> (400 fără AI, 404, 409 „AI-ul nu a răspuns.”, apoi „AI-ul tău e în pauză după o eroare.”).</li>
+<li>Aplicația: <code>NewsAnalyses</code> (comun, <code>@Observable</code>) ține răspunsurile din sesiune; <code>NewsStoryView</code>, <code>NewsListRow</code> și cardul din Azi le aplică. Butonul apare doar dacă <code>SettingsView.aiScoring</code> e adevărat (din setările ținute, deci fără întârziere) și dacă <code>Engine.isAI</code> e fals.</li>
+</ul>
+
+<h3>TD-STOCKLOGOS · Calendarul</h3>
+<ul>
+<li><code>EventIcon</code> primește <code>symbol</code> (moneda evenimentului; la <code>source === 'earn'</code> e simbolul companiei) și desenează <code>CoinLogo square</code>. Toate cele cinci locuri îl dau. <code>CoinLogo</code>: <code>style</code> cu lățimea și înălțimea, pentru că <code>height: auto</code> din stilul de bază lăsa un rând flex să întindă imaginea.</li>
+</ul>
 </body></html>

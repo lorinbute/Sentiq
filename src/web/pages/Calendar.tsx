@@ -143,7 +143,7 @@ function EventCard({ e, now, tz, next, onDelete }: { e: CalendarEvent; now: numb
         </span>
         {/* Past events are toned down by colour, not opacity, so small text keeps its contrast. */}
         <span className={clsx('flex gap-2 leading-snug', high && !past && 'font-semibold', past && 'text-muted')}>
-          <EventIcon title={e.title} impact={e.impact} source={e.source} size={14} className={clsx('mt-[3px]', past ? 'text-faint' : high ? 'text-impact-high' : 'text-muted')} />
+          <EventIcon title={e.title} impact={e.impact} source={e.source} symbol={e.currency} size={14} className={clsx('mt-[3px]', past ? 'text-faint' : high ? 'text-impact-high' : 'text-muted')} />
           <span>
             {e.title}
             {e.source === 'custom' && <span className="tag ml-1.5 align-middle font-normal">personal</span>}
@@ -282,7 +282,7 @@ export default function CalendarPage() {
         </div>
         {nextHigh && (
           <span className="inline-flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[13px]">
-            <EventIcon title={nextHigh.title} impact={nextHigh.impact} source={nextHigh.source} className="text-impact-high" />
+            <EventIcon title={nextHigh.title} impact={nextHigh.impact} source={nextHigh.source} symbol={nextHigh.currency} className="text-impact-high" />
             <span className="text-muted">Următorul major:</span>
             <strong className="font-semibold">
               {nextHigh.currency === 'ALL' ? 'Global' : nextHigh.currency} {nextHigh.title}

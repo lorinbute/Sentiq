@@ -46,6 +46,12 @@ export interface AiProgress {
   lastAt: number | null;
 }
 
+/** FD-AIONE: what asking the user's AI about one news item gave. */
+export type OneScoreResult =
+  | { ok: true; already: boolean }
+  | { ok: false; reason: 'noAi' | 'missing' | 'noScore' }
+  | { ok: false; reason: 'paused' | 'failed'; message: string | null };
+
 const signatureOf = (provider: string, model: string, key: string) => `${provider}|${model}|${createHash('sha256').update(key).digest('hex').slice(0, 16)}`;
 
 export class SentimentService {
@@ -281,6 +287,38 @@ export class SentimentService {
       { u: userId, t: Date.now(), j: JSON.stringify(scored.map((s) => ({ ...s, title: titles.get(s.id) ?? '' }))) },
     );
     return scored.length;
+  }
+
+  /**
+   * FD-AIONE (18 Nov 2026, the user: „Trimite la analiză … trimiți doar acel articol”): the user's AI scores one news
+   * item now, at their asking: any item (in the index or not, of any day), one call with that headline alone. An item
+   * their AI already scored is not sent again; an earlier call that gave no score is tried again. A paused AI (a failed
+   * call, a refused key) is not called: the reason is told. The score is kept as the rounds keep theirs.
+   */
+  async scoreOne(userId: number, newsId: string, signal?: AbortSignal): Promise<OneScoreResult> {
+    const scorer = await this.scorerFor(userId);
+    if (!scorer) return { ok: false, reason: 'noAi' };
+    const row = await this.db.get<SentimentInput & { title_now: string }>('SELECT n.id, n.title, n.summary, n.title AS title_now FROM news n WHERE n.id = ?', [newsId]);
+    if (!row) return { ok: false, reason: 'missing' };
+    const kept = await this.db.get<{ score: number | null }>('SELECT score FROM news_ai_scores WHERE user_id = ? AND news_id = ?', [userId, newsId]);
+    if (kept && kept.score !== null) return { ok: true, already: true };
+    if (scorer.paused()) return { ok: false, reason: 'paused', message: scorer.status().lastError?.message ?? null };
+    const [scored] = await scorer.score([{ id: row.id, title: row.title, summary: row.summary }], signal);
+    // The state it told (an error and its pause, or their end) is saved before the answer, as a run saves its own: the
+    // next asking, and the page, read it.
+    await this.stateWrites.get(userId);
+    if (!scored) return { ok: false, reason: 'failed', message: scorer.status().lastError?.message ?? null };
+    if (scored.score === null) return { ok: false, reason: 'noScore' };
+    // An empty row of an earlier round goes (its place is this score); a round that scored it meanwhile keeps its own.
+    await this.db.run(
+      `DELETE FROM news_ai_scores WHERE user_id = @u AND news_id = @id AND score IS NULL;
+       INSERT INTO news_ai_scores(user_id, news_id, score, label, engine, impact, reason, scored_at)
+       SELECT @u, n.id, @score, @label, @engine, @impact, @reason, @t FROM news n
+       WHERE n.id = @id AND n.title = @title COLLATE ${BIN}
+         AND NOT EXISTS (SELECT 1 FROM news_ai_scores a WHERE a.user_id = @u AND a.news_id = n.id)`,
+      { u: userId, id: row.id, score: scored.score, label: scored.label, engine: scored.engine, impact: scored.impact, reason: scored.reason, title: row.title_now, t: Date.now() },
+    );
+    return { ok: true, already: false };
   }
 
   /** Clears the common scores of news published since `since` (optionally only those from one engine). */

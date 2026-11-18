@@ -1,16 +1,12 @@
 // FD-WATCHLISTS §3: what the "Date financiare" popup shows of a symbol. A stock: Nasdaq's description, sector and
 // industry, and the last four quarters from TradingView's screener (it has the newly listed ones Nasdaq has not yet);
-// a coin: CoinGecko's description; an index: Sentiq's own words. Kept a while in market_cache (the same for everyone);
-// the description translated into Romanian with the user's own AI, once per text.
-import { createHash } from 'node:crypto';
+// a coin: CoinGecko's description; an index: Sentiq's own words. Kept a while in market_cache (the same for everyone).
+// The description stays as its source wrote it (the user, 18 Nov 2026: no translation into Romanian, it spent AI tokens).
 import { z } from 'zod';
 import type { Db } from '../db/database.ts';
 import type { Logger } from '../log.ts';
-import type { AiService } from '../ai/service.ts';
 import { httpRequest } from '../net/http.ts';
-import { ValidationError } from '../settings.ts';
 import { isTvSymbol, tvScan } from '../calendar/sources.ts';
-import { AI_PROVIDER_INFO } from '../../shared/ai.ts';
 import { indexById, plainSymbol } from '../../shared/indices.ts';
 import type { NasdaqClient } from './stocks.ts';
 
@@ -37,8 +33,6 @@ export interface SymbolProfile {
   symbol: string;
   name: string | null;
   description: { text: string; source: 'Nasdaq' | 'CoinGecko' | 'Sentiq'; lang: 'en' | 'ro' } | null;
-  /** The Romanian translation made already (FD-WATCHLISTS §3); null when none yet. */
-  translated: string | null;
   facts: { label: string; value: string; href?: string }[];
   /** Newest first, at most four. */
   quarters: ProfileQuarter[];
@@ -56,7 +50,6 @@ export const DESCRIPTION_MAX = 1500;
 const QUARTERS = 4;
 
 const profileKey = (kind: string, symbol: string) => `profile:v1:${kind}:${symbol}`;
-const translationKey = (text: string) => `translate:ro:${createHash('sha256').update(text).digest('hex').slice(0, 32)}`;
 
 /** TradingView's columns for a stock's profile, in this order. */
 export const TV_PROFILE_COLUMNS = [
@@ -222,22 +215,14 @@ async function getJson(url: string, what: string): Promise<unknown> {
   }
 }
 
-const TRANSLATE_SYSTEM = [
-  'You translate descriptions of companies, stock indices and crypto-assets into Romanian, for a trading app.',
-  'Keep every name, ticker, product, number and date as it is; use the usual Romanian financial terms.',
-  'Return only the translation, as plain text, with the same paragraphs.',
-].join(' ');
-
 export class SymbolProfiles {
   private readonly db: Db;
-  private readonly ai: AiService;
   private readonly log: Logger;
   private readonly nasdaq: Pick<NasdaqClient, 'companyProfile'>;
   private readonly now: () => number;
 
-  constructor(db: Db, ai: AiService, log: Logger, nasdaq: Pick<NasdaqClient, 'companyProfile'>, now: () => number = Date.now) {
+  constructor(db: Db, log: Logger, nasdaq: Pick<NasdaqClient, 'companyProfile'>, now: () => number = Date.now) {
     this.db = db;
-    this.ai = ai;
     this.log = log;
     this.nasdaq = nasdaq;
     this.now = now;
@@ -260,18 +245,6 @@ export class SymbolProfiles {
     );
   }
 
-  /** The Romanian translation of a text made already, or null. */
-  async translation(text: string): Promise<string | null> {
-    const row = await this.db.get<{ value: string }>('SELECT value FROM market_cache WHERE [key] = ?', [translationKey(text)]);
-    if (!row) return null;
-    try {
-      const v = JSON.parse(row.value) as { text?: unknown };
-      return typeof v.text === 'string' ? v.text : null;
-    } catch {
-      return null;
-    }
-  }
-
   /** What the popup shows of a symbol (FD-WATCHLISTS §3). `kind` is the list's; a stock may turn out a fund. */
   async profile(kind: 'crypto' | 'stock' | 'index', symbol: string, name: string | null = null): Promise<SymbolProfile> {
     if (kind === 'index') return this.indexProfile(symbol);
@@ -279,8 +252,9 @@ export class SymbolProfiles {
     const hit = await this.cached(kind, symbol, ttl);
     const p = hit ?? (kind === 'stock' ? await this.stockProfile(symbol, name) : await this.cryptoProfile(symbol, name));
     if (!hit && p.problems.length === 0) await this.put(profileKey(kind, symbol), p).catch((err: Error) => this.log.warn(`profile ${symbol}: not kept (${err.message})`));
-    // The translation may have come after the profile was kept.
-    return { ...p, translated: p.description?.lang === 'en' ? await this.translation(p.description.text) : null };
+    // A copy kept before 18 Nov 2026 carries a `translated` field: not sent (no translation any more).
+    const { translated: _old, ...shown } = p as SymbolProfile & { translated?: unknown };
+    return shown;
   }
 
   private indexProfile(symbol: string): SymbolProfile {
@@ -290,7 +264,6 @@ export class SymbolProfiles {
       symbol,
       name: info?.name ?? plainSymbol(symbol),
       description: info ? { text: info.description, source: 'Sentiq', lang: 'ro' } : null,
-      translated: null,
       facts: [],
       quarters: [],
       next: null,
@@ -326,7 +299,6 @@ export class SymbolProfiles {
       symbol,
       name: company?.name ?? name,
       description: company?.description ? { text: company.description, source: 'Nasdaq', lang: 'en' } : null,
-      translated: null,
       facts,
       quarters: fund ? [] : (tv?.quarters ?? []),
       next: fund ? null : (tv?.next ?? null),
@@ -336,7 +308,7 @@ export class SymbolProfiles {
   }
 
   private async cryptoProfile(symbol: string, name: string | null): Promise<SymbolProfile> {
-    const base: SymbolProfile = { kind: 'crypto', symbol, name, description: null, translated: null, facts: [], quarters: [], next: null, problems: [], fetchedAt: this.now() };
+    const base: SymbolProfile = { kind: 'crypto', symbol, name, description: null, facts: [], quarters: [], next: null, problems: [], fetchedAt: this.now() };
     try {
       const id = pickCoinId(await getJson(`https://api.coingecko.com/api/v3/search?query=${encodeURIComponent(symbol)}`, 'CoinGecko'), symbol);
       if (!id) return base;
@@ -360,30 +332,4 @@ export class SymbolProfiles {
       return { ...base, problems: [{ part: 'description', message: (err as Error).message }] };
     }
   }
-
-  /**
-   * The description in Romanian, with the user's own AI (FD-WATCHLISTS §3), kept for everyone once made. Throws a
-   * `ValidationError` without a key, and the provider's error (in Romanian) when it refuses.
-   */
-  async translate(userId: number, text: string): Promise<string> {
-    const known = await this.translation(text);
-    if (known) return known;
-    const c = await this.ai.config(userId);
-    if (!c.key) throw new ValidationError('Fără o cheie AI, descrierea rămâne în engleză');
-    const answer = await this.ai.client(c.provider, c.key, c.model).generate({
-      system: TRANSLATE_SYSTEM,
-      prompt: text,
-      schema: z.object({ text: z.string() }),
-      name: 'translation',
-      maxTokens: 3000,
-      effort: 'low',
-      timeoutMs: 60_000,
-    });
-    if (answer.usage) void this.ai.usage.record(userId, 'translate', { items: 1, input: answer.usage.input, output: answer.usage.output, model: c.model });
-    const out = answer.parsed?.text.trim();
-    if (!out) throw new Error(`${AI_PROVIDER_INFO[c.provider].product} nu a dat o traducere`);
-    await this.put(translationKey(text), { text: out }).catch((err: Error) => this.log.warn(`translation not kept (${err.message})`));
-    return out;
-  }
 }
-

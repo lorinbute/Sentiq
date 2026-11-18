@@ -42,6 +42,8 @@ export interface Driver {
   category?: SourceCategory;
   /** Coins the item is about; filled in by DailySentimentService (the pure index has no coin data). */
   coins?: string[];
+  /** FD-NEWSKIND, as served to one user (never stored): the symbols of `coins` that are companies'. */
+  stocks?: string[];
   /** FD-SCOREWHY: what gave the item its score, for today's drivers as served (never stored). */
   why?: ScoreWhy;
   /** FD-WHYPLAIN, as served: the index without this item (unrounded), and how much it moved it. */
