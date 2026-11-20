@@ -94,7 +94,7 @@ beforeAll(async () => {
 beforeEach(async () => {
   dir = mkdtempSync(path.join(tmpdir(), 'sq-trading-'));
   const config = { ...loadConfig({ SENTIQ_DATA_DIR: dir } as NodeJS.ProcessEnv), webDist: path.join(dir, 'no-web') };
-  ctx = await createContext(config, silentLogger, { nli: fakeNli, clientFactory: fakeClients, traderFactory: fakeTrader, box: BOX, retryDelaysMs: [0, 0], db: await testDb() });
+  ctx = await createContext(config, silentLogger, { nli: fakeNli, clientFactory: fakeClients, traderFactory: fakeTrader, box: BOX, retryDelaysMs: [0, 0], db: await testDb(), marketTape: null });
   app = await buildApp(ctx);
   await ctx.db.run('UPDATE users SET email = ?, name = ?, password_hash = ?, totp_secret = ?, totp_confirmed_at = 1 WHERE id = 1', ['admin@example.com', 'Admin', await hashPassword(PASSWORD), BOX.encrypt(TOTP)]);
   H.cookie = `sentiq_session=${await ctx.sessions.create(1, 'full')}`;

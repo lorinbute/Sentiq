@@ -27,6 +27,7 @@ import { BotEngine } from './bots/engine.ts';
 import { BotService } from './bots/service.ts';
 import { SecretBox } from './secrets/crypto.ts';
 import { DailySentimentService } from './sentiment/daily.ts';
+import { MarketMoves, type MarketTape } from './sentiment/market-move.ts';
 import { TransformersNli, type NliScorer } from './sentiment/local.ts';
 import { SentimentService } from './sentiment/service.ts';
 import { publishPublicInstance, SettingsService } from './settings.ts';
@@ -108,6 +109,8 @@ export interface ContextOverrides {
   db?: Db;
   /** The users' AI clients and the network of their model lists (tests). */
   ai?: Pick<AiServiceDeps, 'clientFactory' | 'http' | 'anthropicSdk'>;
+  /** FD-MARKETMOVE: the indices' data of the market's reaction (tests: theirs; null: none, the news' index alone). */
+  marketTape?: (() => Promise<MarketTape | null>) | null;
 }
 
 const DEFAULT_WATCHLIST = ['BTC', 'ETH', 'SOL'];
@@ -186,19 +189,28 @@ export async function createContext(config: AppConfig, log: Logger, overrides: C
   const presence = new Presence(db);
   const present = () => presence.activeUsers();
   const sentiment = new SentimentService(db, ai, nli, log, present);
-  // FD-INDEXNEWS: a user's own index also when only their stock news are limited to indices.
-  const daily = new DailySentimentService(db, settings, ai, (userId) => stockScopeFor(db, settings, userId));
   const calendar = new CalendarService(db, log);
   const economy = new EconomyService(db, log);
   const market = overrides.market ?? new MarketData({ proxy, retryDelaysMs: overrides.retryDelaysMs });
   // FD-TDKEYS: each user's Twelve Data key.
   const stocks = overrides.stocks ?? new StockData({ db, key: (userId) => settings.getTwelveDataKey(userId) });
+  // FD-MARKETMOVE: the S&P 500 and the Nasdaq 100 (CNBC, then Cboe / Nasdaq), BTC and ETH, for the markets' reactions in the index.
+  const moves = new MarketMoves({
+    history: (id) => stocks.indices.history(id),
+    intraday: (id, tf, count) => stocks.indices.intraday(id, tf, count),
+    quote: (id) => stocks.indices.quote(id),
+    // BTC and ETH from the admin's default exchange (FD-MARKETMOVE, crypto).
+    crypto: async (symbol, tf, count) => (await market.candles((await settings.get()).marketData.exchange, symbol, tf, count)).candles,
+    now: Date.now,
+  });
+  // FD-INDEXNEWS: a user's own index also when only their stock news are limited to indices.
+  const daily = new DailySentimentService(db, settings, ai, (userId) => stockScopeFor(db, settings, userId), overrides.marketTape === undefined ? () => moves.tape() : overrides.marketTape);
   const marketSource = new MarketSource(db, settings, market);
   const scanner = new Scanner(db, settings, market, log, stocks, marketSource, present);
   const accounts = new AccountsService(db, box, log, overrides.clientFactory ?? defaultClientFactory(proxy), { retryDelaysMs: overrides.retryDelaysMs, brokerFactory: overrides.brokerFactory });
   const paper = new PaperService({ db, quotes: { market, stocks, source: marketSource }, log });
   accounts.attachPaper(paper);
-  const trading = new TradingService({ db, accounts, log, traderFactory: overrides.traderFactory, paper });
+  const trading = new TradingService({ db, accounts, log, traderFactory: overrides.traderFactory, paper, quotes: { market, stocks, source: marketSource } });
   const scheduler = new Scheduler(db, log);
   // FD-PUSH: notifications through Apple (the key from the App Service settings; without it, nothing is sent).
   let apns: Apns | null = null;
@@ -218,7 +230,8 @@ export async function createContext(config: AppConfig, log: Logger, overrides: C
   const throttle = new Throttle();
   const watchlists = new WatchlistService(db);
   const profiles = new SymbolProfiles(db, log, stocks.nasdaq);
-  const stockLogos = new StockLogos(db, log);
+  // FIX-LOGOBACKUP: a share TradingView has no logo for, from Twelve Data (the asking user's key).
+  const stockLogos = new StockLogos(db, log, Date.now, (symbol, userId) => stocks.logoUrl(symbol, userId));
   const retag = new RetagQueue(async () => retagRecent(db, await coins.get(), Date.now() - 7 * 86_400_000, await coins.classifier()), log);
   return {
     config,

@@ -1,17 +1,18 @@
 // The order form (FD-TRADING §2–§3): fill in, "Verifică ordinul" (the server rounds and checks it), the confirmation
 // with exactly what leaves, "Confirmă și trimite", the result. Opened from Tranzacții (new order, sell a holding,
 // close a position) and from a chart. One key per version of the form: sending the same form twice places one order.
+import { fxTradable, isFxRate, type FxKind } from '../../shared/fx.ts';
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { clsx } from 'clsx';
 import { AlertTriangle, CheckCircle2, Loader2 } from 'lucide-react';
-import { TRADING, ORDER_KIND_RO, isDemoEnv, type InstrumentInfo, type OrderKind, type OrderPreview, type OrderResult, type OrderSide, type OrderTicket as Ticket, type TicketPrefs, type ClosablePosition, type TradeMarket, type TradeSymbol, type TradingCaps } from '../../shared/trading.ts';
+import { TRADING, ORDER_KIND_RO, ETORO_LEVERAGES, isDemoEnv, snapEtoroLeverage, type InstrumentInfo, type OrderKind, type OrderPreview, type OrderResult, type OrderSide, type OrderTicket as Ticket, type TicketPrefs, type ClosablePosition, type TradeMarket, type TradeSymbol, type TradingCaps } from '../../shared/trading.ts';
 import { api, ApiError, errorMessage } from '../api.ts';
 import { saveSettingsPatch } from '../chart/prefs.ts';
 import { useSettings } from '../hooks.ts';
 import { accountPatch, initialAccount, isClosing, rememberedFields, ticketPatch } from './ticket-memory.ts';
 import { closeRows, pnlPct, rowUnitsProblem } from './close-picker.ts';
-import { fmtMoney, fmtPct } from '../format.ts';
+import { fmtMoney, fmtPct, fmtPlain } from '../format.ts';
 import { Modal } from './Modal.tsx';
 import { ProviderLogo } from './ProviderLogo.tsx';
 import { settlePortfolio } from '../portfolio-settle.ts';
@@ -28,6 +29,8 @@ export interface TicketSeed {
   accountId?: number;
   /** Only accounts of this kind (a chart of a coin or of a share). */
   kind?: 'crypto' | 'stocks';
+  /** FD-FXCOMMODITIES: a pair's or a commodity's chart: only the accounts that trade it (eToro forex, a Paper profile). */
+  fx?: FxKind;
   market?: TradeMarket;
   symbol?: string;
   side?: OrderSide;
@@ -125,8 +128,8 @@ export function OrderTicket({ seed, onClose }: { seed: TicketSeed; onClose: () =
   const qc = useQueryClient();
   const caps = useTradingCaps();
   const eligible = useMemo(
-    () => (caps.data?.accounts ?? []).filter((a) => a.enabled && a.markets.length > 0 && (!seed.kind || a.kind === seed.kind) && (!seed.market || a.markets.includes(seed.market))),
-    [caps.data, seed.kind, seed.market],
+    () => (caps.data?.accounts ?? []).filter((a) => a.enabled && a.markets.length > 0 && (!seed.kind || a.kind === seed.kind) && (!seed.market || a.markets.includes(seed.market)) && (!seed.fx || fxTradable(a, seed.fx, seed.symbol))),
+    [caps.data, seed.kind, seed.market, seed.fx],
   );
   // FD-TICKETMEMORY: the account and the choices kept from the last forms (not the symbol, the amount or the prices).
   const memory = useSettings().data?.orderTicket;
@@ -219,6 +222,8 @@ export function OrderTicket({ seed, onClose }: { seed: TicketSeed; onClose: () =
   const ins = info.data;
   const quote = ins?.currency ?? (futures ? 'USDT' : stocks ? 'USD' : (typed.split('/')[1] ?? 'USDT').split(':')[0]);
   const base = ins?.base ?? typed.split('/')[0] ?? '';
+  // FIX-DECIMALS: the prices shown with the decimals of a forex / commodity rate (four under 10) or of any other price.
+  const fx = isFxRate(typed);
   // eToro's leverage limits are per instrument (and are checked there): no maximum shown for it.
   const maxLev = ins?.maxLeverage ?? platform?.futures?.maxLeverage ?? null;
   // FIX-PAPERLEV: a Paper Trading profile trades every market as futures: leverage, margin, reduce-only, TP / SL, short.
@@ -248,7 +253,8 @@ export function OrderTicket({ seed, onClose }: { seed: TicketSeed; onClose: () =
     ...(['stop', 'stop_limit', 'mit'].includes(kind) && parseNum(trigger) !== undefined ? { triggerPrice: parseNum(trigger) } : {}),
     ...(platform && platform.tif.length > 1 && kind !== 'market' ? { tif } : {}),
     // A reduce-only order closes: it neither sets the leverage nor attaches TP / SL.
-    ...(showsLeverage && !(margined && reduceOnly) && parseNum(leverage) !== undefined ? { leverage: Math.round(parseNum(leverage) as number) } : {}),
+    // FIX-ETOROLEV3: on eToro the leverage shown (a remembered one eToro refuses: the largest it accepts under it).
+    ...(showsLeverage && !(margined && reduceOnly) && parseNum(leverage) !== undefined ? { leverage: platform?.etoro && !margined ? snapEtoroLeverage(Math.round(parseNum(leverage) as number)) : Math.round(parseNum(leverage) as number) } : {}),
     ...(margined && platform?.futures?.marginModes ? { marginMode } : {}),
     ...(margined && reduceOnly ? { reduceOnly: true } : {}),
     ...(tpsl && parseNum(tp) !== undefined ? { takeProfit: parseNum(tp) } : {}),
@@ -424,25 +430,25 @@ export function OrderTicket({ seed, onClose }: { seed: TicketSeed; onClose: () =
       ['Direcție', <span className={long && !p.ticket.close ? 'text-bull' : 'text-bear'}>{sideRo}</span>],
       ...(hedgeOrder ? [['Mod poziții', 'hedge (long și short separate)'] as [string, React.ReactNode]] : []),
       ['Tip', ORDER_KIND_RO[p.ticket.kind]],
-      ['Cantitate', `${plain(p.amount)} ${base}${p.contracts !== null && p.contracts !== p.amount ? ` (${plain(p.contracts)} contracte)` : ''}`],
+      ['Cantitate', `${fmtPlain(p.amount)} ${base}${p.contracts !== null && p.contracts !== p.amount ? ` (${fmtPlain(p.contracts)} contracte)` : ''}`],
     ];
-    if (p.price !== null) rows.push(['Preț limită', `${plain(p.price)} ${quote}`]);
-    if (p.triggerPrice !== null) rows.push(['Preț de declanșare', `${plain(p.triggerPrice)} ${quote}`]);
-    if (p.last !== null) rows.push(['Prețul de acum', `${plain(p.last)} ${quote}`]);
-    rows.push(['Valoare estimată', p.value !== null ? `${plain(p.value, 2)} ${p.currency}` : '—']);
+    if (p.price !== null) rows.push(['Preț limită', `${fmtPlain(p.price, 8, fx)} ${quote}`]);
+    if (p.triggerPrice !== null) rows.push(['Preț de declanșare', `${fmtPlain(p.triggerPrice, 8, fx)} ${quote}`]);
+    if (p.last !== null) rows.push(['Prețul de acum', `${fmtPlain(p.last, 8, fx)} ${quote}`]);
+    rows.push(['Valoare estimată', p.value !== null ? `${fmtPlain(p.value, 2)} ${p.currency}` : '—']);
     if (p.ticket.leverage && (margined || platform.etoro)) rows.push(['Levier', `${p.ticket.leverage}×${p.ticket.marginMode ? `, marjă ${p.ticket.marginMode}` : ''}`]);
-    if (p.margin !== null) rows.push(['Marjă', `${plain(p.margin, 2)} ${p.currency}`]);
-    if (p.ticket.takeProfit) rows.push(['Take profit', plain(p.ticket.takeProfit)]);
-    if (p.ticket.stopLoss) rows.push(['Stop loss', plain(p.ticket.stopLoss)]);
+    if (p.margin !== null) rows.push(['Marjă', `${fmtPlain(p.margin, 2)} ${p.currency}`]);
+    if (p.ticket.takeProfit) rows.push(['Take profit', fmtPlain(p.ticket.takeProfit, 8, fx)]);
+    if (p.ticket.stopLoss) rows.push(['Stop loss', fmtPlain(p.ticket.stopLoss, 8, fx)]);
     if (p.ticket.reduceOnly) rows.push(['Reduce-only', 'da']);
     // FD-ETOROROWS: the position(s) closing, with their P/L now (for a whole sale).
     const closing = posRows?.filter((r) => p.ticket.close?.positionIds.includes(r.id)) ?? [];
     if (closing.length) {
-      rows.push([closing.length === 1 ? 'Poziție' : 'Poziții', closing.map((r) => `${openedDay(r)} (${plain(r.units, 6)} unități @ ${plain(r.openRate, 4)})`).join(', ')]);
+      rows.push([closing.length === 1 ? 'Poziție' : 'Poziții', closing.map((r) => `${openedDay(r)} (${fmtPlain(r.units, 6)} unități @ ${fmtPlain(r.openRate, 4, fx)})`).join(', ')]);
       const pnl = closing.every((r) => r.pnl !== null) ? closing.reduce((t, r) => t + (r.pnl as number), 0) : null;
       if (pnl !== null && p.ticket.close?.units === undefined) rows.push(['Profit / pierdere (nerealizat)', <span className={pnl >= 0 ? 'text-bull' : 'text-bear'}>{signedUsd(pnl)}</span>]);
     }
-    if (p.available !== null) rows.push(['Disponibil', `${plain(p.available, 4)} ${p.ticket.side === 'sell' && !margined && !p.ticket.close ? base : p.currency}`]);
+    if (p.available !== null) rows.push(['Disponibil', `${fmtPlain(p.available, 4)} ${p.ticket.side === 'sell' && !margined && !p.ticket.close ? base : p.currency}`]);
     const sendErr = send.error;
     const unknown = sendErr instanceof ApiError && sendErr.code === 'UNKNOWN_OUTCOME';
     return (
@@ -595,23 +601,23 @@ export function OrderTicket({ seed, onClose }: { seed: TicketSeed; onClose: () =
         )}
         {ins && (
           <p className="text-[12.5px] text-muted">
-            Preț acum: <span className="num text-text">{plain(ins.last)}</span> {quote}
+            Preț acum: <span className="num text-text">{fmtPlain(ins.last, 8, fx)}</span> {quote}
             {ins.availableQuote !== null && (
               <>
                 {' '}
-                · Disponibil: <span className="num text-text">{plain(ins.availableQuote, 4)}</span> {futures ? 'USDT' : quote}
+                · Disponibil: <span className="num text-text">{fmtPlain(ins.availableQuote, 4)}</span> {futures ? 'USDT' : quote}
               </>
             )}
             {!futures && ins.availableBase !== null && ins.availableBase > 0 && (
               <>
                 {' '}
-                · Deții: <span className="num text-text">{plain(ins.availableBase)}</span> {base}
+                · Deții: <span className="num text-text">{fmtPlain(ins.availableBase)}</span> {base}
               </>
             )}
             {ins.position && (
               <>
                 {' '}
-                · Poziție: <span className={ins.position.side === 'long' ? 'text-bull' : 'text-bear'}>{ins.position.side}</span> <span className="num">{plain(ins.position.amount)}</span>
+                · Poziție: <span className={ins.position.side === 'long' ? 'text-bull' : 'text-bear'}>{ins.position.side}</span> <span className="num">{fmtPlain(ins.position.amount)}</span>
               </>
             )}
             {ins.hedgePositions && (
@@ -623,13 +629,13 @@ export function OrderTicket({ seed, onClose }: { seed: TicketSeed; onClose: () =
                 {ins.hedgePositions?.long && (
                   <>
                     {' '}
-                    · <span className="text-bull">long</span> <span className="num">{plain(ins.hedgePositions.long.amount)}</span>
+                    · <span className="text-bull">long</span> <span className="num">{fmtPlain(ins.hedgePositions.long.amount)}</span>
                   </>
                 )}
                 {ins.hedgePositions?.short && (
                   <>
                     {' '}
-                    · <span className="text-bear">short</span> <span className="num">{plain(ins.hedgePositions.short.amount)}</span>
+                    · <span className="text-bear">short</span> <span className="num">{fmtPlain(ins.hedgePositions.short.amount)}</span>
                   </>
                 )}
               </>
@@ -665,8 +671,8 @@ export function OrderTicket({ seed, onClose }: { seed: TicketSeed; onClose: () =
                       return (
                         <tr key={r.id} className="hover:bg-hover">
                           <td className="px-3 py-2 text-muted">{openedDay(r)}</td>
-                          <td className="num px-3 py-2 text-right">{plain(r.units, 6)}</td>
-                          <td className="num px-3 py-2 text-right">{plain(r.openRate, 4)}</td>
+                          <td className="num px-3 py-2 text-right">{fmtPlain(r.units, 6)}</td>
+                          <td className="num px-3 py-2 text-right">{fmtPlain(r.openRate, 4, fx)}</td>
                           <td className="num px-3 py-2 text-right text-muted">{r.invested !== null ? fmtMoney(r.invested, 'USD') : '—'}</td>
                           <td className={clsx('num px-3 py-2 text-right', r.pnl === null ? 'text-faint' : r.pnl >= 0 ? 'text-bull' : 'text-bear')}>
                             {r.pnl === null ? '—' : signedUsd(r.pnl)}
@@ -804,21 +810,40 @@ export function OrderTicket({ seed, onClose }: { seed: TicketSeed; onClose: () =
             </div>
             {((showsLeverage && !(margined && reduceOnly)) || (margined && platform.futures?.marginModes && !closing) || (platform.tif.length > 1 && kind !== 'market')) && (
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                {showsLeverage && !(margined && reduceOnly) && (
-                  <Field label={maxLev ? `Levier (max ${maxLev}×)` : 'Levier'}>
-                    <input
-                      value={leverage}
-                      onChange={(e) => {
-                        setLeverage(e.target.value);
-                        // Kept only as a whole number the form accepts.
-                        const v = parseNum(e.target.value);
-                        if (v !== undefined && Number.isInteger(v) && v >= 1 && v <= 125) keep({ leverage: v });
-                      }}
-                      inputMode="numeric"
-                      className="num"
-                    />
-                  </Field>
-                )}
+                {showsLeverage &&
+                  !(margined && reduceOnly) &&
+                  (platform.etoro && !margined ? (
+                    // FIX-ETOROLEV3: eToro accepts 1×, 2× or 5×.
+                    <Field label="Levier">
+                      <select
+                        value={String(snapEtoroLeverage(parseNum(leverage) ?? 1))}
+                        onChange={(e) => {
+                          setLeverage(e.target.value);
+                          keep({ leverage: Number(e.target.value) });
+                        }}
+                      >
+                        {ETORO_LEVERAGES.map((l) => (
+                          <option key={l} value={String(l)}>
+                            {l}×
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                  ) : (
+                    <Field label={maxLev ? `Levier (max ${maxLev}×)` : 'Levier'}>
+                      <input
+                        value={leverage}
+                        onChange={(e) => {
+                          setLeverage(e.target.value);
+                          // Kept only as a whole number the form accepts.
+                          const v = parseNum(e.target.value);
+                          if (v !== undefined && Number.isInteger(v) && v >= 1 && v <= 125) keep({ leverage: v });
+                        }}
+                        inputMode="numeric"
+                        className="num"
+                      />
+                    </Field>
+                  ))}
                 {margined && platform.futures?.marginModes && !closing && (
                   <Field label="Marjă">
                     <select

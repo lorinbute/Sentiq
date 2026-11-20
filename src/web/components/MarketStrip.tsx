@@ -13,6 +13,7 @@ import { sparkChange, sparkPath } from '../spark.ts';
 import { chartPathOf } from '../chart/paths.ts';
 import { INDEX_DELAY_NOTE, plainSymbol } from '../../shared/indices.ts';
 import { CoinLogo, EventIcon } from './icons.tsx';
+import { isFxItem } from '../fx.ts';
 import { Activity, ChartPie, Gauge, Landmark } from 'lucide-react';
 
 const FNG_RO: Record<string, string> = { 'Extreme Fear': 'frică extremă', Fear: 'frică', Neutral: 'neutru', Greed: 'lăcomie', 'Extreme Greed': 'lăcomie extremă' };
@@ -144,10 +145,12 @@ function Ticker({ children, label }: { children: ReactNode; label: string }) {
 export function MarketStrip() {
   const now = useNow(1000);
   const watchlist = useWatchlist();
-  const all = watchlist.data ?? [];
-  // Shares and indices (FD-INDICES) are shown alike; everything else is a coin.
+  // FIX-TDBOTS: pairs and commodities are not in the strip (on every page, their prices spent the user's Twelve Data
+  // credits all the time; they stay in the lists and on their charts). Shares and indices (FD-INDICES) are shown alike;
+  // the rest are coins.
+  const all = (watchlist.data ?? []).filter((w) => !isFxItem(w));
   const coins = all.filter((w) => w.kind === 'crypto');
-  const stocks = all.filter((w) => w.kind !== 'crypto');
+  const stocks = all.filter((w) => w.kind === 'stock' || w.kind === 'index');
   const sparks = useSparks(coins.map((w) => `${w.coin}/${w.quote}`));
   const stockSymbols = stocks.map((w) => w.coin);
   const quotes = useStockQuotes(stockSymbols);

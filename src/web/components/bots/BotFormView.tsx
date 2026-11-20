@@ -1,16 +1,18 @@
 // The bot form (FD-BOT §1–§6): where it trades, the strategy's settings, the limits, the period, the safety; under them
 // the server's summary of what the bot will do (POST /api/bots/check). A bot that exists edits every setting the same
 // way (FD-BOTEDIT), with its own check: what becomes of its open positions too.
+import { fxKindOf, fxTradable, isUsdFx } from '../../../shared/fx.ts';
+import { FX_READY } from '../../fx.ts';
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { clsx } from 'clsx';
 import { AlertTriangle, Loader2, Plus, X } from 'lucide-react';
-import { BOT_MARGIN_MODES, CRYPTO_PAIR_RE, defaultBotName, END_ACTION_RO, ENTRY_RO, MARGIN_HINT_PAPER_RO, MARGIN_HINT_RO, MARGIN_RO, MIN_TRADE_PROFIT, STOCK_TICKER_RE, WEIGHT_KEYS, WEIGHT_RO, type BotCheck, type BotDetail, type BotEdit, type BotEndAction, type BotMarginMode, type BotTransition, type PositionsMode } from '../../../shared/bot.ts';
+import { BOT_MARGIN_MODES, CRYPTO_PAIR_RE, defaultBotName, MAX_BOT_SYMBOLS, END_ACTION_RO, ENTRY_RO, MARGIN_HINT_PAPER_RO, MARGIN_HINT_RO, MARGIN_RO, STOCK_TICKER_RE, WEIGHT_KEYS, WEIGHT_RO, type BotCheck, type BotDetail, type BotEdit, type BotEndAction, type BotMarginMode, type BotTransition, type PositionsMode } from '../../../shared/bot.ts';
 import { isPaperExchange, providerById } from '../../../shared/providers.ts';
 import { commissionText } from '../../../shared/paper.ts';
 import type { AccountView } from '../../../shared/api-types.ts';
 import { TIMEFRAMES, type Timeframe } from '../../../shared/time.ts';
-import { isDemoEnv, TRADING, type TradingCaps } from '../../../shared/trading.ts';
+import { ETORO_LEVERAGES, isDemoEnv, TRADING, type TradingCaps } from '../../../shared/trading.ts';
 import { api, errorMessage } from '../../api.ts';
 import { useTz, useWatchlist } from '../../hooks.ts';
 import { fmtDateTime, fmtNum, fmtPrice, autoDigits } from '../../format.ts';
@@ -96,7 +98,9 @@ export function BotFormView({ form, setForm, edit, onDone, onCancel }: { form: B
   };
   // FIX-PAPERLEV: on a Paper Trading profile every market has leverage and margin (as futures).
   const margined = futures || paper;
-  const { input, error } = useMemo(() => toInput(form, Date.now(), margined), [form, margined]);
+  // FIX-ETOROLEV: eToro opens every position with a leverage (its app, its virtual portfolio): a bot's too.
+  const leveraged = margined || (form.exec === 'real' && account !== null && etoroOf(account));
+  const { input, error } = useMemo(() => toInput(form, Date.now(), margined, leveraged), [form, margined, leveraged]);
   // At an edit, the bot's own check (FD-BOTEDIT §4): its open positions, and the choice for them.
   const body = useDebounced(input ? JSON.stringify(edit ? ({ input, ...(positions ? { positions } : {}) } satisfies BotEdit) : input) : null, 400);
   const check = useQuery({
@@ -142,14 +146,16 @@ export function BotFormView({ form, setForm, edit, onDone, onCancel }: { form: B
     // eslint-disable-next-line react-hooks/exhaustive-deps -- when the profiles are read
   }, [paper, form.accountId, views.data]);
 
-  const suggestions = (watch.data ?? []).filter((w) => (stocks ? w.kind === 'stock' : w.kind === 'crypto')).map((w) => (stocks ? w.coin : `${w.coin}/${w.quote}`));
+  // FD-FXCOMMODITIES: a stocks bot also takes a pair or a commodity in USD: forex on eToro, both on a Paper profile.
+  const fxHere = (w: { kind: string; coin: string }) => FX_READY && (w.kind === 'forex' || w.kind === 'commodity') && isUsdFx(w.coin) && account !== null && fxTradable(account, w.kind, w.coin);
+  const suggestions = (watch.data ?? []).filter((w) => (stocks ? w.kind === 'stock' || fxHere(w) : w.kind === 'crypto')).map((w) => (stocks ? w.coin : `${w.coin}/${w.quote}`));
   const addSymbol = () => {
     const s = symbolText.trim().toUpperCase();
-    if (!s || form.symbols.includes(s) || form.symbols.length >= 10) return;
+    if (!s || form.symbols.includes(s) || form.symbols.length >= MAX_BOT_SYMBOLS) return;
     set({ symbols: [...form.symbols, s] });
     setSymbolText('');
   };
-  const symbolOk = (s: string) => (stocks ? STOCK_TICKER_RE.test(s) : CRYPTO_PAIR_RE.test(s));
+  const symbolOk = (s: string) => (stocks ? (fxKindOf(s) ? isUsdFx(s) : STOCK_TICKER_RE.test(s)) : CRYPTO_PAIR_RE.test(s));
   const many = form.strategy === 'premium';
   const marketOptions = form.exec === 'real' && account ? account.markets.filter((m): m is 'spot' | 'futures' => m === 'spot' || m === 'futures') : (['spot', 'futures'] as const);
   const longOnly = (form.market === 'spot' && !paper) || (stocks && !etoroOf(account) && !paper);
@@ -229,7 +235,7 @@ export function BotFormView({ form, setForm, edit, onDone, onCancel }: { form: B
             </Field>
           )}
         </div>
-        <Field label={many ? `Simbolurile (${form.symbols.length} din 10)` : 'Simbolul'} group={many} hint={many ? 'Botul urmărește fiecare simbol; o singură poziție pe simbol.' : undefined}>
+        <Field label={many ? `Simbolurile (${form.symbols.length} din ${MAX_BOT_SYMBOLS})` : 'Simbolul'} group={many} hint={many ? 'Botul urmărește fiecare simbol; o singură poziție pe simbol.' : undefined}>
           {many ? (
             <div className="flex flex-col gap-2">
               {form.symbols.length > 0 && (
@@ -261,7 +267,7 @@ export function BotFormView({ form, setForm, edit, onDone, onCancel }: { form: B
                   spellCheck={false}
                   aria-label="Adaugă un simbol"
                 />
-                <button type="button" className="btn" onClick={addSymbol} disabled={!symbolText.trim() || form.symbols.length >= 10}>
+                <button type="button" className="btn" onClick={addSymbol} disabled={!symbolText.trim() || form.symbols.length >= MAX_BOT_SYMBOLS}>
                   <Plus size={15} aria-hidden /> Adaugă
                 </button>
               </div>
@@ -463,6 +469,8 @@ export function BotFormView({ form, setForm, edit, onDone, onCancel }: { form: B
             </div>
             <Check checked={form.premium.areaVeto} onChange={(on) => setPremium({ areaVeto: on })}>
               Nu intra împotriva ariei ({stocks ? 'Acțiuni' : 'Crypto'}): long cu aria sub 40, short cu aria de la 60
+              {/* FD-FXCOMMODITIES: a pair or a commodity has no area (the user's choice). */}
+              {stocks && form.symbols.some((s) => fxKindOf(s)) && <span className="text-faint"> · nu și la forex și mărfuri, care n-au arie</span>}
             </Check>
             <details className="text-[13px]">
               <summary className="cursor-pointer text-muted select-none">Ponderile scorului</summary>
@@ -495,8 +503,7 @@ export function BotFormView({ form, setForm, edit, onDone, onCancel }: { form: B
       <Section title="Limitele">
         {form.strategy === 'premium' && (
           <p className="text-[12.5px] text-muted">
-            Botul împarte bugetul liber între tranzacțiile pe care le mai poate deschide, cel mult suma maximă pe fiecare{form.premium.ai === 'confirm' ? ', iar AI-ul alege suma fiecăreia în interval' : ''}. Nu intră într-o tranzacție care la take profit ar aduce
-            mai puțin de {MIN_TRADE_PROFIT} USD după comisioane.
+            Botul împarte bugetul liber între tranzacțiile pe care le mai poate deschide, cel mult suma maximă pe fiecare{form.premium.ai === 'confirm' ? ', iar AI-ul alege suma fiecăreia în interval' : ''}.
           </p>
         )}
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -506,7 +513,7 @@ export function BotFormView({ form, setForm, edit, onDone, onCancel }: { form: B
               <Field label={`Bugetul botului (${cur})`} hint="Cât folosește botul, cel mult, în toate tranzacțiile lui deschise (marja, fără levier).">
                 <Num value={form.maxAmount} onChange={(v) => set({ maxAmount: v })} />
               </Field>
-              <Field label={`Suma maximă pe tranzacție (${cur})`} hint={margined ? 'Cât ia, cel mult, o tranzacție din buget; poziția e suma × levierul.' : 'Cât ia, cel mult, o tranzacție din buget.'}>
+              <Field label={`Suma maximă pe tranzacție (${cur})`} hint={leveraged ? 'Cât ia, cel mult, o tranzacție din buget; poziția e suma × levierul.' : 'Cât ia, cel mult, o tranzacție din buget.'}>
                 <Num value={form.premium.maxPerTrade} onChange={(v) => setPremium({ maxPerTrade: v })} />
               </Field>
               <Field label="Tranzacții deschise odată" hint="Cel mult; cu mai puține simboluri, câte unul pe simbol.">
@@ -514,15 +521,28 @@ export function BotFormView({ form, setForm, edit, onDone, onCancel }: { form: B
               </Field>
             </>
           ) : (
-            <Field label={`Suma maximă (${cur})`} hint={form.strategy === 'grid' ? 'Investiția grilei.' : margined ? 'Marja angajată, cel mult.' : 'Valoarea angajată, cel mult.'}>
+            <Field label={`Suma maximă (${cur})`} hint={form.strategy === 'grid' ? 'Investiția grilei.' : leveraged ? 'Marja angajată, cel mult.' : 'Valoarea angajată, cel mult.'}>
               <Num value={form.maxAmount} onChange={(v) => set({ maxAmount: v })} />
             </Field>
           )}
-          {margined && (
-            <Field label="Levierul">
-              <Num value={form.leverage} onChange={(v) => set({ leverage: v })} />
-            </Field>
-          )}
+          {leveraged &&
+            (!margined && account !== null && etoroOf(account) ? (
+              // FIX-ETOROLEV3: eToro accepts 1×, 2× or 5× (another one saved before: shown, the check refuses it).
+              <Field label="Levierul">
+                <select value={form.leverage} onChange={(e) => set({ leverage: e.target.value })}>
+                  {!(ETORO_LEVERAGES as readonly number[]).includes(Number(form.leverage)) && <option value={form.leverage}>{form.leverage}×</option>}
+                  {ETORO_LEVERAGES.map((l) => (
+                    <option key={l} value={String(l)}>
+                      {l}×
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            ) : (
+              <Field label="Levierul">
+                <Num value={form.leverage} onChange={(v) => set({ leverage: v })} />
+              </Field>
+            ))}
           {margined &&
             (accountMargin && account ? (
               <ReadOnly label="Marja">Cea din contul {providerById(account.exchange)?.name ?? account.exchange}</ReadOnly>

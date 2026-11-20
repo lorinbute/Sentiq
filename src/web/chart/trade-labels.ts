@@ -1,10 +1,11 @@
 // FD-TRADEUI: the trades on the chart as TradingView draws them. Each line (entry, take profit, stop loss, order, an
-// order's TP / SL, liquidation) carries a box away from the price scale: quantity | PnL (or what it is) | ×. The × closes
-// the position or cancels / removes the order. Colours, contents and the box's geometry (shared by the drawing, the
+// order's TP / SL, liquidation) carries a box away from the price scale: money used | PnL (or what it is) | ×. The ×
+// closes the position or cancels / removes the order. FIX-DECIMALS (the user, 20 Nov 2026: „Mă interesează câți bani am
+// cheltuit eu pentru acest trade”): the first part is the money the line stands for from the account, never the units. Colours, contents and the box's geometry (shared by the drawing, the
 // pointer and the Confirm / Discard bar placed before it).
 import { formatColor } from '../color.ts';
 import { fmtNum } from '../format.ts';
-import { pnlAtLevel, type TradeLine } from './pnl.ts';
+import { orderUsed, pnlAtLevel, type TradeLine } from './pnl.ts';
 import type { AccountLine } from './trade-drafts.ts';
 import type { PriceLineSpec } from './CandleChart.tsx';
 
@@ -16,7 +17,7 @@ export type TradePalette = { readonly [K in keyof typeof TRADE_COLORS]: string }
 
 /** What a line's box shows. */
 export interface TradeLabelSpec {
-  /** The quantity (coins / shares), or null (liquidation). */
+  /** FIX-DECIMALS: the money from the account it stands for („125,00 USDT”), or null (liquidation, unknown). */
   qty: string | null;
   text: string;
   textColor: string;
@@ -102,11 +103,23 @@ export function lineColor(l: TradeLine, p: TradePalette): string {
   }
 }
 
-/** How many coins / shares a line stands for: what it closes (SL / TP), the position (entry), what an order trades. */
-export function lineQty(l: TradeLine): number | null {
+/**
+ * FIX-DECIMALS: the money from the account a line stands for: the position's (its margin with leverage, its cost
+ * without), the share of it a SL / TP closes, what an order takes when it fills; null when it cannot be told.
+ */
+export function lineUsed(l: TradeLine): number | null {
   if (l.role === 'liquidation') return null;
-  if (l.role === 'order' && l.order) return l.order.amount !== null ? l.order.amount * (l.order.market === 'futures' ? (l.order.contractSize ?? 1) : 1) : null;
-  return l.basis?.qty ?? null;
+  if (l.role === 'order' && l.order) return orderUsed(l.order);
+  const v = l.basis?.used;
+  return v != null && Number.isFinite(v) && v > 0 ? v : null;
+}
+
+/** A fiat currency or a dollar coin (shared/bot.ts' USD quotes, without importing the bots' schemas into the app's core). */
+const FIAT_LIKE = /^(USD|USDT|USDC|FDUSD|TUSD|BUSD|DAI|USDE|USDP|PYUSD|USD1|USDD|EUR|GBP|CHF|JPY|RON)$/;
+
+/** A sum in the line's currency: two decimals in a fiat or a dollar coin („125,00 USDT”), a coin's as it reads (0,0012 BTC). */
+export function usedText(v: number, currency: string): string {
+  return `${FIAT_LIKE.test(currency) ? fmtNum(v, 2, 2) : fmtNum(v, 8)} ${currency}`;
 }
 
 /**
@@ -116,7 +129,7 @@ export function lineQty(l: TradeLine): number | null {
 export function chartLineOf(l: AccountLine, o: { last: number | null; drafted: boolean; entryDraft?: number; several: boolean; palette: TradePalette; close: boolean; draggable: boolean }): PriceLineSpec {
   const color = lineColor(l, o.palette);
   const { text, tone } = labelText(l, l.price, o.last, o.entryDraft);
-  const qty = lineQty(l);
+  const used = lineUsed(l);
   // FIX-BOTLEVELS: a bot's level (no order at the platform) dashed, as an order's line.
   const style: PriceLineSpec['style'] = o.drafted || l.role === 'liquidation' ? 'dotted' : l.role === 'order' || l.bot ? 'dashed' : 'solid';
   const shown = l.bot ? `${text} · ${l.bot.tag}` : text;
@@ -132,7 +145,7 @@ export function chartLineOf(l: AccountLine, o: { last: number | null; drafted: b
     // A position's SL / TP from its entry; an order's TP / SL from the order's price (its new one, when dragged).
     ...(l.basis && (l.role === 'sl' || l.role === 'tp' || l.role === 'order-sl' || l.role === 'order-tp') ? { zoneFrom: o.entryDraft ?? l.basis.entry } : {}),
     label: {
-      qty: qty === null ? null : fmtNum(qty, 8),
+      qty: used === null ? null : usedText(used, quoteOf(l)),
       text: o.several ? `${shown} · ${l.account.label}` : shown,
       textColor: tone === 'up' ? o.palette.up : tone === 'down' ? o.palette.down : color,
       close: o.close,

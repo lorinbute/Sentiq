@@ -86,7 +86,7 @@ Reguli:
 - Fără un motiv concret, lași regulile să decidă: „enter”.
 - „reason”: o singură frază în română, despre acest semnal.
 - „risks”: cel mult 5 riscuri scurte, în română.
-- „amount”: suma tranzacției (marja, fără levier), aleasă în intervalul primit. Pornește de la propunerea botului, care împarte bugetul liber între tranzacțiile care se mai pot deschide. Mai mult pentru un semnal mai sigur, mai puțin pentru unul mai slab. Niciodată sub minim: sub el, tranzacția n-ar aduce profitul minim la take profit.
+- „amount”: suma tranzacției (marja, fără levier), cel mult maximul primit. Pornește de la propunerea botului, care împarte bugetul liber între tranzacțiile care se mai pot deschide. Mai mult pentru un semnal mai sigur, mai puțin pentru unul mai slab.
 - Nu inventa date: folosește doar ce primești.`;
 
 export interface AiAsk {
@@ -95,6 +95,8 @@ export interface AiAsk {
   tf: Timeframe;
   /** FIX-BOTSHORTS: a setup still forming (its levels move to the signal's at the confirmation), or a confirmed signal. */
   stage: 'setup' | 'signal';
+  /** FIX-LATEENTRY: a signal of an earlier bar, entered late: its entry price then and when it was confirmed. */
+  late?: { at: number; confirmTime: number };
   price: number;
   sl: number;
   tp: number;
@@ -109,11 +111,10 @@ export interface AiAsk {
   /** The bot's last results, in percent of the amount used (no sums: FD-AICLARITY). */
   recent: number[];
   /**
-   * FIX-BOTBUDGET: the trade's amount (its margin): the least that brings the minimum profit at the take profit, the most
-   * allowed, the bot's proposal (the free budget shared among the trades still to open), the free budget, those trades,
-   * the leverage and the currency.
+   * FIX-BOTBUDGET: the trade's amount (its margin): the most allowed (FIX-NOMINPROFIT: no least), the bot's proposal (the
+   * free budget shared among the trades still to open), the free budget, those trades, the leverage and the currency.
    */
-  alloc?: { min: number; max: number; suggested: number; free: number; slots: number; lev: number; currency: string };
+  alloc?: { max: number; suggested: number; free: number; slots: number; lev: number; currency: string };
 }
 
 const fmt = (v: number) => (Math.abs(v) >= 1000 ? v.toFixed(2) : Math.abs(v) >= 1 ? v.toFixed(4) : v.toPrecision(5));
@@ -126,7 +127,9 @@ export function aiPrompt(x: AiAsk, now: number): string {
     `Simbol: ${x.symbol}, timeframe ${x.tf}, semnal ${x.side.toUpperCase()}.`,
     x.stage === 'setup'
       ? `Semnalul e încă în formare (setup-ul Slingshot, la închiderea unei lumânări): confirmarea vine când stocasticul iese din ${x.side === 'long' ? 'supravânzare' : 'supracumpărare'}. Botul intră acum, înainte de confirmare${x.levels === 'slingshot' ? `; stop loss-ul e la ${x.side === 'short' ? 'maximul' : 'minimul'} V1, unde Slingshot anulează setup-ul; la confirmare, stop loss-ul și take profit-ul se mută la cele ale semnalului` : ''}.`
-      : 'Semnalul e confirmat.',
+      : x.late
+        ? `Semnalul s-a confirmat mai devreme, la ${new Date(x.late.confirmTime).toISOString().slice(11, 16)} UTC, la ${fmt(x.late.at)}; e încă activ, iar botul intră acum, târziu, pentru că prețul e încă aproape de acea intrare.`
+        : 'Semnalul e confirmat.',
     `Preț acum: ${fmt(x.price)}. Stop loss: ${fmt(x.sl)}. Take profit: ${fmt(x.tp)} (${x.levels === 'slingshot' ? 'ale semnalului Slingshot' : 'procentele utilizatorului de la intrare'}).`,
     `Trend (EMA): ${x.trend === 'up' ? 'în sus' : 'în jos'}. Structura pieței: ${x.structure}.`,
     // FD-BOTDIR: the market's score; the side's threshold says which way the bot reads it.
@@ -141,7 +144,7 @@ export function aiPrompt(x: AiAsk, now: number): string {
     `Ultimele rezultate ale botului (% din suma folosită): ${x.recent.length ? x.recent.map((r) => `${r >= 0 ? '+' : ''}${r.toFixed(1)}%`).join(', ') : 'niciunul'}.`,
     ...(x.alloc
       ? [
-          `Suma tranzacției (marja, fără levier; poziția = suma × ${x.alloc.lev}): între ${sum(x.alloc.min, x.alloc.currency)} și ${sum(x.alloc.max, x.alloc.currency)} ${x.alloc.currency}. Propunerea botului: ${sum(x.alloc.suggested, x.alloc.currency)} ${x.alloc.currency} (bugetul liber ${sum(x.alloc.free, x.alloc.currency)} ${x.alloc.currency}, împărțit la ${x.alloc.slots} ${x.alloc.slots === 1 ? 'tranzacție care se mai poate deschide' : 'tranzacții care se mai pot deschide'}).`,
+          `Suma tranzacției (marja, fără levier; poziția = suma × ${x.alloc.lev}): cel mult ${sum(x.alloc.max, x.alloc.currency)} ${x.alloc.currency}. Propunerea botului: ${sum(x.alloc.suggested, x.alloc.currency)} ${x.alloc.currency} (bugetul liber ${sum(x.alloc.free, x.alloc.currency)} ${x.alloc.currency}, împărțit la ${x.alloc.slots} ${x.alloc.slots === 1 ? 'tranzacție care se mai poate deschide' : 'tranzacții care se mai pot deschide'}).`,
         ]
       : []),
   ];

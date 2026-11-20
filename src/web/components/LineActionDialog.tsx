@@ -8,7 +8,8 @@ import { Loader2 } from 'lucide-react';
 import type { AccountView, OrderRow } from '../../shared/api-types.ts';
 import type { ModifyPreview, ModifyStepPlan, ModifyTicket as Ticket, OrderResult } from '../../shared/trading.ts';
 import { api, ApiError, errorMessage } from '../api.ts';
-import { fmtNum } from '../format.ts';
+import { autoDigits, fmtNum, fmtPrice } from '../format.ts';
+import { isFxRate } from '../../shared/fx.ts';
 import { Modal } from './Modal.tsx';
 import { ModifyConfirm, useModifySend } from './ModifyTicket.tsx';
 import { DemoBadge, TRADING_LOG_KEY } from './OrderTicket.tsx';
@@ -98,7 +99,7 @@ function CancelOrder({ action, title, onClose, onDone }: { action: Extract<LineA
     <Modal title={title} onClose={onClose} locked={cancel.isPending}>
       <div className="flex flex-col gap-3.5 text-[13.5px]">
         <p>
-          {o.side === 'buy' ? 'Cumpărare' : 'Vânzare'} {o.symbol}, {fmtNum(o.amount, 8)} la <span className="num">{fmtNum(level, 8)}</span>
+          {o.side === 'buy' ? 'Cumpărare' : 'Vânzare'} {o.symbol}, {fmtNum(o.amount, 8)} la <span className="num">{fmtPrice(level, autoDigits(level ?? 1, isFxRate(o.symbol)))}</span>
           {o.triggerPrice !== null ? ' (declanșare)' : ''}.
         </p>
         {cancel.error && (

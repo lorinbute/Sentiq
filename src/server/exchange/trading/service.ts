@@ -1,6 +1,8 @@
 // Trading from Sentiq (FD-TRADING, TD-TRADING §4): switching it on per account (both factors again, the key's rights
 // read again), checking an order, sending it once (the form's key in the journal makes a second send return the first
 // result, on either instance), cancelling, and the journal itself. Only the account's owner, only where it is on.
+import { FX_ACCOUNT_TEXT, fxKindOf } from '../../../shared/fx.ts';
+import { readPrice, type QuoteDeps } from '../../market/quote.ts';
 import type { Db } from '../../db/database.ts';
 import type { Logger } from '../../log.ts';
 import type { StepUp } from '../../auth/users.ts';
@@ -25,16 +27,18 @@ const LOG_LIMIT = 50;
 const PENDING_STALE_MS = 2 * 60_000;
 
 export type TradingAccess = NonNullable<Awaited<ReturnType<AccountsService['tradingAccess']>>>;
-export type TraderFactory = (a: TradingAccess, log: Logger) => Trader;
+/** FIX-ETOROSTALE: a symbol's price from the market data, for a platform whose own is not fresh (eToro). */
+export type PriceFallback = (symbol: string) => Promise<number | null>;
+export type TraderFactory = (a: TradingAccess, log: Logger, fallback?: PriceFallback) => Trader;
 
-export const defaultTraderFactory: TraderFactory = (a, log) => {
+export const defaultTraderFactory: TraderFactory = (a, log, fallback) => {
   if (a.clients) return new CcxtTrader(a.exchange, a.clients, log);
   const creds = a.creds ?? {};
   switch (a.exchange) {
     case 'trading212':
       return new Trading212Trader(creds, a.env);
     case 'etoro':
-      return new EtoroTrader(creds, a.env);
+      return new EtoroTrader(creds, a.env, undefined, fallback);
     case 'alpaca':
       return new AlpacaTrader(creds, a.env);
     default:
@@ -95,6 +99,8 @@ export interface TradingDeps {
   traderFactory?: TraderFactory;
   /** FD-PAPER: the Paper Trading engine (a profile's orders go there). */
   paper?: PaperService;
+  /** FIX-ETOROSTALE: the market data, for a price when eToro's is not fresh. */
+  quotes?: QuoteDeps;
   now?: () => number;
 }
 
@@ -111,6 +117,7 @@ export class TradingService {
   private readonly log: Logger;
   private readonly factory: TraderFactory;
   private readonly paper: PaperService | null;
+  private readonly quotes: QuoteDeps | null;
   private readonly now: () => number;
   /** One trader per account, rebuilt when the account's clients are (they hold the exchange's market list). */
   private readonly traders = new Map<number, { trader: Trader; clients: unknown; creds: unknown }>();
@@ -122,6 +129,7 @@ export class TradingService {
     this.log = deps.log;
     this.factory = deps.traderFactory ?? defaultTraderFactory;
     this.paper = deps.paper ?? null;
+    this.quotes = deps.quotes ?? null;
     this.now = deps.now ?? Date.now;
   }
 
@@ -164,7 +172,10 @@ export class TradingService {
     }
     const cached = this.traders.get(a.id);
     if (cached && cached.clients === a.clients && JSON.stringify(cached.creds) === JSON.stringify(a.creds)) return cached.trader;
-    const trader = this.factory(a, this.log);
+    const quotes = this.quotes;
+    // A share's Nasdaq quote or a pair's Twelve Data one (FD-FXCOMMODITIES), at any hour.
+    const fallback: PriceFallback | undefined = quotes ? (symbol) => readPrice(quotes, a.userId, 'stock', symbol, false).then((p) => (p === 'closed' ? null : p)) : undefined;
+    const trader = this.factory(a, this.log, fallback);
     this.traders.set(a.id, { trader, clients: a.clients, creds: a.creds });
     return trader;
   }
@@ -306,6 +317,11 @@ export class TradingService {
   private rules(a: TradingAccess, t: OrderTicket): void {
     const bad = isPaperExchange(a.exchange) ? null : ticketRules(t);
     if (bad) throw new TradingError('INVALID', bad);
+    // FD-FXCOMMODITIES: a pair or a commodity of the charts only on eToro (forex) or a stocks Paper Trading profile.
+    if (fxKindOf(t.symbol)) {
+      if (a.kind !== 'stocks') throw new TradingError('INVALID', FX_ACCOUNT_TEXT);
+      if (!isPaperExchange(a.exchange) && a.exchange !== 'etoro') throw new TradingError('INVALID', FX_ACCOUNT_TEXT);
+    }
   }
 
   async preview(userId: number, ticket: OrderTicket): Promise<OrderPreview> {
@@ -390,6 +406,50 @@ export class TradingService {
     } finally {
       this.accounts.invalidate(a.id);
     }
+  }
+
+  /** FIX-BOT24: an instrument's price now at the platform (eToro); null where the platform cannot give it. */
+  /** FIX-ETOROLIMIT: whether the account's platform has a symbol (a bot's check); the instrument read where it cannot tell. */
+  async known(userId: number, accountId: number, market: TradeMarket, symbol: string): Promise<void> {
+    const a = await this.access(userId, accountId, true, market);
+    const t = this.trader(a);
+    if (t.known) await t.known(symbol);
+    else await t.instrument(market, symbol);
+  }
+
+  async price(userId: number, accountId: number, symbol: string): Promise<number | null> {
+    const a = await this.access(userId, accountId, false);
+    const t = this.trader(a);
+    return t.price ? t.price(symbol) : null;
+  }
+
+  /** FIX-ETOROPENDING: an order's state now at the platform (eToro); null where the platform cannot be asked. */
+  async orderState(userId: number, accountId: number, orderId: string): Promise<{ status: OrderResult['status']; message: string | null } | null> {
+    const a = await this.access(userId, accountId, false);
+    const t = this.trader(a);
+    return t.lookup ? t.lookup(orderId) : null;
+  }
+
+  /**
+   * FIX-ETOROPENDING: the last opening sent from Sentiq on an account's symbol and side since a moment, as its log keeps
+   * it (a bot's wait from before the order's id was kept).
+   */
+  async openingSince(userId: number, accountId: number, symbol: string, side: 'buy' | 'sell', since: number): Promise<{ status: string; orderId: string | null; message: string | null } | null> {
+    const rows = await this.db.all<{ status: string; order_id: string | null; message: string | null; detail: string | null }>(
+      "SELECT TOP (5) status, order_id, message, CAST(detail AS NVARCHAR(MAX)) AS detail FROM trade_log WHERE user_id = ? AND account_id = ? AND symbol = ? AND side = ? AND action = N'order' AND created_at >= ? ORDER BY id DESC",
+      [userId, accountId, symbol, side, since],
+    );
+    for (const r of rows) {
+      const closes = (() => {
+        try {
+          return Boolean((JSON.parse(r.detail ?? 'null') as { ticket?: { close?: unknown } } | null)?.ticket?.close);
+        } catch {
+          return false;
+        }
+      })();
+      if (!closes) return { status: r.status, orderId: r.order_id, message: r.message };
+    }
+    return null;
   }
 
   async cancel(userId: number, accountId: number, input: CancelInput): Promise<OrderResult> {

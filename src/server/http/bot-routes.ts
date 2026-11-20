@@ -14,9 +14,29 @@ function parse<T extends z.ZodType>(schema: T, data: unknown): z.infer<T> {
   return r.data;
 }
 
+/**
+ * FIX-BOTORDER: the user's order (settings `bots.order`) inside each section, the running then the ended (as the list
+ * groups them); the bots it does not name after, as the server lists them (newest first). Pure: tested.
+ */
+export function orderBots<T extends { id: number; status: string }>(list: readonly T[], order: readonly number[]): T[] {
+  const at = new Map<number, number>();
+  order.forEach((id, i) => {
+    if (!at.has(id)) at.set(id, i);
+  });
+  const rank = (b: T) => at.get(b.id) ?? order.length;
+  return list
+    .map((b, i) => ({ b, i }))
+    .sort((x, y) => Number(x.b.status === 'ended') - Number(y.b.status === 'ended') || rank(x.b) - rank(y.b) || x.i - y.i)
+    .map((x) => x.b);
+}
+
 export async function registerBotRoutes(app: FastifyInstance, ctx: AppContext): Promise<void> {
   const bots = ctx.bots;
-  app.get('/api/bots', async (req) => bots.list(me(req).id));
+  app.get('/api/bots', async (req) => {
+    const id = me(req).id;
+    const [list, prefs] = await Promise.all([bots.list(id), ctx.settings.forUser(id)]);
+    return orderBots(list, prefs.bots.order);
+  });
   // FIX-BOTLEVELS: the levels the real bots keep for their open positions (the chart draws them).
   app.get('/api/bots/levels', async (req) => bots.levels(me(req).id));
   app.get('/api/bots/:id', async (req) => bots.detail(me(req).id, parse(idParam, req.params).id));

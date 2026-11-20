@@ -107,6 +107,13 @@ export interface PremiumState {
    * (an exit before its confirmation does not enter it again; the confirmed signal is an entry of its own).
    */
   setupTaken?: Record<string, Partial<Record<BotSide, number>>>;
+  /**
+   * FIX-LATEENTRY: per symbol and side, the last signal (its time) the bot entered on: a late entry never takes it again
+   * (after its position closed by the bot's own levels, Slingshot may still keep it active).
+   */
+  signalTaken?: Record<string, Partial<Record<BotSide, number>>>;
+  /** FIX-LATEENTRY: per symbol and side, the last signal (its time) the AI said no to: not asked again at each look. */
+  signalAiNo?: Record<string, Partial<Record<BotSide, number>>>;
 }
 
 export interface BrokerRefs {
@@ -119,6 +126,8 @@ export interface RefsWait {
   /** When the order left; positions opened since then are the bot's when no snapshot was taken. */
   at: number;
   before: string[] | null;
+  /** FIX-ETOROPENDING: eToro's id of the order (its state asked while no position shows); absent in older waits. */
+  orderId?: string | null;
 }
 
 /** An order on its way (real): its key is saved before it leaves, so a restart sends it again with the same key. */

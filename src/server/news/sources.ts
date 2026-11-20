@@ -65,7 +65,8 @@ export async function syncStockSources(db: Db, added?: string): Promise<string[]
     const stocks = new Set((await db.all<{ coin: string }>("SELECT DISTINCT coin FROM watchlist WHERE kind = N'stock' ORDER BY coin")).map((r) => r.coin));
     const sources = await db.all<{ id: string; url: string; auto: string | null }>('SELECT id, url, auto FROM sources');
     const byAuto = new Map(sources.filter((s) => s.auto).map((s) => [s.auto as string, s.id]));
-    const urls = new Set(sources.map((s) => s.url));
+    // FIX-SOURCEDELETE: a feed the admin deleted stays deleted (its address is taken, as by a custom source).
+    const urls = new Set([...sources.map((s) => s.url), ...(await db.all<{ url: string }>('SELECT url FROM deleted_sources')).map((d) => d.url)]);
     const ids = new Set(sources.map((s) => s.id));
     for (const sym of stocks) {
       const auto = `nasdaq:${sym}`;
@@ -94,11 +95,17 @@ export async function syncStockSources(db: Db, added?: string): Promise<string[]
   });
 }
 
-/** Inserts missing built-in sources; never overrides the user's enable/weight choices. */
+/**
+ * Inserts missing built-in sources; never overrides the user's enable/weight choices, never brings back one the admin
+ * deleted (FIX-SOURCEDELETE).
+ */
 export async function seedSources(db: Db): Promise<void> {
   await db.tx(async () => {
     const byUrl = new Map((await db.all<{ id: string; url: string }>('SELECT id, url FROM sources')).map((r) => [r.url, r.id]));
+    const deleted = await db.all<{ source_id: string; url: string }>('SELECT source_id, url FROM deleted_sources');
+    const gone = new Set(deleted.flatMap((d) => [`id:${d.source_id}`, `url:${d.url}`]));
     for (const s of BUILTIN_SOURCES) {
+      if (gone.has(`id:${s.id}`) || gone.has(`url:${s.url}`)) continue;
       // A custom source the user added earlier with the same URL keeps precedence.
       const sameUrl = byUrl.get(s.url);
       if (sameUrl !== undefined && sameUrl !== s.id) continue;

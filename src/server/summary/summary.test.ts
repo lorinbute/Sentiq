@@ -28,6 +28,7 @@ beforeEach(async () => {
     nli: fakeNli,
     box: new SecretBox(Buffer.alloc(32, 6)),
     db: await testDb(),
+    marketTape: null,
   });
   await ctx.settings.updateFor(1, true, { timezone: 'UTC' });
 });

@@ -44,8 +44,10 @@ describe('the boxes (FD-TRADEUI)', () => {
 
   it('the chart line: no library title, the box with the quantity filled on the entry, the order dashed, a draft dotted', () => {
     const spec = chartLineOf(by('entry'), { last: 7.7, drafted: false, several: false, palette: TRADE_COLORS, close: true, draggable: false });
-    expect(spec).toMatchObject({ title: '', style: 'solid', color: TRADE_COLORS.long, label: { qty: '5', text: '+0,40 USDT', textColor: TRADE_COLORS.up, close: true, fill: true } });
-    expect(chartLineOf(by('order'), { last: 7.7, drafted: false, several: false, palette: TRADE_COLORS, close: true, draggable: true })).toMatchObject({ style: 'dashed', label: { qty: '0,3', fill: false } });
+    // FIX-DECIMALS: the money the position took (7,62 × 5 at 5×), not its 5 units.
+    expect(spec).toMatchObject({ title: '', style: 'solid', color: TRADE_COLORS.long, label: { qty: '7,62 USDT', text: '+0,40 USDT', textColor: TRADE_COLORS.up, close: true, fill: true } });
+    // A futures order whose leverage the platform does not say: no amount.
+    expect(chartLineOf(by('order'), { last: 7.7, drafted: false, several: false, palette: TRADE_COLORS, close: true, draggable: true })).toMatchObject({ style: 'dashed', label: { qty: null, fill: false } });
     // A pending change (moved, not confirmed): the line dimmed and dotted, its price label solid, the box tinted.
     expect(chartLineOf(by('sl'), { last: 7.7, drafted: true, several: true, palette: TRADE_COLORS, close: true, draggable: true })).toMatchObject({
       style: 'dotted',
@@ -54,6 +56,28 @@ describe('the boxes (FD-TRADEUI)', () => {
       label: { text: '−1,14 USDT · Main', pending: true },
     });
     expect(chartLineOf(by('sl'), { last: 7.7, drafted: false, several: false, palette: TRADE_COLORS, close: true, draggable: true }).label).not.toHaveProperty('pending');
+  });
+
+  it('FIX-DECIMALS: the money a line stands for, never the units: the margin, the cost, the share a SL / TP closes', () => {
+    const at = (l: AccountLine | undefined) => chartLineOf(l as AccountLine, { last: 7.7, drafted: false, several: false, palette: TRADE_COLORS, close: true, draggable: true }).label?.qty;
+    const role = (ls: AccountLine[], r: string) => ls.find((l) => l.role === r);
+    // The platform's own margin (KuCoin's posInit) first; a SL / TP closing all of it: all of it.
+    const own = linesOf(a, [order()], [pos({ margin: 7.8 })]);
+    expect([at(role(own, 'entry')), at(role(own, 'sl'))]).toEqual(['7,80 USDT', '7,80 USDT']);
+    // A stop loss for 2 of the 5 contracts: its share (7,62 × 2 / 5).
+    expect(at(role(linesOf(a, [order({ amount: 2 })]), 'sl'))).toBe('3,05 USDT');
+    // A spot holding: what it cost (10 INJ at 7).
+    expect(at(role(linesOf(a, [], [], [bal()]), 'entry'))).toBe('70,00 USDT');
+    // An order: its value on spot (2 × 7), over its leverage on futures (3 × 0,1 × 7 / 5).
+    const spotBuy = order({ id: 's1', market: 'spot', symbol: 'INJ/USDT', type: 'limit', side: 'buy', price: 7, triggerPrice: null, reduceOnly: false, stop: null, amount: 2 });
+    const futBuy = order({ id: 'f1', type: 'limit', side: 'buy', price: 7, triggerPrice: null, reduceOnly: false, stop: null, amount: 3, contractSize: 0.1, leverage: 5 });
+    const ords = linesOf(a, [spotBuy, futBuy], []);
+    expect(ords.filter((l) => l.role === 'order').map(at)).toEqual(['14,00 USDT', '0,42 USDT']);
+    // A contract settled in its coin: in the coin, with the decimals it reads with; its value unknown: no amount.
+    expect(at(role(linesOf(a, [], [pos({ symbol: 'INJ/USD:INJ', margin: 0.00123456 })]), 'entry'))).toBe('0,0012 INJ');
+    expect(at(role(linesOf(a, [], [pos({ symbol: 'INJ/USD:INJ' })]), 'entry'))).toBeNull();
+    // The liquidation has none.
+    expect(at(role(own, 'liquidation'))).toBeNull();
   });
 
   it('geometry: 64 px from the price scale, the × its last 20 px; kept inside a narrow pane', () => {

@@ -113,7 +113,7 @@ beforeEach(async () => {
   logLines = [];
   dir = mkdtempSync(path.join(tmpdir(), 'sq-users-'));
   const config = { ...loadConfig({ SENTIQ_DATA_DIR: dir, SENTIQ_ALLOWED_HOSTS: 'sentiq.lan' } as NodeJS.ProcessEnv), webDist: path.join(dir, 'no-web') };
-  ctx = await createContext(config, makeLogger(), { nli: fakeNli, clientFactory: fakeClients, box: BOX, retryDelaysMs: [0, 0], db: await testDb() });
+  ctx = await createContext(config, makeLogger(), { nli: fakeNli, clientFactory: fakeClients, box: BOX, retryDelaysMs: [0, 0], db: await testDb(), marketTape: null });
   app = await buildApp(ctx);
 });
 

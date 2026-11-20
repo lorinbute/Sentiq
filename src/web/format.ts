@@ -1,4 +1,5 @@
 // Formatting helpers (Romanian locale, user time zone).
+import { maxDecimals, priceDecimals } from '../shared/decimals.ts';
 
 const cache = new Map<string, Intl.DateTimeFormat>();
 function dtf(tz: string, opts: Intl.DateTimeFormatOptions): Intl.DateTimeFormat {
@@ -68,14 +69,17 @@ export function fmtPrice(v: number | null | undefined, digits = 2): string {
   return numFmt(digits, digits).format(v);
 }
 
+/** At most `max` decimals (at least `min`); FIX-DECIMALS: never more than two from 1 on, four under 1 (`maxDecimals`). */
 export function fmtNum(v: number | null | undefined, max = 2, min = 0): string {
   if (v === null || v === undefined || !Number.isFinite(v)) return '—';
-  return numFmt(min, max).format(v);
+  const m = Math.min(max, maxDecimals(v));
+  return numFmt(Math.min(min, m), m).format(v);
 }
 
 export function fmtPct(v: number | null | undefined, digits = 2, signed = true): string {
   if (v === null || v === undefined || !Number.isFinite(v)) return '—';
-  const s = numFmt(digits, digits).format(v);
+  const d = Math.min(digits, maxDecimals(v));
+  const s = numFmt(d, d).format(v);
   return `${signed && v > 0 ? '+' : ''}${s}%`;
 }
 
@@ -101,13 +105,16 @@ export function fmtMoney(v: number | null | undefined, currency = 'USD'): string
   return `${numFmt(2, 2).format(v)} ${currency}`;
 }
 
-/** Decimals that keep ~5 significant digits for prices without exchange precision. */
-export function autoDigits(v: number): number {
-  const a = Math.abs(v);
-  if (!Number.isFinite(a) || a === 0) return 2;
-  if (a >= 1000) return 2;
-  if (a >= 1) return 4;
-  return Math.min(10, Math.ceil(-Math.log10(a)) + 4);
+/** A price's decimals without the exchange's precision (FIX-DECIMALS): 2 from 1 on, 4 under 1; `fx` a rate's 4 under 10. */
+export const autoDigits = (v: number, fx = false): number => priceDecimals(v, fx);
+
+/**
+ * FIX-DECIMALS: a number as the order forms write it beside their fields (a dot, no grouping), shown, not typed: at most
+ * two decimals from 1 on, four under 1; with `fx` set, a price (a forex / commodity rate keeps four under 10).
+ */
+export function fmtPlain(v: number | null | undefined, max = 8, fx: boolean | null = null): string {
+  if (v === null || v === undefined || !Number.isFinite(v)) return '—';
+  return String(Number(v.toFixed(Math.min(max, fx === null ? maxDecimals(v) : priceDecimals(v, fx)))));
 }
 
 export type Tone = 'bull' | 'bear' | 'neutral';

@@ -97,7 +97,7 @@ describe('at start-up', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'sq-ai-'));
     try {
       const nli = { status: () => ({ state: 'ready' as const, progress: 100, error: null, model: 'x' }), warmUp: () => {}, score: async () => 0, onReady: () => {} };
-      const ctx = await createContext({ ...loadConfig({ SENTIQ_DATA_DIR: dir } as NodeJS.ProcessEnv), webDist: path.join(dir, 'x') }, silentLogger, { db, box, nli });
+      const ctx = await createContext({ ...loadConfig({ SENTIQ_DATA_DIR: dir } as NodeJS.ProcessEnv), webDist: path.join(dir, 'x') }, silentLogger, { db, box, nli, marketTape: null });
       expect(await ctx.ai.config(1)).toEqual({ provider: 'anthropic', model: 'claude-sonnet-5-5', scoring: true, key: KEY });
       expect((await ctx.settings.get()).marketData).toEqual({ exchange: 'kucoin', candles: 1500 });
       expect(await ctx.settings.getTwelveDataKey(1)).toBe('t'.repeat(32));

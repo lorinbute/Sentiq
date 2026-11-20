@@ -2,7 +2,7 @@
 // journal and key as the order form; FD-PAPER: a Paper Trading profile's engine fills it), rounded to the platform's
 // step first. Every real order's key is saved before it leaves, so a restart sends it again with the same key.
 import { perpetualOf, type BotMarginMode, type BotMarket, type BotSide } from '../../shared/bot.ts';
-import type { ClosablePosition, InstrumentInfo, OrderTicket } from '../../shared/trading.ts';
+import { ETORO_LEVERAGE_TEXT, isEtoroLeverage, type ClosablePosition, type InstrumentInfo, type OrderTicket } from '../../shared/trading.ts';
 import type { TradingService } from '../exchange/trading/service.ts';
 import { TradingError } from '../exchange/trading/types.ts';
 import type { BrokerRefs, RefsWait } from './state.ts';
@@ -25,6 +25,11 @@ export interface BotOrder {
   price: number;
   /** eToro: the stop loss a short opens with (the platform asks for one, FD-BOT §10). */
   sl?: number | null;
+  /**
+   * FIX-ETOROTP: a Slingshot entry's take profit (its stop loss is `sl`): at eToro the position opens with both, as the
+   * indicator gives them.
+   */
+  tp?: number | null;
   /** When the order was first decided (an order sent again after a restart keeps its time). */
   at?: number;
 }
@@ -152,6 +157,39 @@ export class RealExec implements Executor {
     return open;
   }
 
+  /** FIX-BOT24: eToro's price of a share now (any hour, any exchange); null: none. */
+  async platformPrice(symbol: string): Promise<number | null> {
+    return this.d.trading.price(this.d.userId, this.d.accountId, symbol);
+  }
+
+  /**
+   * FIX-ETOROPENDING: an opening sent that has not shown as a position yet: still on its way (pending), or refused /
+   * cancelled by eToro (void: the wait is dropped, the bot drops the position it noted). Its state is asked at eToro by
+   * its id (an older wait without one: its order found in Sentiq's log). Null: no opening waits there.
+   */
+  async opening(symbol: string): Promise<{ side: BotSide; state: 'pending' | 'void'; message: string | null } | null> {
+    if (!this.d.refsWait[symbol]) return null;
+    await this.positions({ symbol, side: 'buy', qty: 0, reduce: false, lev: 1, price: 0 });
+    const w = this.d.refsWait[symbol];
+    if (!w) return null;
+    const drop = (message: string | null) => {
+      delete this.d.refsWait[symbol];
+      return { side: w.side, state: 'void' as const, message };
+    };
+    let orderId = w.orderId ?? null;
+    if (!orderId) {
+      const log = await this.d.trading.openingSince(this.d.userId, this.d.accountId, symbol, w.side === 'long' ? 'buy' : 'sell', w.at - 60_000).catch(() => null);
+      // Refused before leaving (the checks) or after (eToro's answer); an error: never sent.
+      if (log && (log.status === 'rejected' || log.status === 'error')) return drop(log.message);
+      orderId = log?.orderId ?? null;
+    }
+    if (orderId) {
+      const s = await this.d.trading.orderState(this.d.userId, this.d.accountId, orderId).catch(() => null);
+      if (s && (s.status === 'rejected' || s.status === 'cancelled')) return drop(s.message);
+    }
+    return { side: w.side, state: 'pending', message: null };
+  }
+
   /**
    * eToro: the units the bot's own positions of a side still have (their ids read again); null while an opening of that
    * side has not shown yet (nothing can be told).
@@ -205,7 +243,7 @@ export class RealExec implements Executor {
   }
 
   /**
-   * eToro (FD-BOT §10): an opening is a new position (a short with its stop loss), whose id becomes the bot's; a closing
+   * eToro (FD-BOT §10): an opening is a new position (a short, FIX-ETOROLEV: a leverage over 1×, with its stop loss), whose id becomes the bot's; a closing
    * closes the bot's positions of that side, all or `qty` units of them, never the user's.
    */
   private async etoroOrder(o: BotOrder, key: string, ready?: (qty: number) => Promise<void>, again = false): Promise<ExecResult> {
@@ -221,13 +259,24 @@ export class RealExec implements Executor {
       await this.d.trading.place(this.d.userId, { ...base, amount: qty, close: { positionIds: [...ids], ...(qty < units - 1e-9 ? { units: qty } : {}) } });
       return { ok: true, fill: { qty, price: o.price, fee: (qty * o.price * this.d.feePct) / 100 } };
     }
-    if (side === 'short' && !(o.sl && o.sl > 0)) return { ok: false, kind: 'refused', message: 'eToro cere stop loss la un short: botul nu are unul pentru această intrare.' };
+    // FIX-ETOROLEV: the bot's leverage goes with the opening; eToro asks for a stop loss with a short and a leverage over 1×.
+    const lev = Math.max(1, Math.min(125, Math.round(o.lev || 1)));
+    // FIX-ETOROLEV3: a leverage eToro refuses is not sent (a bot saved with one before the rule).
+    if (!isEtoroLeverage(lev)) return { ok: false, kind: 'refused', message: `${ETORO_LEVERAGE_TEXT} Botul are ${lev}×: schimbă-i levierul.` };
+    const needsSl = side === 'short' || lev > 1;
+    // FIX-ETOROTP: an entry with its take profit (Slingshot) opens with both levels.
+    const tp = o.tp && o.tp > 0 ? o.tp : null;
+    const withSl = (needsSl || tp !== null) && o.sl && o.sl > 0;
+    if (needsSl && !(o.sl && o.sl > 0))
+      return { ok: false, kind: 'refused', message: `eToro cere stop loss la ${side === 'short' ? 'un short' : 'un levier peste 1×'}: botul nu are unul pentru această intrare.` };
     // The positions before: the new one after the order is the bot's.
     const before = again ? null : (await this.positions(o)).map((p) => p.id);
     if (!again) await ready?.(o.qty);
     const at = o.at ?? this.d.now();
-    await this.d.trading.place(this.d.userId, { ...base, ...(side === 'short' ? { stopLoss: o.sl as number } : {}) });
-    this.d.refsWait[o.symbol] = { side, at, before };
+    const r = await this.d.trading.place(this.d.userId, { ...base, ...(lev > 1 ? { leverage: lev } : {}), ...(withSl ? { stopLoss: o.sl as number } : {}), ...(tp !== null ? { takeProfit: tp } : {}) });
+    // FIX-ETOROPENDING: eToro's answer read: refused or cancelled, no position (nothing to wait for).
+    if (r.status === 'rejected' || r.status === 'cancelled') return { ok: false, kind: 'refused', message: r.message ?? (r.status === 'cancelled' ? 'eToro a anulat ordinul.' : 'eToro a refuzat ordinul.') };
+    this.d.refsWait[o.symbol] = { side, at, before, orderId: r.orderId };
     try {
       await this.positions(o);
     } catch {

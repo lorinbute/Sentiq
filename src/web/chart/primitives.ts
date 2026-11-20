@@ -19,6 +19,7 @@ import { colorNew, rgbaCss, type Rgba } from '../../shared/indicator/lma.ts';
 import type { HLine } from '../../shared/hlines.ts';
 import { fade, mixColor } from '../color.ts';
 import { LABEL_FONT, LABEL_HEIGHT, labelGeometry, labelPartAt, type LabelGeometry, type TradeLabelSpec } from './trade-labels.ts';
+import { barLeft } from './countdown.ts';
 
 /** FD-CHARTSETTINGS: the chart's background, its top and bottom colours (the same when it is solid). */
 export interface ChartBackground {
@@ -1075,12 +1076,22 @@ export const CURSOR_LABEL_COLOR = '#3C414C';
 export interface CurrentPriceData {
   price: number;
   precision: number;
-  /** When the last candle closes (ms); null: no countdown (a closed market). */
-  closesAt: number | null;
+  /**
+   * FIX-STOCKCOUNTDOWN: the last candle (its open and the timeframe, ms) and when the market closes, the countdown worked
+   * out at each draw (`barLeft`); null: no countdown (a closed market).
+   */
+  bar: { open: number; step: number; cap: number | null } | null;
   /** "50:31" from the time left. */
   format: (msLeft: number) => string;
   /** The price scale's font size (FD-CHARTSETTINGS): the label is as wide as the library's at this size. */
   fontSize?: number;
+}
+
+/** The countdown under the current price, from the period now. */
+function countdownOf(d: CurrentPriceData): string | null {
+  if (!d.bar) return null;
+  const left = barLeft(d.bar.open, d.bar.step, d.bar.cap, Date.now());
+  return left === null ? null : d.format(left);
 }
 
 interface DrawnPrice {
@@ -1154,7 +1165,7 @@ class CurrentPriceView implements IPrimitivePaneView {
     if (!a || !d || !Number.isFinite(d.price)) return;
     const y = a.series.priceToCoordinate(d.price);
     if (y === null) return;
-    this.item = { y, price: d.price.toFixed(d.precision), countdown: d.closesAt === null ? null : d.format(d.closesAt - Date.now()), fontSize: d.fontSize ?? 11 };
+    this.item = { y, price: d.price.toFixed(d.precision), countdown: countdownOf(d), fontSize: d.fontSize ?? 11 };
   }
   renderer(): IPrimitivePaneRenderer {
     return new CurrentPriceRenderer(this.item);
@@ -1179,7 +1190,7 @@ export class CurrentPriceLabel implements ISeriesPrimitive<Time> {
   }
   /** Draws again (the countdown, every second). */
   tick(): void {
-    if (this.data?.closesAt != null) this.attachedTo?.requestUpdate();
+    if (this.data?.bar != null) this.attachedTo?.requestUpdate();
   }
   updateAllViews(): void {
     for (const v of this.views) v.update();

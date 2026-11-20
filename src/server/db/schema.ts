@@ -13,6 +13,7 @@ const NOW_MS = "DATEDIFF_BIG(MILLISECOND, '19700101', SYSUTCDATETIME())";
 
 /** Every table, children before parents: the order to empty them (tests, import); reversed, the order to fill them. */
 export const TABLES = [
+  'deleted_sources',
   'trade_watches',
   'push_devices',
   'bot_events',
@@ -668,6 +669,15 @@ export const MIGRATIONS: string[][] = [
       result ${t('MAX')} NULL
     );
     CREATE INDEX trade_watches_open ON trade_watches(state, account_id);`,
+  ],
+  // FIX-SOURCEDELETE: the sources the admin deleted for good (a built-in, a stock's automatic feed): the start
+  // (`seedSources`) and the watch lists (`syncStockSources`) never bring them back.
+  [
+    `CREATE TABLE deleted_sources (
+      source_id ${t(200)} NOT NULL PRIMARY KEY,
+      url ${t('MAX')} NOT NULL,
+      deleted_at BIGINT NOT NULL
+    );`,
   ],
 ];
 

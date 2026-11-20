@@ -293,8 +293,11 @@ export function ratioOf(sl: string, tp: string): string {
  * The bot the form describes (`BotInput`), or the first problem with it. `now` turns a start in the past into "now".
  * The same rules as the server's (shared/bot.ts).
  */
-/** `margined`: leverage and margin apply (futures; FIX-PAPERLEV: every market on a Paper Trading profile). */
-export function toInput(f: BotForm, now = Date.now(), margined = f.market === 'futures'): { input: BotInput | null; error: string | null } {
+/**
+ * `margined`: leverage and margin apply (futures; FIX-PAPERLEV: every market on a Paper Trading profile). `leveraged`:
+ * the leverage applies (FIX-ETOROLEV: at eToro too, without a margin mode).
+ */
+export function toInput(f: BotForm, now = Date.now(), margined = f.market === 'futures', leveraged = margined): { input: BotInput | null; error: string | null } {
   const errors: string[] = [];
   const at = (s: string | null) => (s === null || s === '' ? null : new Date(s).getTime());
   const startsAt = at(f.startsAt);
@@ -310,7 +313,7 @@ export function toInput(f: BotForm, now = Date.now(), margined = f.market === 'f
     tf: f.tf,
     // FIX-BOTBUDGET: a Slingshot bot's maximum amount is its budget.
     maxAmount: field(f.strategy === 'premium' ? 'Bugetul botului' : (LABELS.maxAmount as string), f.maxAmount, true, errors),
-    leverage: margined ? field(LABELS.leverage as string, f.leverage, true, errors) : 1,
+    leverage: leveraged ? field(LABELS.leverage as string, f.leverage, true, errors) : 1,
     marginMode: margined ? f.marginMode : 'isolated',
     startsAt: startsAt !== null && startsAt > now ? startsAt : null,
     endsAt,

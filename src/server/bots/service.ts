@@ -1,5 +1,7 @@
 // The bots as the API serves them (FD-BOT §1, §7; TD-BOT §5): the list, the details, the form's check, making one, and
 // what the user may do to it. The API writes the settings and asks; the engine alone moves positions (TD-BOT §1).
+import { TradingError } from '../exchange/trading/types.ts';
+import { ETORO_COMMODITY_TEXT, FX_ACCOUNT_TEXT, FX_KEY_TEXT, fxKindOf, type FxKind } from '../../shared/fx.ts';
 import {
   areaOf,
   botInputSchema,
@@ -7,14 +9,12 @@ import {
   dcaPlan,
   END_ACTION_RO,
   gridPlan,
-  isUsdQuote,
   LEVERAGE_FUTURES,
   MARGIN_FUTURES,
   MARGIN_HINT_PAPER_RO,
   MARGIN_HINT_RO,
   MARGIN_RO,
   MAX_ACTIVE_BOTS,
-  MIN_TRADE_PROFIT,
   perpetualOf,
   rrText,
   SPOT_LONG,
@@ -41,7 +41,7 @@ import {
   wantsShort,
 } from '../../shared/bot.ts';
 import { isPaperExchange, providerById } from '../../shared/providers.ts';
-import { TRADING } from '../../shared/trading.ts';
+import { ETORO_LEVERAGE_TEXT, isEtoroLeverage, TRADING } from '../../shared/trading.ts';
 import type { Db, SqlValue } from '../db/database.ts';
 import { HISTORY_MAX_ROWS, marginOf, pnlPercent, type HistoryMarket, type TradeHistoryRow } from '../exchange/trade-history.ts';
 import { ConflictError, NotFoundError } from '../http/errors.ts';
@@ -67,9 +67,14 @@ export function exposure(input: BotInput, st: BotState): { committed: number; un
     committed += p.margin;
     if (unrealized !== null) unrealized = p.unrealized === null ? null : unrealized + p.unrealized;
   };
+  // FIX-ETOROPENDING: the newest position of a side whose eToro opening still waits is pending.
+  const waits = st.refsWait ?? {};
+  const newest = (p: { symbol: string; side: BotSide; openedAt: number }) =>
+    !(st.premium?.positions ?? []).some((q) => q.symbol === p.symbol && q.side === p.side && q.openedAt > p.openedAt);
   for (const p of st.premium?.positions ?? []) {
     const price = priceOf(p.symbol);
-    add({ symbol: p.symbol, side: p.side, qty: p.qty, entry: p.entry, price, sl: p.sl, tp: p.tp, unrealized: price === null ? null : openPnl(p.side, p.entry, price, p.qty), leverage: p.lev, margin: p.margin, openedAt: p.openedAt });
+    const pending = waits[p.symbol]?.side === p.side && newest(p);
+    add({ symbol: p.symbol, side: p.side, qty: p.qty, entry: p.entry, price, sl: p.sl, tp: p.tp, unrealized: price === null || pending ? null : openPnl(p.side, p.entry, price, p.qty), leverage: p.lev, margin: p.margin, openedAt: p.openedAt, ...(pending ? { pending: true } : {}) });
   }
   const sym = input.symbols[0] as string;
   const price = priceOf(sym);
@@ -338,7 +343,7 @@ export class BotService {
         const sl = level(p.sl);
         const tp = level(p.tp);
         if (!(p.qty > 0 && p.entry > 0) || (sl === null && tp === null)) continue;
-        out.push({ bot: { id: row.id, name: row.name }, accountId: run.accountId, active: row.status !== 'problem', market: run.market, symbol: p.symbol, side: p.side, qty: p.qty, entry: p.entry, sl, tp, openedAt: p.openedAt });
+        out.push({ bot: { id: row.id, name: row.name }, accountId: run.accountId, active: row.status !== 'problem', market: run.market, symbol: p.symbol, side: p.side, qty: p.qty, entry: p.entry, sl, tp, openedAt: p.openedAt, margin: p.margin });
       }
     }
     return out;
@@ -401,6 +406,8 @@ export class BotService {
     const errors: string[] = [];
     const warnings: string[] = [];
     const summary: string[] = [];
+    // FIX-DECIMALS: a bot on forex / commodities: its rates with four decimals under 10.
+    const fx = input.market === 'stock' && input.symbols.some((s) => fxKindOf(s) !== null);
     // FD-BOTEDIT: the edited bot's open positions (on their account and market), and whether the new settings keep them.
     const held = edit ? exposure(edit.basis, edit.st).positions : [];
     const changes = edit ? transitionOf(edit.basis, input) : [];
@@ -416,8 +423,13 @@ export class BotService {
     const capsAll = input.exec === 'real' ? await this.d.trading.caps(userId) : [];
     const onPaper = capsAll.some((a) => a.accountId === input.accountId && isPaperExchange(a.exchange));
     const margined = futures || onPaper;
-    const lev = margined ? input.leverage : 1;
-    if (!margined && input.leverage !== 1) errors.push(LEVERAGE_FUTURES);
+    // FIX-ETOROLEV: eToro opens each position with a leverage (its app does, its virtual portfolio does): a bot's too.
+    const onEtoro = capsAll.some((a) => a.accountId === input.accountId && TRADING[a.exchange as keyof typeof TRADING]?.etoro === true);
+    const leveraged = margined || onEtoro;
+    const lev = leveraged ? input.leverage : 1;
+    if (!leveraged && input.leverage !== 1) errors.push(LEVERAGE_FUTURES);
+    // FIX-ETOROLEV3: eToro accepts 1×, 2× or 5× only.
+    if (onEtoro && !isEtoroLeverage(input.leverage)) errors.push(ETORO_LEVERAGE_TEXT);
     if (!margined && input.marginMode !== 'isolated') errors.push(MARGIN_FUTURES);
     if (input.market === 'spot' && !onPaper && wantsShort(input)) errors.push(SPOT_LONG);
 
@@ -429,13 +441,23 @@ export class BotService {
         if (i === 0 && q !== 'closed') price = q.price;
         // FIX-2ZPRICE: a thin pair's price is its last trade.
         if (q !== 'closed' && q.lastTrade)
-          warnings.push(`Pe ${providerById(q.exchange ?? '')?.name ?? q.exchange}, ${sym} n-a avut tranzacții în ultimele minute: botul ia prețul ultimei tranzacții (${fmtPrice(q.price)}). La o pereche cu puține tranzacții, prețul de execuție poate fi departe de el.`);
+          warnings.push(`Pe ${providerById(q.exchange ?? '')?.name ?? q.exchange}, ${sym} n-a avut tranzacții în ultimele minute: botul ia prețul ultimei tranzacții (${fmtPrice(q.price, fx)}). La o pereche cu puține tranzacții, prețul de execuție poate fi departe de el.`);
       } catch (err) {
         if (input.market === 'stock') warnings.push(`Prețul lui ${sym} nu se poate citi acum (${(err as Error).message}).`);
         else errors.push(`${sym} nu se poate citi la sursa de prețuri: ${(err as Error).message}`);
       }
     }
-    if (input.market === 'stock' && input.strategy === 'premium' && this.d.stocks) {
+    // FD-FXCOMMODITIES: a pair or a commodity needs the user's Twelve Data key, and Twelve Data must have it.
+    const fxSymbols = input.market === 'stock' ? input.symbols.filter((s) => fxKindOf(s) !== null) : [];
+    if (fxSymbols.length && this.d.stocks) {
+      if (!(await this.d.stocks.hasKey(userId))) errors.push(FX_KEY_TEXT);
+      else
+        for (const sym of fxSymbols) {
+          const kind = fxKindOf(sym) as FxKind;
+          if (!(await this.d.stocks.fxEntry(userId, kind, sym))) errors.push(`Twelve Data nu are ${kind === 'forex' ? 'perechea' : 'marfa'} ${sym}.`);
+        }
+    }
+    if (input.market === 'stock' && input.strategy === 'premium' && this.d.stocks && !(fxSymbols.length && !(await this.d.stocks.hasKey(userId)))) {
       for (const sym of input.symbols) {
         const allowed = await this.d.stocks.timeframesFor(sym, userId);
         if (!allowed.includes(input.tf)) errors.push(`${sym} pe ${input.tf} cere cheia ta Twelve Data (Setări → Date acțiuni); fără ea, botul merge pe 1d și 1w.`);
@@ -466,15 +488,39 @@ export class BotService {
         // eToro opens a short only with a stop loss.
         if (stocks) {
           const etoro = TRADING[caps.exchange as keyof typeof TRADING]?.etoro === true;
+          // FD-FXCOMMODITIES: forex on eToro (its commodities are futures-based, the user's choice) or a Paper profile.
+          if (fxSymbols.length && !etoro && !paperAccount) errors.push(FX_ACCOUNT_TEXT);
+          const commodities = fxSymbols.filter((s) => fxKindOf(s) === 'commodity');
+          if (etoro && commodities.length) errors.push(`${commodities.join(', ')}: ${ETORO_COMMODITY_TEXT}`);
           const short = wantsShort(input);
           if (short && !etoro && !paperAccount) errors.push(`La ${platform}, botul face doar long: short pe acțiuni doar la eToro sau pe un profil Paper Trading.`);
           if (short && etoro && input.strategy === 'dca' && input.dca.stopLoss === null) errors.push('eToro cere stop loss la un short: pune stop loss-ul ciclului.');
           if (short && etoro && input.strategy === 'grid' && input.grid.stopAbove === null) errors.push('eToro cere stop loss la un short: pune „Oprește peste” (e stop loss-ul fiecărui interval short).');
-          warnings.push('Pe acțiuni, botul tranzacționează doar cât bursa e deschisă (sesiunea obișnuită). Sumele lui sunt în USD; un cont în altă monedă plătește în moneda lui.');
+          // FIX-ETOROLEV: eToro opens a position with a leverage over 1× only with a stop loss, as a short.
+          if (etoro && input.leverage > 1) {
+            if (input.strategy === 'dca' && input.dca.stopLoss === null) errors.push('eToro cere stop loss la un levier peste 1×: pune stop loss-ul ciclului.');
+            if (input.strategy === 'grid' && input.grid.direction !== 'short' && input.grid.stopBelow === null) errors.push('eToro cere stop loss la un levier peste 1×: pune „Oprește sub” (e stop loss-ul fiecărui interval long).');
+            warnings.push('La eToro, botul pune stop loss-ul fiecărei poziții cu levier și la eToro (eToro îl cere).');
+          }
+          // FIX-BOT24: on eToro the bot runs at every hour, at eToro's price; eToro decides when an order executes.
+          warnings.push(
+            etoro
+              ? 'La eToro, botul rulează non-stop, la prețul eToro al instrumentului; eToro decide când se execută un ordin (24/5 la acțiunile care au program extins, altfel la deschiderea bursei lor; până atunci, intrarea e „În așteptare”). Sumele lui sunt în USD; un cont în altă monedă plătește în moneda lui.'
+              : 'Pe acțiuni, botul tranzacționează doar cât bursa e deschisă (sesiunea obișnuită). Sumele lui sunt în USD; un cont în altă monedă plătește în moneda lui.',
+          );
         }
+        // FIX-ETOROLIMIT: on eToro only whether it has each symbol (its rates, its portfolio: nothing the check uses there,
+        // and a request each of eToro's limit).
+        const etoroAccount = TRADING[caps.exchange as keyof typeof TRADING]?.etoro === true;
         for (const sym of input.symbols) {
           const tradeSym = futures ? perpetualOf(sym) : sym;
+          // Said once above (a commodity on eToro), not again per symbol.
+          if (etoroAccount && fxKindOf(sym) === 'commodity') continue;
           try {
+            if (etoroAccount) {
+              await this.d.trading.known(userId, input.accountId as number, input.market, tradeSym);
+              continue;
+            }
             const info = await this.d.trading.instrument(userId, input.accountId as number, input.market, tradeSym);
             if (sym === input.symbols[0]) {
               minCost = info.minCost;
@@ -489,13 +535,15 @@ export class BotService {
             // FD-BOT §9: on one-way futures the bot would mix with a position that is not its own; it waits for it to go.
             if (futures && !own.has(sym) && (info.position || info.hedgePositions?.long || info.hedgePositions?.short)) warnings.push(`Pe ${tradeSym} e deja o poziție deschisă: botul nu intră cât timp ea e acolo (s-ar amesteca cu a lui). Nu deschide de mână poziții pe simbolul unui bot.`);
           } catch (err) {
-            errors.push(`${platform} nu are ${tradeSym}${futures ? ' pe futures' : ''}: ${(err as Error).message}`);
+            // FIX-ETOROLIMIT: a platform that does not answer now has not said it lacks the symbol.
+            const busy = err instanceof TradingError && (err.code === 'RATE_LIMIT' || err.code === 'REJECTED');
+            errors.push(busy ? `${platform} nu a putut verifica ${tradeSym} acum: ${(err as Error).message}` : `${platform} nu are ${tradeSym}${futures ? ' pe futures' : ''}: ${(err as Error).message}`);
           }
         }
       }
       if (!paperAccount) warnings.push(`Botul trimite ordine reale și închide pozițiile el însuși, la piață. Cu serverul Sentiq oprit, nu poate închide nimic: pierderea pe zi${futures ? ', oprirea la o pierdere și levierul limitează' : ' și oprirea la o pierdere limitează'} riscul.`);
     }
-    if (margined && input.leverage > 10) warnings.push(`Levier ${input.leverage}×: o mișcare de ${fmtNum(100 / input.leverage)}% împotriva poziției îi consumă marja.`);
+    if (leveraged && input.leverage > 10) warnings.push(`Levier ${input.leverage}×: o mișcare de ${fmtNum(100 / input.leverage)}% împotriva poziției îi consumă marja.`);
 
     // What the strategy will do.
     let capital = input.maxAmount;
@@ -506,22 +554,22 @@ export class BotService {
       const at = price ?? (g.lower + g.upper) / 2;
       grid = gridPlan(g, input.maxAmount, lev, input.fee, at);
       summary.push(
-        `Între ${fmtPrice(g.lower)} și ${fmtPrice(g.upper)}, ${g.grids} grile ${g.spacing === 'geometric' ? 'geometrice' : 'aritmetice'}: ${fmtNum(grid.qty, 8)} ${input.market === 'stock' ? 'acțiuni' : (input.symbols[0]?.split('/')[0] ?? '')} pe grilă, câștig pe grilă ${fmtNum(grid.profit.min)}–${fmtNum(grid.profit.max)}% după comisioane.`,
+        `Între ${fmtPrice(g.lower, fx)} și ${fmtPrice(g.upper, fx)}, ${g.grids} grile ${g.spacing === 'geometric' ? 'geometrice' : 'aritmetice'}: ${fmtNum(grid.qty, 8)} ${input.market === 'stock' ? 'acțiuni' : (input.symbols[0]?.split('/')[0] ?? '')} pe grilă, câștig pe grilă ${fmtNum(grid.profit.min)}–${fmtNum(grid.profit.max)}% după comisioane.`,
       );
       // FD-BOTEDIT §4: a grid that goes on (no transition) is not started again.
       const going = edit && !changes.length ? edit.st.grid : null;
-      if (going?.waiting) summary.push(`Grila așteaptă în continuare prețul de pornire (${fmtPrice(going.waiting.trigger)}).`);
+      if (going?.waiting) summary.push(`Grila așteaptă în continuare prețul de pornire (${fmtPrice(going.waiting.trigger, fx)}).`);
       else if (going?.started) summary.push('Grila merge mai departe cu intervalele ei.');
       else {
         if (g.direction === 'neutral') summary.push('Pornește fără poziție: long sub preț, short peste el.');
         else if (price !== null) summary.push(grid.atStart > 0 ? `La pornire ${g.direction === 'long' ? 'cumpără' : 'vinde'} ${grid.atStart} ${grid.atStart === 1 ? 'grilă' : 'grile'} la piață (${fmtNum(grid.startCost)} ${cur}${margined ? ' marjă' : ''}).` : 'La pornire nu e nimic de cumpărat: prețul e peste grilă.');
-        if (g.trigger !== null) summary.push(`Așteaptă până când prețul atinge ${fmtPrice(g.trigger)}.`);
+        if (g.trigger !== null) summary.push(`Așteaptă până când prețul atinge ${fmtPrice(g.trigger, fx)}.`);
       }
       // FD-BOTEDIT §2: a stop the price is already past closes everything.
-      const past = price === null ? null : g.stopBelow !== null && price <= g.stopBelow ? `sub „Oprește sub” (${fmtPrice(g.stopBelow)})` : g.stopAbove !== null && price >= g.stopAbove ? `peste „Oprește peste” (${fmtPrice(g.stopAbove)})` : null;
-      if (past) warnings.push(`Prețul de acum (${fmtPrice(price as number)}) e deja ${past}: ${going?.started ? 'la următoarea verificare' : 'imediat după pornire'}, botul închide tot și se încheie.`);
-      if (g.stopBelow !== null || g.stopAbove !== null) summary.push(`Se oprește și închide tot ${[g.stopBelow !== null ? `sub ${fmtPrice(g.stopBelow)}` : '', g.stopAbove !== null ? `peste ${fmtPrice(g.stopAbove)}` : ''].filter(Boolean).join(' sau ')}.`);
-      if (price !== null && (price < g.lower || price > g.upper)) warnings.push(`Prețul de acum (${fmtPrice(price)}) e în afara grilei: botul nu face nimic până intră în ea.`);
+      const past = price === null ? null : g.stopBelow !== null && price <= g.stopBelow ? `sub „Oprește sub” (${fmtPrice(g.stopBelow, fx)})` : g.stopAbove !== null && price >= g.stopAbove ? `peste „Oprește peste” (${fmtPrice(g.stopAbove, fx)})` : null;
+      if (past) warnings.push(`Prețul de acum (${fmtPrice(price as number, fx)}) e deja ${past}: ${going?.started ? 'la următoarea verificare' : 'imediat după pornire'}, botul închide tot și se încheie.`);
+      if (g.stopBelow !== null || g.stopAbove !== null) summary.push(`Se oprește și închide tot ${[g.stopBelow !== null ? `sub ${fmtPrice(g.stopBelow, fx)}` : '', g.stopAbove !== null ? `peste ${fmtPrice(g.stopAbove, fx)}` : ''].filter(Boolean).join(' sau ')}.`);
+      if (price !== null && (price < g.lower || price > g.upper)) warnings.push(`Prețul de acum (${fmtPrice(price, fx)}) e în afara grilei: botul nu face nimic până intră în ea.`);
       if (minCost !== null && grid.minOrder < minCost) errors.push(`Ordinul unei grile (${fmtNum(grid.minOrder)} ${cur}) e sub minimul platformei (${fmtNum(minCost)} ${cur}): mai puține grile sau o sumă mai mare.`);
       if (minAmount !== null && grid.qty < minAmount) errors.push(`Cantitatea pe grilă (${fmtNum(grid.qty, 8)}) e sub minimul platformei (${minAmount}): mai puține grile sau o sumă mai mare.`);
     } else if (input.strategy === 'dca') {
@@ -554,15 +602,8 @@ export class BotService {
       const perTrade = Math.min(p.maxPerTrade, input.maxAmount);
       const room = Math.min(p.maxOpen, input.symbols.length);
       summary.push(
-        `Bugetul: ${fmtNum(input.maxAmount)} ${cur}; pe tranzacție cel mult ${fmtNum(perTrade)} ${cur}${margined && lev > 1 ? ` (poziția până la ${fmtNum(perTrade * lev)} ${cur}, la ${lev}×)` : ''}; cel mult ${room} ${room === 1 ? 'tranzacție deschisă' : 'tranzacții deschise'} odată${p.maxOpen > input.symbols.length ? ` (câte simboluri are botul)` : ''}. Botul împarte bugetul liber între tranzacțiile pe care le mai poate deschide${p.ai === 'confirm' ? ', iar AI-ul alege suma fiecăreia în interval' : ''}; nu intră într-o tranzacție care la take profit ar aduce mai puțin de ${MIN_TRADE_PROFIT} USD după comisioane. ${p.levels === 'slingshot' ? 'SL și TP: ale semnalului Slingshot.' : `SL ${fmtNum(p.slPct)}% și TP ${fmtNum(p.tpPct)}% de la intrare (risc : câștig ${rrText(p.slPct, p.tpPct)}).`}`,
+        `Bugetul: ${fmtNum(input.maxAmount)} ${cur}; pe tranzacție cel mult ${fmtNum(perTrade)} ${cur}${margined && lev > 1 ? ` (poziția până la ${fmtNum(perTrade * lev)} ${cur}, la ${lev}×)` : ''}; cel mult ${room} ${room === 1 ? 'tranzacție deschisă' : 'tranzacții deschise'} odată${p.maxOpen > input.symbols.length ? ` (câte simboluri are botul)` : ''}. Botul împarte bugetul liber între tranzacțiile pe care le mai poate deschide${p.ai === 'confirm' ? ', iar AI-ul alege suma fiecăreia în interval' : ''}. ${p.levels === 'slingshot' ? 'SL și TP: ale semnalului Slingshot.' : `SL ${fmtNum(p.slPct)}% și TP ${fmtNum(p.tpPct)}% de la intrare (risc : câștig ${rrText(p.slPct, p.tpPct)}).`}`,
       );
-      // FIX-BOTBUDGET: how far the take profit must be for the most a trade takes to bring the minimum (in dollars).
-      if (isUsdQuote(cur) && perTrade > 0) {
-        const needPct = (MIN_TRADE_PROFIT / (perTrade * lev)) * 100 + 2 * input.fee;
-        if (p.levels === 'percent' && p.tpPct < needPct)
-          warnings.push(`Cu suma maximă pe tranzacție (${fmtNum(perTrade)} ${cur}${lev > 1 ? `, la ${lev}×` : ''}), take profit-ul de ${fmtNum(p.tpPct)}% aduce cel mult ${fmtNum((perTrade * lev * (p.tpPct - 2 * input.fee)) / 100)} ${cur} după comisioane: sub ${MIN_TRADE_PROFIT} USD, deci botul nu intră.`);
-        if (p.levels === 'slingshot') summary.push(`Ca o tranzacție să aducă ${MIN_TRADE_PROFIT} USD, take profit-ul semnalului trebuie să fie la cel puțin ${fmtNum(needPct, 2)}% de la intrare (cu suma maximă pe tranzacție); la unul mai aproape, botul nu intră.`);
-      }
       if (p.ai === 'confirm' && !(await this.d.ai.config(userId)).key) warnings.push(`„AI confirmă” cere o cheie AI (Setări → AI): fără ea, ${p.aiFallback === 'skip' ? 'botul nu intră deloc' : 'intrările merg după reguli'}.`);
       if (minCost !== null && perTrade * lev < minCost) errors.push(`O tranzacție de ${fmtNum(perTrade * lev)} ${cur} e sub minimul platformei (${fmtNum(minCost)} ${cur}).`);
     }
@@ -762,20 +803,21 @@ export class BotService {
     const { input, run, changes, st } = at;
     if (run.exec !== 'real' || run.accountId === null) throw new ConflictError('Doar nivelurile unui bot real sunt pe grafic.');
     const grid = run.strategy === 'grid';
+    const fx = run.market === 'stock' && fxKindOf(move.symbol) !== null;
     const pos = levelPositions(run, st).find((p) => p.symbol === move.symbol && p.side === move.side && (grid || p.openedAt === move.openedAt));
     if (!pos) throw new ConflictError('Poziția botului s-a închis între timp.');
     const long = move.side === 'long';
     const side = long ? 'long' : 'short';
     const price = st.prices[move.symbol]?.p ?? null;
     const errors: string[] = [];
-    if (price !== null && move.sl !== undefined && (long ? move.sl >= price : move.sl <= price)) errors.push(`Stop loss-ul unui ${side} trebuie să fie ${long ? 'sub' : 'peste'} prețul curent (${fmtPrice(price)}).`);
-    if (price !== null && move.tp !== undefined && (long ? move.tp <= price : move.tp >= price)) errors.push(`Take profit-ul unui ${side} trebuie să fie ${long ? 'peste' : 'sub'} prețul curent (${fmtPrice(price)}).`);
+    if (price !== null && move.sl !== undefined && (long ? move.sl >= price : move.sl <= price)) errors.push(`Stop loss-ul unui ${side} trebuie să fie ${long ? 'sub' : 'peste'} prețul curent (${fmtPrice(price, fx)}).`);
+    if (price !== null && move.tp !== undefined && (long ? move.tp <= price : move.tp >= price)) errors.push(`Take profit-ul unui ${side} trebuie să fie ${long ? 'peste' : 'sub'} prețul curent (${fmtPrice(price, fx)}).`);
     if (grid && move.tp !== undefined) errors.push('O grilă nu are take profit: fiecare grilă se închide la linia ei.');
     if (errors.length) throw new ValidationError(errors.join(' '));
     const now = this.now();
     const what = [
-      ...(move.sl !== undefined ? [`SL ${move.symbol} ${side} ${pos.sl !== null ? `${fmtPrice(pos.sl)} → ` : ''}${fmtPrice(move.sl)}`] : []),
-      ...(move.tp !== undefined ? [`TP ${move.symbol} ${side} ${pos.tp !== null ? `${fmtPrice(pos.tp)} → ` : ''}${fmtPrice(move.tp)}`] : []),
+      ...(move.sl !== undefined ? [`SL ${move.symbol} ${side} ${pos.sl !== null ? `${fmtPrice(pos.sl, fx)} → ` : ''}${fmtPrice(move.sl, fx)}`] : []),
+      ...(move.tp !== undefined ? [`TP ${move.symbol} ${side} ${pos.tp !== null ? `${fmtPrice(pos.tp, fx)} → ` : ''}${fmtPrice(move.tp, fx)}`] : []),
     ];
     if (grid) {
       if (input.strategy !== 'grid' || changes.length) throw new ConflictError('Botul închide grila veche (setări noi): stop-ul ei nu se mai mută.');

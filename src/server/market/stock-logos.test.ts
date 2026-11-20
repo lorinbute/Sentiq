@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { testDb } from '../test/db.ts';
 import { silentLogger } from '../log.ts';
 import { setFetchImpl } from '../net/http.ts';
-import { cleanSvg, LOGO_KEPT_MS, LOGO_MISSING_MS, LOGO_RETRY_MS, pickLogoIds, stockLogoSymbol, StockLogos } from './stock-logos.ts';
+import { backupUrl, cleanSvg, LOGO_BACKUP_MS, LOGO_KEPT_MS, LOGO_MISSING_MS, LOGO_RETRY_MS, logoPicture, pickLogoIds, pictureValue, stockLogoSymbol, StockLogos } from './stock-logos.ts';
 
 /** TradingView's own shape: a comment first, a square background, a gradient by id, no viewBox. */
 const APPLE =
@@ -76,7 +76,8 @@ describe('the logos, on the test schema', () => {
     expect(asked.length).toBeGreaterThan(n);
   });
 
-  it('a stock without a logo: none, kept 7 days; TradingView down: none, not kept, asked again after 10 minutes', async () => {
+  it('a stock without a logo: none, kept an hour (FIX-LOGOBACKUP: a new listing gets its logo later); TradingView down: none, not kept, asked again after 10 minutes', async () => {
+    expect(LOGO_MISSING_MS).toBe(3_600_000);
     const db = await testDb();
     let now = 1_800_000_000_000;
     let calls = 0;
@@ -123,5 +124,51 @@ describe('the logos, on the test schema', () => {
     expect(await logos.logo('BTC/USDT')).toBeNull();
     expect(await logos.logo('^SPX')).toBeNull();
     expect(calls).toBe(n);
+  });
+
+  it('FIX-LOGOBACKUP: none at TradingView: Twelve Data\'s picture with the asking user\'s key, kept and served as itself; asked once a day', async () => {
+    const db = await testDb();
+    let now = 1_800_000_000_000;
+    const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4]);
+    let picture: Uint8Array | string = JPEG;
+    setFetchImpl((async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes('scanner')) return new Response(scan(['ANT', true, null], ['NEWCO', true, null]), { status: 200 });
+      if (url.startsWith('https://api.twelvedata.com/logo/')) return new Response(picture as unknown as BodyInit, { status: 200 });
+      return new Response('', { status: 404 });
+    }) as typeof fetch);
+    const asked: [string, number][] = [];
+    let address: string | null = 'https://api.twelvedata.com/logo/anthropic.com';
+    const logos = new StockLogos(db, silentLogger, () => now, async (s, u) => (asked.push([s, u]), address));
+    // Without a user (the notifications' extension, an anonymous caller): nobody's credits, no picture.
+    expect(await logos.logo('NEWCO')).toBeNull();
+    expect(asked).toEqual([]);
+    const v = await logos.logo('ANT', 7);
+    expect(v).toMatch(/^data:image\/jpeg;base64,/);
+    expect(asked).toEqual([['ANT', 7]]);
+    expect([...(logoPicture(v as string)?.bytes ?? [])]).toEqual([...JPEG]);
+    expect(logoPicture(v as string)?.type).toBe('image/jpeg');
+    // Kept for everyone (another instance, without a user), asking nobody.
+    expect(await new StockLogos(db, silentLogger, () => now).kept('ANT')).toBe(v);
+    // Twelve Data has none either: none, and Twelve Data not asked again for a day (TradingView every hour, for free).
+    address = null;
+    expect(await logos.logo('NEWCO', 7)).toBeNull();
+    now += LOGO_MISSING_MS + 1;
+    expect(await logos.logo('NEWCO', 7)).toBeNull();
+    expect(asked.filter(([s]) => s === 'NEWCO')).toHaveLength(1);
+    now += LOGO_BACKUP_MS;
+    address = 'https://api.twelvedata.com/logo/newco.com';
+    picture = '<html>not a picture</html>';
+    expect(await logos.logo('NEWCO', 7)).toBeNull();
+    expect(asked.filter(([s]) => s === 'NEWCO')).toHaveLength(2);
+  });
+
+  it('FIX-LOGOBACKUP: only Twelve Data\'s own https addresses; only a JPEG or a PNG of a logo\'s size', () => {
+    expect(backupUrl('https://api.twelvedata.com/logo/apple.com')).toBe('https://api.twelvedata.com/logo/apple.com');
+    expect([backupUrl('http://api.twelvedata.com/logo/a.com'), backupUrl('https://evil.test/twelvedata.com'), backupUrl('https://twelvedata.com.evil.test/x'), backupUrl('nonsense'), backupUrl(null)]).toEqual([null, null, null, null, null]);
+    expect(pictureValue(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d]))).toMatch(/^data:image\/png;base64,/);
+    expect(pictureValue(new TextEncoder().encode('<svg></svg>'))).toBeNull();
+    expect(pictureValue(new Uint8Array(70_000).fill(0xff))).toBeNull();
+    expect(logoPicture('<svg/>')).toBeNull();
   });
 });

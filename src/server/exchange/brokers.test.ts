@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { setFetchImpl } from '../net/http.ts';
+import { resetEtoroCaches } from './trading/etoro.ts';
 import { brokerAdapter, brokerCacheSizes, BrokerError, fifoResults, flexDate, resetBrokerCaches, t212Symbol, utcTime, xmlElements, type ClosedTrade, type FifoExec } from './brokers.ts';
 
 type Route = (url: URL, init: RequestInit) => { status?: number; body: unknown; headers?: Record<string, string> } | undefined;
@@ -126,6 +127,18 @@ describe('eToro', () => {
     serve(at('/api/v1/trading/info/real/pnl', btc), (u) => (u.pathname === '/api/v2/market-data/instruments' ? { body: { results: [{ instrumentId: 100000, symbol: 'BTC', displayName: 'Bitcoin', type: 'Crypto' }] } } : undefined));
     const snap = await brokerAdapter('etoro', creds, 'real', noSleep).load();
     expect(snap.balances[0]).toMatchObject({ asset: 'BTC', crypto: true });
+  });
+
+  it("FIX-ETOROMETA: an instrument eToro's market data does not know (a new listing) takes its symbol from eToro's own list", async () => {
+    resetEtoroCaches();
+    const spcx = { clientPortfolio: { positions: [{ positionID: 3643575996, instrumentID: 15618, isBuy: false, leverage: 5, units: 5.02, openRate: 129.49, amount: 130, unrealizedPnL: { pnL: 1.2, closeRate: 129.25 } }] } };
+    serve(
+      at('/api/v1/trading/info/real/pnl', spcx),
+      (u) => (u.pathname === '/api/v2/market-data/instruments' ? { body: { results: [] } } : undefined),
+      (u) => (u.hostname === 'api.etorostatic.com' ? { body: { InstrumentDisplayDatas: [{ InstrumentID: 15618, SymbolFull: 'SPCX', InstrumentDisplayName: 'Space Exploration Technologies Corp', InstrumentTypeID: 5, ExchangeID: 4 }, { InstrumentID: 15622, SymbolFull: 'SPCX.24-7', InstrumentDisplayName: 'SpaceX 24/7', InstrumentTypeID: 5, ExchangeID: 4 }] } } : undefined),
+    );
+    const snap = await brokerAdapter('etoro', creds, 'real', noSleep).load();
+    expect(snap.positions[0]).toMatchObject({ symbol: 'SPCX/USD', side: 'short', leverage: 5 });
   });
 
   it('values a holding in USD from the invested amount and the PnL, whatever the instrument currency', async () => {

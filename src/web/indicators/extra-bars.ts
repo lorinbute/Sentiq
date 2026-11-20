@@ -10,7 +10,7 @@ import { sentiqTf, zoneOf, type ChartInfo } from './compute.ts';
 export interface ExtraLoad {
   /** Same key for the same candles (React Query's key and the map below). */
   key: string;
-  asset: 'crypto' | 'stock' | 'index';
+  asset: 'crypto' | 'stock' | 'index' | 'forex' | 'commodity';
   /** The crypto exchange (absent: the server chooses, FD-MARKETSRC). */
   exchange?: string;
   symbol: string;

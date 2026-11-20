@@ -81,7 +81,7 @@ export function checkAiKeyShape(key: string): void {
 export const isDevMail = (r: { apiKey: string | null; from: string }) => !r.apiKey || /(^|<)onboarding@resend\.dev>?$/i.test(r.from.trim());
 
 /** Settings each user has for themselves (FD-USERS §2); the rest are global and only the admin changes them. */
-export const USER_KEYS = ['timezone', 'market', 'scanner', 'calendar', 'indicator', 'lma', 'charts', 'ai', 'studies', 'studyFavorites', 'studyMemory', 'orderTicket', 'stockNews', 'chartLines', 'hlineTemplate', 'chartStyle'] as const;
+export const USER_KEYS = ['timezone', 'market', 'scanner', 'calendar', 'indicator', 'lma', 'charts', 'ai', 'studies', 'studyFavorites', 'studyMemory', 'orderTicket', 'stockNews', 'chartLines', 'hlineTemplate', 'chartStyle', 'trades', 'bots'] as const;
 type UserKey = (typeof USER_KEYS)[number];
 const isUserKey = (k: string): k is UserKey => (USER_KEYS as readonly string[]).includes(k);
 

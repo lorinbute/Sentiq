@@ -27,6 +27,8 @@ interface Trade {
   liquidation: number | null;
   /** eToro: the position's id (each one is apart, FD-HEDGEALL). */
   ref?: string;
+  /** FIX-DECIMALS: the money it took from the account, in `quote` (a position's margin, a holding's cost); null: unknown. */
+  used: number | null;
 }
 
 export interface PnlInput {
@@ -59,6 +61,28 @@ export interface PnlBasis {
   entry: number;
   qty: number;
   quote: string;
+  /** FIX-DECIMALS: the money from the account `qty` stands for (in `quote`), what the line's box shows; null: unknown. */
+  used?: number | null;
+}
+
+/**
+ * FIX-DECIMALS: what a position took from the account, in its settlement coin: the platform's margin, else its value at
+ * entry over its leverage (a linear contract: an inverse one's value is in another coin); null when neither is known.
+ */
+export function positionUsed(p: Pick<PositionRow, 'symbol' | 'margin' | 'leverage' | 'entryPrice' | 'size'>): number | null {
+  if (p.margin != null && p.margin > 0) return p.margin;
+  const [pair = '', settle] = p.symbol.split(':');
+  if (settle && settle !== pair.split('/')[1]) return null;
+  return p.entryPrice && p.size && p.size > 0 ? (p.entryPrice * p.size) / (p.leverage && p.leverage > 0 ? p.leverage : 1) : null;
+}
+
+/** FIX-DECIMALS: what an order takes from the account when it fills: its value, over its leverage (futures); null: unknown. */
+export function orderUsed(o: Pick<OrderRow, 'market' | 'price' | 'triggerPrice' | 'amount' | 'contractSize' | 'leverage'>): number | null {
+  const price = o.price ?? o.triggerPrice;
+  if (o.amount === null || !(o.amount > 0) || price === null || !(price > 0)) return null;
+  const value = o.amount * (o.market === 'futures' ? (o.contractSize ?? 1) : 1) * price;
+  if (o.market === 'spot') return value;
+  return o.leverage != null && o.leverage > 0 ? value / o.leverage : null;
 }
 
 /** The PnL if the price reaches `level`, and its share of the cost. */
@@ -97,6 +121,7 @@ function tradesOf(input: PnlInput): Trade[] {
       quote: settle,
       liquidation: p.liquidationPrice,
       ...(ref ? { ref } : {}),
+      used: positionUsed(p),
     });
   }
   // Spot: the holding across accounts (trade + main), priced at its average buy price.
@@ -108,7 +133,7 @@ function tradesOf(input: PnlInput): Trade[] {
   if (qty > 0 && avg && !dust) {
     // eToro keeps a holding as positions too (FD-HEDGEALL): one alone can have its SL / TP changed.
     const ids = rows.flatMap((b) => b.ref?.positionIds ?? []);
-    out.push({ market: 'spot', long: true, entry: avg, qty, contracts: null, perContract: null, symbol: `${input.base}/${input.quote}`, quote: input.quote, liquidation: null, ...(ids.length === 1 ? { ref: ids[0] } : {}) });
+    out.push({ market: 'spot', long: true, entry: avg, qty, contracts: null, perContract: null, symbol: `${input.base}/${input.quote}`, quote: input.quote, liquidation: null, ...(ids.length === 1 ? { ref: ids[0] } : {}), used: avg * qty });
   }
   return out;
 }
@@ -203,7 +228,7 @@ export function tradeLinesOf(input: PnlInput, colors: PnlPalette = PNL_COLORS): 
       title: `Intrare ${t.market === 'spot' ? (input.stock ? '' : 'spot ') : `${side} `}${t.market === 'futures' && both && !input.stock ? 'futures ' : ''}${fmtNum(t.qty, 8)} ${input.base}${acct}`,
       style: 'solid',
       position,
-      basis: { long: t.long, entry: t.entry, qty: t.qty, quote: t.quote },
+      basis: { long: t.long, entry: t.entry, qty: t.qty, quote: t.quote, used: t.used },
     });
     if (t.liquidation) lines.push({ id: `${group}|liq`, role: 'liquidation', group, price: t.liquidation, color: colors.liquidation, title: `Lichidare${tag}`, style: 'dotted' });
     for (const o of input.orders) {
@@ -211,7 +236,8 @@ export function tradeLinesOf(input: PnlInput, colors: PnlPalette = PNL_COLORS): 
       if (!legs.length) continue;
       // An order that closes part of the trade realises the PnL of that part only.
       const orderQty = o.amount !== null && o.amount > 0 ? (t.market === 'futures' ? (t.contracts && t.perContract ? Math.min(o.amount, t.contracts) * t.perContract : t.qty) : Math.min(o.amount, t.qty)) : t.qty;
-      const basis = { long: t.long, entry: t.entry, qty: orderQty, quote: t.quote };
+      // FIX-DECIMALS: the share of the position's money it closes.
+      const basis = { long: t.long, entry: t.entry, qty: orderQty, quote: t.quote, used: t.used !== null ? (t.used * orderQty) / t.qty : null };
       used.add(`${o.market}:${o.id}`);
       for (const { role, price, leg } of legs) {
         const label = `${role === 'sl' ? 'SL' : 'TP'}${tag}`;
@@ -257,7 +283,7 @@ export function tradeLinesOf(input: PnlInput, colors: PnlPalette = PNL_COLORS): 
     lines.push({ id: `${group}|line`, role: 'order', group, price, color: colors.other, title, name: title, style: 'dashed', order: o, leg: o.triggerPrice !== null ? 'trigger' : 'price' });
     const qty = o.amount !== null && o.amount > 0 ? o.amount * (o.market === 'futures' ? (o.contractSize ?? 1) : 1) : null;
     const quote = o.symbol.split(':')[1] ?? o.symbol.split('/')[1]?.split(':')[0] ?? input.quote;
-    const basis = qty !== null ? { long: o.side === 'buy', entry: o.price ?? price, qty, quote } : undefined;
+    const basis = qty !== null ? { long: o.side === 'buy', entry: o.price ?? price, qty, quote, used: orderUsed(o) } : undefined;
     for (const [role, level, leg] of [
       ['order-sl', o.stopLoss, 'sl'],
       ['order-tp', o.takeProfit, 'tp'],

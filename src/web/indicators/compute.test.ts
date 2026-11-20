@@ -79,8 +79,10 @@ describe('the legend', () => {
 
   it('values: the chart precision over the candles, a few digits in a pane', () => {
     expect(fmtStudyValue(1234.5678, true, 1)).toBe('1234.6');
-    expect(fmtStudyValue(54.321, false, 1)).toBe('54.321');
-    expect(fmtStudyValue(0.000123456, false, 1)).toBe('0.000123');
+    // FIX-DECIMALS: two decimals from 1 on, four under 1, under 0,0001 the first four digits.
+    expect(fmtStudyValue(54.321, false, 1)).toBe('54.32');
+    expect(fmtStudyValue(0.123456, false, 1)).toBe('0.1235');
+    expect(fmtStudyValue(0.0000123456, false, 1)).toBe('0.00001235');
     expect(fmtStudyValue(Number.NaN, false, 2)).toBe('—');
   });
 });

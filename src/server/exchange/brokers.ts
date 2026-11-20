@@ -5,6 +5,7 @@ import { HttpError, httpRequest, type HttpResponse } from '../net/http.ts';
 import { addDays, DAY_MS, dayKey, zonedTimeToUtc } from '../../shared/time.ts';
 import type { BalanceRow, ErrorCode, FillRow, OrderRow, PositionRow } from './accounts.ts';
 import type { HistoryMarket } from './trade-history.ts';
+import { etoroListedById } from './trading/etoro.ts';
 
 export type BrokerId = 'trading212' | 'etoro' | 'ibkr' | 'alpaca';
 export const BROKER_IDS: readonly BrokerId[] = ['trading212', 'etoro', 'ibkr', 'alpaca'];
@@ -433,6 +434,14 @@ class Etoro implements BrokerAdapter {
         // Unresolved ids are shown by number; the portfolio itself still loads.
       }
     }
+    // FIX-ETOROMETA (the user: „poziția nu mai e deschisă” on the bot's SPCX short): eToro's market data does not know
+    // some new listings (SPCX, ANT): their symbol from eToro's own list, else the position showed as „#15618” and the bot's
+    // position screen could not find it.
+    for (const id of missing) {
+      if (etoroInstruments.has(id) && now - (etoroInstruments.get(id) as { at: number }).at <= ETORO_META_TTL) continue;
+      const own = await etoroListedById(id, now).catch(() => null);
+      if (own) etoroInstruments.set(id, { info: { symbol: own.symbol, name: own.name, type: own.type === 1 ? 'Currencies' : own.type === 10 ? 'Crypto' : 'Stocks' }, at: now });
+    }
     const out = new Map<number, EtoroInstrument>();
     for (const id of ids) {
       const c = etoroInstruments.get(id);
@@ -497,6 +506,8 @@ class Etoro implements BrokerAdapter {
           leverage: lev,
           marginMode: copiedFrom ? `copiat de la ${copiedFrom}` : null,
           notional: close !== null ? close * units : null,
+          // FIX-DECIMALS: what it took from the account (eToro's invested amount, in USD), the chart's box.
+          margin: num(p.amount),
           ...(copiedFrom || id === null ? {} : { ref: { positionIds: [posId], instrumentId: id } }),
         });
       }
@@ -529,6 +540,7 @@ class Etoro implements BrokerAdapter {
         timestamp: Date.parse(String(pick(o, 'openDateTime', 'occurred') ?? '')) || null,
         reduceOnly: false,
         stop: null,
+        leverage: num(o.leverage) ?? 1,
       });
     }
     const balances: BalanceRow[] = [...holdings.entries()].map(([sym, h]) => ({

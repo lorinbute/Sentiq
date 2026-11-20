@@ -111,3 +111,40 @@ describe('scanner for stocks (FD-SENTIQ §4.6)', () => {
     expect(asked).toEqual(['1h']);
   });
 });
+
+describe('FIX-TDBOTS: the scanner spends the user\'s Twelve Data credits sparingly', () => {
+  it('at most 8 shares read with the key in a run (the others in the next ones); pairs and commodities not scanned', async () => {
+    const db = await testDb();
+    const settings = new SettingsService(db, new SecretBox(Buffer.alloc(32, 3)));
+    const shares = Array.from({ length: 13 }, (_, i) => `S${String.fromCharCode(65 + i)}`);
+    for (const [i, s] of shares.entries()) await db.run("INSERT INTO watchlist(user_id, coin, quote, position, aliases, added_at, kind) VALUES (1, ?, 'USD', ?, '[]', 1, 'stock')", [s, i]);
+    await db.run("INSERT INTO watchlist(user_id, coin, quote, position, aliases, added_at, kind) VALUES (1, 'EUR/USD', 'USD', 20, '[]', 1, 'forex'), (1, 'XAU/USD', 'USD', 21, '[]', 1, 'commodity')");
+    const asked: string[] = [];
+    const stocks = {
+      hasKey: async () => true,
+      timeframes: async () => ['1h', '1d', '1w'],
+      timeframesFor: async () => ['1h', '1d', '1w'],
+      confirmedStatus: async (): Promise<MarketStatus> => ({ state: 'open', label: '', opensAt: null, closesAt: null, fetchedAt: Date.now() }),
+      candles: async (sym: string, tf: Timeframe, count: number) => {
+        asked.push(sym);
+        return { exchange: 'twelvedata', symbol: sym, tf, candles: candles(Math.min(count, 400)), pricePrecision: 2, lastClosedIndex: 0, fetchedAt: Date.now() };
+      },
+      fxCandles: async (sym: string) => {
+        asked.push(sym);
+        throw new Error('not asked');
+      },
+    } as unknown as StockData;
+    const market = { candles: async () => Promise.reject(new Error('no crypto here')) } as unknown as MarketData;
+    await settings.updateFor(1, true, { scanner: { tf: '1h' } });
+    const scanner = new Scanner(db, settings, market, silentLogger, stocks);
+    await scanner.run();
+    expect(asked).toEqual(shares.slice(0, 8));
+    expect(scanner.result(1)?.rows.map((r) => r.coin)).toEqual(shares.slice(0, 8));
+    await scanner.run();
+    expect(asked).toEqual(shares);
+    expect(scanner.result(1)?.rows.map((r) => r.coin)).toEqual(shares);
+    // Nothing left to read for 30 minutes.
+    await scanner.run();
+    expect(asked).toHaveLength(13);
+  });
+});

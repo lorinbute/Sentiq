@@ -100,7 +100,7 @@ export function SymbolInfo({ item, onClose }: { item: WatchItem; onClose: () => 
       onClose={onClose}
       title={
         <span className="flex min-w-0 items-center gap-2.5">
-          <CoinLogo coin={item.coin} size={22} badge={item.kind === 'stock'} square={item.kind === 'stock'} />
+          <CoinLogo coin={item.coin} size={22} badge={item.kind === 'stock'} square={item.kind === 'stock'} fx={item.kind === 'forex' || item.kind === 'commodity' ? item.kind : undefined} />
           <span className="truncate">
             {shown}
             {(p?.name ?? item.name) && <span className="font-normal text-muted"> · {p?.name ?? item.name}</span>}
@@ -148,6 +148,8 @@ export function SymbolInfo({ item, onClose }: { item: WatchItem; onClose: () => 
               <p className="text-[13px] text-faint">Monedele nu publică rezultate financiare.</p>
             ) : p.kind === 'index' ? (
               <p className="text-[13px] text-faint">Un indice nu are rezultate financiare.</p>
+            ) : p.kind === 'forex' || p.kind === 'commodity' ? (
+              <p className="text-[13px] text-faint">{p.kind === 'forex' ? 'O pereche valutară nu are rezultate financiare.' : 'O marfă nu are rezultate financiare.'}</p>
             ) : p.kind === 'fund' ? (
               <p className="text-[13px] text-faint">Fond tranzacționat la bursă (ETF): fondurile nu publică rezultate trimestriale.</p>
             ) : p.quarters.length === 0 ? (

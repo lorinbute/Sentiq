@@ -179,11 +179,16 @@ function SourcesSection() {
                     </div>
                   </td>
                   <td className="text-right">
-                    {!s.builtin && (
-                      <button className="text-faint hover:text-bear" aria-label={`Șterge ${s.name}`} onClick={() => remove.mutate(s.id)}>
-                        <Trash2 size={14} aria-hidden />
-                      </button>
-                    )}
+                    {/* FIX-SOURCEDELETE: every source, the built-in ones too (deleted for good, with their news). */}
+                    <button
+                      className="text-faint hover:text-bear"
+                      aria-label={`Șterge ${s.name}`}
+                      onClick={() => {
+                        if (window.confirm(`Ștergi sursa „${s.name}”? Se șterg și știrile ei${s.builtin ? '; nu mai revine nici la repornirea serverului' : ''}.`)) remove.mutate(s.id);
+                      }}
+                    >
+                      <Trash2 size={14} aria-hidden />
+                    </button>
                   </td>
                 </tr>
               ))}

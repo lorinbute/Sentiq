@@ -1,6 +1,7 @@
 // Running one indicator on the chart's candles (FD-INDICATORS, TD-INDICATORS §6): the bars and chart context it reads,
 // its inputs checked against its own rules, its errors caught, and what its legend shows. Pure functions: the runtime
 // chunk (catalog + vendored code) is passed in, never imported here.
+import { maxDecimals } from '../../shared/decimals.ts';
 import type { Bar, IndicatorResult, InputConfig, PlotConfig } from 'oakscriptjs';
 import type { Candle } from '../../shared/indicator/slingshot.ts';
 import type { StudyId } from '../../shared/studies.ts';
@@ -11,7 +12,8 @@ import type { ChartContext } from './vendor/chart-context';
 
 /** What the page knows about the chart on screen. */
 export interface ChartInfo {
-  kind: 'crypto' | 'stock' | 'index';
+  /** FD-FXCOMMODITIES: a forex pair or a commodity too (Twelve Data, "EUR/USD"). */
+  kind: 'crypto' | 'stock' | 'index' | 'forex' | 'commodity';
   /** The crypto exchange of the candles ("kucoin"); "stock" / "index" otherwise. */
   exchange: string;
   /** "BTC/USDT", "AAPL", "SPX". */
@@ -55,17 +57,19 @@ export function toBars(candles: readonly Candle[]): Bar[] {
 /** The chart symbol as a TradingView ticker id: "KUCOIN:BTCUSDT", "NASDAQ:AAPL", "INDEX:SPX". */
 export function tickerIdOf(info: ChartInfo): string {
   if (info.kind === 'crypto') return `${info.exchange.toUpperCase()}:${info.symbol.replace('/', '')}`;
+  if (info.kind === 'forex' || info.kind === 'commodity') return `FX:${info.symbol.replace('/', '')}`;
   return `${info.kind === 'index' ? 'INDEX' : 'NASDAQ'}:${info.symbol.replace(/^\^/, '')}`;
 }
 
 /** Exchange time zone and session of the chart symbol: crypto trades around the clock (UTC), the rest in New York. */
 export function zoneOf(kind: ChartInfo['kind']): { timezone: string; session: string } {
-  return kind === 'crypto' ? { timezone: 'Etc/UTC', session: '24x7' } : { timezone: 'America/New_York', session: '0930-1600' };
+  // FD-FXCOMMODITIES: pairs and commodities in UTC (Twelve Data's), around the week's clock.
+  return kind === 'crypto' || kind === 'forex' || kind === 'commodity' ? { timezone: 'Etc/UTC', session: '24x7' } : { timezone: 'America/New_York', session: '0930-1600' };
 }
 
 /** The chart context the indicators read (TD-INDICATORS §6); `bars` and the visible range are added per indicator. */
 export function chartContext(info: ChartInfo): ChartContext {
-  const quote = info.kind === 'crypto' ? (info.symbol.split('/')[1] ?? 'USDT') : 'USD';
+  const quote = info.kind === 'crypto' ? (info.symbol.split('/')[1] ?? 'USDT') : info.kind === 'forex' || info.kind === 'commodity' ? (info.symbol.split('/')[1] ?? 'USD') : 'USD';
   return {
     timeframe: pineTf(info.tf),
     ...zoneOf(info.kind),
@@ -202,11 +206,9 @@ export function plotShown(def: PlotConfig, override: { visible?: boolean } | und
   return (result?.plots?.[def.id] ?? []).some((p) => p.value != null && !Number.isNaN(p.value));
 }
 
-/** A value for the legend: the chart's precision over the candles, else a few digits. */
+/** A value for the legend: the chart's precision over the candles, else FIX-DECIMALS' (two from 1 on, four under 1). */
 export function fmtStudyValue(v: number, overlay: boolean, precision: number): string {
   if (!Number.isFinite(v)) return '—';
   if (overlay) return v.toFixed(precision);
-  const a = Math.abs(v);
-  const d = a >= 1e6 ? 0 : a >= 100 ? 2 : a >= 1 ? 3 : a >= 0.01 ? 4 : 6;
-  return v.toFixed(d);
+  return v.toFixed(Math.abs(v) >= 1e6 ? 0 : maxDecimals(v));
 }

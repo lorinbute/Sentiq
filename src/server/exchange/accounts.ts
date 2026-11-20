@@ -157,6 +157,8 @@ export interface OrderRow {
   takeProfit?: number | null;
   /** Futures: coins per contract (the amount is in contracts), for the PnL of an order with no position yet. */
   contractSize?: number | null;
+  /** FIX-DECIMALS: the leverage it opens with, where the platform tells it (the money it takes: its value over it). */
+  leverage?: number | null;
 }
 
 /** KuCoin's stop direction from the raw order (futures: down / up; spot: loss / entry). */
@@ -1414,6 +1416,7 @@ export class AccountsService {
       stopLoss: num((o as { stopLossPrice?: unknown }).stopLossPrice),
       takeProfit: num((o as { takeProfitPrice?: unknown }).takeProfitPrice),
       contractSize: num(spot.markets?.[String(o.symbol)]?.contractSize ?? futures?.markets?.[String(o.symbol)]?.contractSize),
+      leverage: num((o.info as { leverage?: unknown } | undefined)?.leverage ?? (o as { leverage?: unknown }).leverage),
     }));
     // The same order can come back from the normal and the trigger listing.
     const seenOrders = new Set<string>();

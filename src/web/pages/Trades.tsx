@@ -6,6 +6,7 @@ import { ArrowRightLeft, ChartCandlestick, Coins, ListChecks, Plus, Power, Refre
 import { PaperBadge, PaperResetDialog, PaperSettingsDialog } from '../components/PaperDialogs.tsx';
 import type { AccountView, BalanceRow, OrderRow, Portfolio, StatsPeriod, TradeHistory, TradeStats } from '../../shared/api-types.ts';
 import { api, errorMessage, qs } from '../api.ts';
+import { isFxRate } from '../../shared/fx.ts';
 import { autoDigits, breakableUnit, fmtAgo, fmtDateTime, fmtMoney, fmtNum, fmtPct, fmtPrice, fmtUsd, fmtWeekday, positionAmount } from '../format.ts';
 import { useRevealInRow, useTz } from '../hooks.ts';
 import { Empty, ErrorNote, Loading, Panel, Warning } from '../components/ui.tsx';
@@ -386,8 +387,9 @@ function PortfolioView({
   // Crypto values are in USDT and shown as dollars, as before; a broker's are in the account's currency.
   const money = (v: number | null | undefined, currency = p.currency) => (stocks ? fmtMoney(v, currency) : fmtUsd(v));
   const errs = Object.entries(p.errors);
-  // Shares are quoted in cents (as on their chart); coins keep the finer steps they need.
-  const digits = (v: number | null | undefined, crypto = false) => (stocks && !crypto ? (Math.abs(v ?? 1) < 1 ? 4 : 2) : autoDigits(v ?? 1));
+  // Shares are quoted in cents (as on their chart); coins keep the finer steps they need (FIX-DECIMALS: at most two from 1
+  // on, four under 1); a forex / commodity rate four under 10.
+  const digits = (v: number | null | undefined, crypto = false, symbol = '') => (isFxRate(symbol) ? autoDigits(v ?? 1, true) : stocks && !crypto ? (Math.abs(v ?? 1) < 1 ? 4 : 2) : autoDigits(v ?? 1));
   const chartOf = (asset: string, crypto = false) => (stocks && !crypto ? `/charts/s/${encodeURIComponent(asset)}` : `/charts/${asset}/USDT`);
   const updated = (
     <div className="text-[12px] text-faint">
@@ -446,7 +448,7 @@ function PortfolioView({
             </thead>
             <tbody>
               {p.positions.map((pos, i) => {
-                const d = digits(pos.entryPrice ?? pos.markPrice);
+                const d = digits(pos.entryPrice ?? pos.markPrice, false, pos.symbol);
                 const [base, quoteFull] = pos.symbol.split('/');
                 return (
                   // eToro keeps every position apart (FD-HEDGEALL): two shorts on one instrument are two rows.
@@ -543,7 +545,7 @@ function PortfolioView({
               </thead>
               <tbody>
                 {p.balances.map((b) => {
-                  const d = digits(b.price, b.crypto);
+                  const d = digits(b.price, b.crypto, b.asset);
                   return (
                     <tr key={`${b.account}-${b.asset}`}>
                       <td className="font-semibold">
@@ -672,8 +674,8 @@ function PortfolioView({
                     {/* FD-KUCOINHEDGE: in hedge mode, the position the order opens or closes. */}
                     {o.positionSide && <span className="ml-1 text-[12px] text-faint">{o.positionSide}</span>}
                   </td>
-                  <td className="num text-right">{fmtPrice(o.price, digits(o.price))}</td>
-                  <td className="num text-right">{o.triggerPrice ? fmtPrice(o.triggerPrice, digits(o.triggerPrice)) : '—'}</td>
+                  <td className="num text-right">{fmtPrice(o.price, digits(o.price, false, o.symbol))}</td>
+                  <td className="num text-right">{o.triggerPrice ? fmtPrice(o.triggerPrice, digits(o.triggerPrice, false, o.symbol)) : '—'}</td>
                   <td className="num text-right">
                     {fmtNum(o.amount, 8)}
                     {o.filled ? <div className="text-[11.5px] text-faint">{fmtNum(o.filled, 8)} executat</div> : null}

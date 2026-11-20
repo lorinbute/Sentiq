@@ -18120,4 +18120,241 @@ SHORT SL    103.880,00
 <li>„Adaugi logo-ul companiilor la rezultate în calendar pe site.” Rezultatele trimestriale ale unei companii au logo-ul ei în locul iconiței evenimentului: în calendar, în „Urmează” pe Azi, în banda de sus a pieței și la „Următorul major”.</li>
 <li>Logo-urile au acum mereu mărimea cerută: în celula calendarului, logo-ul ieșea întins pe verticală, cât rândurile titlului.</li>
 </ul>
+
+<h2 id="fix-etorolev--levierul-boților-la-etoro-19-nov-2026">FIX-ETOROLEV — Levierul boților la eToro (19 nov 2026)</h2>
+<ul>
+<li>„eToro nu are conceptul de futures. eToro are tranzacții și la fiecare tranzacție poți să pornești leverage-ul… Nu înțeleg de ce nu e aplicat exact la fel și pentru bani reali.” Un bot pe un cont eToro are acum „Levierul” în formular (site și aplicație), ca un ordin pus de mână la eToro. Pe spot-ul unei platforme crypto și la Trading 212 sau Alpaca, levierul rămâne 1× (doar pe futures și pe un profil Paper Trading).</li>
+<li>eToro cere un stop loss la orice poziție cu levier peste 1× (ca la un short). Botul îl trimite la deschidere: la Slingshot, stop loss-ul tranzacției; la DCA, stop loss-ul ciclului (obligatoriu la levier); la grilă, „Oprește sub” pentru intervalele long (obligatoriu la levier) și „Oprește peste” pentru cele short. Fără el, verificarea spune ce lipsește.</li>
+<li>Poziția e suma tranzacției × levierul, ca pe futures. Levierul scade până când stop loss-ul vine cu mult înaintea pierderii întregii sume (aceeași regulă ca pe futures). Jurnalul spune levierul la fiecare intrare.</li>
+<li>Verificarea avertizează că levierul trebuie să fie unul pe care eToro îl oferă instrumentului (la acțiuni, de obicei 1×, 2× sau 5×). eToro nu spune prin API levierele permise; dacă refuză unul, botul spune asta la intrare.</li>
+<li>Nu există o marjă de ales la eToro (rândul „Marja” nu apare).</li>
+</ul>
+
+<h3>FIX-STOCKCOUNTDOWN · Cronometrul lumânării la acțiuni (19 nov 2026)</h3>
+<ul>
+<li>„Pe acțiuni, pe grafic, nu văd scurgerea timpului… arată numai 00:00.” Lumânările unei acțiuni se recitesc o dată pe minut (fără flux live). Cronometrul de sub preț număra până la sfârșitul ultimei lumânări citite, apoi rămânea pe „00:00”. Acum numără până la sfârșitul perioadei de acum (din ultima lumânare), cel mult până la închiderea bursei; sub o secundă nu se mai arată. La fel în aplicație.</li>
+</ul>
+
+<h3>FIX-NOHISTWARN · Fără avertismentul de istoric insuficient (19 nov 2026)</h3>
+<ul>
+<li>„Să scoți eroarea Istoric insuficient pentru încălzirea indicatorului… e foarte clar de ce nu se afișează.” Graficul nu mai arată avertismentul când o pereche are prea puține lumânări pentru Slingshot: se vede oricum (puține lumânări, fără semnale). Jurnalul unui bot îl spune în continuare, o dată (acolo explică de ce botul nu intră).</li>
+</ul>
+
+<h3>FIX-STOCKLIVE · Graficul unei acțiuni la 30 de secunde (19 nov 2026)</h3>
+<ul>
+<li>„Aplicația tocmai ce mi-a actualizat graficul după 5 minute… vreau la 30 secunde pe acțiuni, că am 55 de apeluri pe minut.” Lumânările unei acțiuni se recitesc la 30 de secunde (site și aplicație), iar serverul le păstrează doar 25 de secunde la intervalele de până la o oră, deci fiecare citire aduce ultimele de la Twelve Data. Un grafic deschis ia astfel 2 credite pe minut.</li>
+<li>Dacă Twelve Data refuză o citire (de exemplu, creditele pe minut s-au dus pe citirea listei de urmărire de către scaner sau pe boți), graficul arată lumânările de dinainte și spune de când și de ce. Pe site era deja; acum și în aplicație.</li>
+</ul>
+
+<h3>FIX-STOCKLIVE (2) · Lumânarea care se formează, din prețul live (19 nov 2026)</h3>
+<ul>
+<li>„În continuare există același delay de minute.” Verificat la Twelve Data: <code>/time_series</code> dă doar lumânări închise, cu aproximativ un minut întârziere (la 12:45:11 ET, ultima era 12:43). Recitirea la 30 s aducea deci aceleași lumânări. Acum graficul unei acțiuni (doar graficul: boții și scanerul rămân pe lumânările Twelve Data) primește și lumânările pe care Twelve Data nu le-a publicat încă, construite din prețul live (<code>/price</code>, un credit, cel mult o dată la 25 s pe simbol): cea care se formează și minutul trecut încă nepublicat. Maximul, minimul și închiderea urmează prețul, iar deschiderea e închiderea dinainte. Lumânarea reală Twelve Data o înlocuiește când vine. Nu se construiește nimic în afara sesiunii sau pe 1d / 1w. Lumânările Twelve Data rămân în cache un minut; un grafic urmărit consumă ~3 credite pe minut.</li>
+</ul>
+
+<h3>FIX-STOCKLIVE (3) · Lumânarea în formare pe 5m și mai sus (19 nov 2026)</h3>
+<ul>
+<li>„Twelve Data îmi dă datele tot așa o dată la 5 minute?” Nu: verificat la 13:21:27 ET, lumânarea de 5m 13:20 avea deja închiderea minutului 13:20 (Twelve Data o actualizează cu fiecare minut închis, cu ~1 minut întârziere). Pe 5m, 15m, 30m și 1h, lumânarea în formare dată de Twelve Data urmează acum și prețul live (maximul, minimul, închiderea), nu doar o dată pe minut.</li>
+</ul>
+
+<h3>FIX-BOTPRICE · Prețul acțiunilor pentru boți, cel mult 25 s vechi (19 nov 2026)</h3>
+<ul><li>Un bot pe acțiuni vede SL-ul și TP-ul după prețul Nasdaq (gratuit). Cache-ul lui era de 60 s, deci un nivel atins putea fi observat cu până la ~1,5 minute întârziere. Acum, la fiecare verificare a botului (la 30 s), prețul folosit are cel mult 25 s. Listele urmărite, antetele și Paper Trading păstrează 60 s.</li></ul>
+
+<h3>FIX-ETOROLEV3 · FIX-ETOROTP · FIX-ETOROPENDING · Short-ul AMD de pe eToro (19 nov 2026)</h3>
+<ul>
+<li><b>Ce s-a întâmplat</b>: botul 4 („Acțiuni”, eToro real) a trimis la 19:55:32 UTC un short AMD la 3×. eToro l-a refuzat: „User Leverage settings Possible Leverages[1,2,5] does not contain requested value: 3” (starea 4, eroarea 717, fără execuție; confirmat din Azure, cu acordul utilizatorului). Botul nu citea răspunsul eToro și și-a notat un short care nu există. Aplicația spunea apoi „Poziția nu mai e deschisă”.</li>
+<li><b>FIX-ETOROLEV3</b>: pe eToro, levierul e 1×, 2× sau 5×, în formularul botului și în ordinul nou (aplicație și site). Verificarea botului refuză altă valoare. Un bot salvat înainte cu alt levier nu mai trimite intrarea și spune de ce.</li>
+<li><b>FIX-ETOROTP</b> („Slingshot-ul setează și stop loss și take profit”): o intrare Slingshot pe eToro se deschide cu ambele niveluri ale indicatorului, așa cum sunt. Înainte pleca doar stop loss-ul, și doar când eToro îl cerea; take profit-ul îl urmărea botul singur.</li>
+<li><b>FIX-ETOROPENDING</b>: botul citește răspunsul eToro. Un ordin refuzat sau anulat nu devine poziție. Unul primit, dar încă nedeschis, e „În așteptare”: botul îi cere starea la eToro la fiecare verificare (30 s). Dacă eToro îl refuză sau îl anulează, poziția iese din bot fără profit sau pierdere, cu o notă în jurnal. O așteptare mai veche, fără id-ul ordinului (short-ul AMD), își găsește ordinul în jurnalul ordinelor Sentiq. În aplicație, poziția în așteptare are „În așteptare” în locul PnL-ului, iar ecranul ei arată detaliile ordinului și starea, nu „nu mai e deschisă”.</li>
+</ul>
+
+<h3>FIX-BOT24 · Botul eToro rulează non-stop (19 nov 2026)</h3>
+<ul>
+<li>„Botul rulează 24 din 24… de unde știi tu pe ce piață tranzacționez eu? Dacă tranzacționăm în Japonia?” Până acum, botul de acțiuni lua starea bursei americane (Nasdaq) și nu făcea nimic cât era închisă, oricare ar fi fost acțiunea. Așa a rămas și short-ul AMD refuzat (curățarea rula doar cu bursa deschisă). Acum un bot real pe eToro rulează la orice oră, la prețul eToro al instrumentului (orice bursă, programul 24/5 al eToro). Fără prețul eToro, folosește ultimul preț cunoscut (Nasdaq), tot la orice oră. eToro decide când se execută un ordin: unul rămas în așteptare e urmărit (FIX-ETOROPENDING). Curățarea deschiderilor refuzate rulează înaintea prețurilor, deci și cu bursa închisă. Verificarea botului spune noua regulă. Brokerii fără urmărirea ordinelor în așteptare (Trading 212, Alpaca, IBKR) rămân, deocamdată, pe sesiunea bursei americane.</li>
+</ul>
+
+<h2 id="fd-fxcommodities">FD-FXCOMMODITIES — Forex și mărfuri (19–20 nov 2026, în lucru)</h2>
+<p>Cererea: „adaugi două noi categorii de simboluri: Forex și commodities. Datele Twelve Data le oferă deja, sunt incluse în abonamentul meu.” Deciziile utilizatorului (20 nov., 00:1x): <b>peste tot, ca indicii</b> (liste, Azi, banda de prețuri, Grafice, căutare, ⌘K, știri, Claude și Rezumat); <b>toate simbolurile, cu căutare</b>; <b>boții și ordinele pe forex și mărfuri în același pas</b>; <b>fără cheie Twelve Data, categoriile sunt ascunse</b>.</p>
+<h3>Ce oferă Twelve Data (verificat 19 nov., cu cheia demo)</h3>
+<ul>
+<li><code>/forex_pairs</code>: 1.399 de perechi (de ex. EUR/USD), grupate Major, Minor, Exotic, Exotic-Cross.</li>
+<li><code>/commodities</code>: 32 de simboluri: aur (XAU/…, GAU/… gram), argint (XAG/…), platină (XPT/USD), paladiu (XPD/USD), cupru (HG1), petrol WTI (WTI/USD), Brent (XBR/USD), Urals (URALS/USD), cu categoria (Precious Metal, Industrial Metal, Energy Resource).</li>
+<li>Aceleași <code>time_series</code>, <code>price</code>, <code>quote</code> ca la acțiuni (cu cheia utilizatorului, planul plătit).</li>
+</ul>
+<p>Urmează: cercetarea fiecărei părți (liste, date și grafice, Azi și banda de prețuri, căutare, știri, Claude și Rezumat, boți, ordinele eToro și simbolurile lui), apoi FD-ul complet cu cazurile limită și TD-ul.</p>
+
+<h3>FIX-BOT20 · 20 de simboluri pe bot (20 nov 2026)</h3>
+<ul><li>„Numărul de tranzacții poate să rămână maxim 10, dar numărul de simboluri trebuie să crească la 20.” <code>MAX_BOT_SYMBOLS = 20</code>, <code>MAX_BOT_OPEN = 10</code> (tranzacțiile deschise odată); formularul site-ului („din 20”) și al aplicației. Test: 20 acceptate, 21 refuzate, 11 tranzacții deodată refuzate.</li></ul>
+
+<h3>FIX-BOTLEVELGONE · SL / TP rămase pe grafic după închidere (20 nov 2026)</h3>
+<ul><li>„Închid trade-ul direct din grafic: dispare linia cu trade-ul, dar SL și TP rămân… dispar mult mai târziu.” Liniile SL / TP ale unei poziții de bot vin din nivelurile botului (<code>/api/bots/levels</code>, citite o dată pe minut; botul își scoate poziția abia la reconciliere), iar poziția din portofoliu, citit imediat după o acțiune. Acum un nivel de bot se desenează doar cât contul mai are poziția lui (partea ei pe acel activ; la spot și acțiuni long și o deținere): la închidere, SL și TP dispar odată cu poziția. Un portofoliu necitit încă sau cu eroare la poziții le păstrează. Site și aplicația iOS (<code>ios-core</code>, <code>ChartCore.js</code> reconstruit). Test: <code>bot-lines.test.ts</code> („FIX-BOTLEVELGONE”).</li></ul>
+
+<h3>FD-FXCOMMODITIES — ce s-a făcut și cazurile limită (20 nov 2026)</h3>
+<ol>
+<li><b>Liste</b>: comutatorul de adăugare are „Forex” și „Mărfuri” (site și iOS), doar cu cheia Twelve Data a utilizatorului; lista se deschide imediat (Majorele, apoi Minore și Exotice; mărfurile: aur, argint, WTI, Brent, platină, paladiu, cupru, cele în USD întâi), căutarea după simbol cu sau fără „/” și după nume („pound”, „aur”). Simbolul se ține cum îl are Twelve Data („EUR/USD”, „XAU/USD”, „HG1”); variantele „la gram” ale argintului (litere mici, „XAGg/EUR”) sunt lăsate deoparte. Serverul verifică în lista Twelve Data: o pereche pe care Twelve Data n-o are e refuzată („Twelve Data nu are perechea EUR/XYZ.”); fără cheie: „Forex și mărfurile cer cheia ta Twelve Data (Setări → Date pentru acțiuni).”</li>
+<li><b>Tabelul listelor</b>: tipul „Forex” / „Marfă”; moneda e cea din simbol (USD pentru cupru); aliasurile implicite: „EUR/USD”, „EURUSD”; „gold”, „aur”; „Brent”… (editabile).</li>
+<li><b>Prețuri</b>: cotația Twelve Data (<code>/quote</code>, un credit, ținută un minut), variația zilei, „închis” în weekend; linia pe 48 de ore din lumânări de 1h, citită o dată la 10 minute (puține credite). Zecimale: sub 10 patru (1,0812), altfel două.</li>
+<li><b>Săptămâna 24/5</b>: deschis de duminică 17:00 până vineri 17:00, ora New York (convenția pieței); pauza zilnică de o oră a mărfurilor nu e socotită. Graficul nu construiește lumânări din prețul live în weekend.</li>
+<li><b>Grafice</b>: adresele <code>/charts/f/EUR-USD</code> și <code>/charts/m/XAU-USD</code> (cratimă pentru „/”); toate timeframe-urile Twelve Data (1m–1w); lumânarea care se formează din prețul live (ca la acțiuni, FIX-STOCKLIVE); antetul spune „deschis (24/5)” / „închis (weekend)”. Tranzacționarea de pe graficele lor e oprită până la pasul cu ordinele (punctul 9).</li>
+<li><b>Azi, banda de prețuri, căutarea, ⌘K, foaia de simboluri a graficului</b>: fișă și bifă proprii (iconița: bancnotă pentru forex, diamant pentru metale, picătură pentru petrol), grupurile „Forex” și „Mărfuri”.</li>
+<li><b>Scanerul</b>: semnalele Slingshot pe ele, cu cheia utilizatorului, citite doar cât utilizatorul e în aplicație (FD-KEYIDLE), recalculate la 30 de minute; în weekend, ultimul rând.</li>
+<li><b>Știri, Rezumat, profil</b>: aliasurile potrivite ca nume proprii (ca indicii: „Gold”, „Brent”, nu orice „gold” din text); Rezumatul scrie „(pereche forex)”, „(marfă: Aur)”; fișa „Date financiare” are o descriere scurtă în română, fără rezultate trimestriale. Uneltele Claude (<code>get_watchlist</code>, <code>get_chart</code>) nu sunt în codul acestui proiect.</li>
+<li><b>Boți și ordine</b> pe forex și mărfuri (eToro): în lucru.</li>
+</ol>
+<p><b>Cazuri limită</b>: utilizatorul își șterge cheia Twelve Data cu forex în liste: rândurile rămân, prețurile spun eroarea, graficul cere cheia; Twelve Data nu răspunde: ultimele lumânări cu vârsta lor (ca la acțiuni), cotația ultimă; același simbol ca monedă (nu se poate: „/”); limita de 50 de simboluri le cuprinde; creditele: o pereche urmărită pe Azi ≈ 1 credit/minut (cotația) + 1 la 10 minute (linia); pe un grafic deschis ≈ 3/minut.</p>
+
+<h3>FD-FXCOMMODITIES · Boți și ordine (propunere, 20 nov. 2026, de aprobat)</h3>
+<ul>
+<li><b>Unde</b>: pe contul eToro (real) și pe un profil Paper Trading de acțiuni (simulat), ca boții de acțiuni; simbolul e o pereche sau o marfă Twelve Data (cu cheia utilizatorului).</li>
+<li><b>Ce simboluri</b>: doar cele cotate în USD (EUR/USD, GBP/USD, AUD/USD, NZD/USD, aur, argint, petrol WTI și Brent, platină, paladiu, cupru): sumele botului sunt în USD, iar la o pereche ca USD/JPY sau EUR/GBP prețul e în altă monedă și cantitatea ar ieși greșit. Celelalte, refuzate la verificare, cu motivul.</li>
+<li><b>Date</b>: lumânările din Twelve Data (la închiderea barei); prețul pentru SL / TP de la eToro (gratuit) la un bot eToro, de la Twelve Data la unul Paper.</li>
+<li><b>Program</b>: non-stop, ca botul eToro de acțiuni (FIX-BOT24); eToro decide execuția (în weekend, ordinul rămâne în așteptare, urmărit).</li>
+<li><b>Levier</b>: 1×, 2× sau 5× (FIX-ETOROLEV3); SL și TP trimise la eToro.</li>
+<li><b>Filtrul de arie</b> (sentimentul pieței): aria Macro în loc de Acțiuni sau Crypto (de confirmat).</li>
+<li><b>Ordinele eToro</b>: simbolul eToro al instrumentului (EURUSD, GOLD, OIL…) verificat printr-o citire unică din Azure, cu acordul utilizatorului; până atunci nicio comandă nu pleacă pe un simbol neconfirmat.</li>
+</ul>
+
+<h3>FD-FXCOMMODITIES · Boți și ordine: deciziile utilizatorului (20 nov. 2026)</h3>
+<ul>
+<li><b>Simbolurile</b>: doar cele cotate în USD (perechi X/USD, aur, argint, platină, paladiu, petrol, cupru); celelalte refuzate la verificare, cu motivul.</li>
+<li><b>Fără filtru de arie</b>: la forex și mărfuri aria nu oprește intrarea și nu intră în scor (partea ei: „fără date”).</li>
+<li><b>eToro: doar forex</b>. Citirea din Azure (cu acordul utilizatorului, doar GET) a confirmat EURUSD (1), GBPUSD (2), AUDUSD (7), NZDUSD (3), cu prețurile identice cu Twelve Data la aceeași oră. Mărfurile eToro sunt CFD-uri pe contracte futures (aur, argint, platină, petrol „Non Expiry”; cupru și paladiu „Expiring Future”; Brent lipsește), iar Twelve Data dă spot: un SL calculat pe Twelve Data ar putea cădea altfel pe eToro. Boții și ordinele eToro refuză deci mărfurile, cu motivul; mărfurile merg pe un profil Paper Trading. Alpaca și Trading 212 nu au forex.</li>
+<li><b>Prețul botului</b>: Twelve Data, cel mult 25 de secunde (ca la acțiuni, FIX-BOTPRICE); pe eToro, prețul eToro când e la zi (FIX-ETOROSTALE), altfel Twelve Data.</li>
+<li><b>FIX-ETOROSTALE</b> (problemă găsită pe drum, aprobată): API-ul eToro dădea cursurile cu 3 h 26 min întârziere (EUR/USD la 23:11 UTC era cel Twelve Data de la 19:46, cu ora lui adevărată în răspuns). Un curs eToro e folosit, de boți și de fereastra de ordin, doar dacă are cel mult 60 de secunde; altfel prețul Nasdaq (acțiuni) sau Twelve Data (forex).</li>
+</ul>
+
+<h3>FD-FXCOMMODITIES — gata (20 nov. 2026)</h3>
+<ul>
+<li><b>Boți și ordine</b>: un bot pe acțiuni primește și perechi și mărfuri în USD; eToro primește doar forex, un profil Paper de acțiuni ambele. Fereastra de ordin de pe graficul forex oferă doar aceste conturi; pozițiile apar pe grafic (eToro le arată ca EURUSD).</li>
+<li><b>Comutatorul de adăugare</b> are Forex și Mărfuri din primul cadru, după setările citite la pornire (cheia Twelve Data): nu mai apar mai târziu, împingând câmpul de căutare.</li>
+<li><b>Graficul</b> unei perechi: patru zecimale sub 10 (1,0971), ca în liste; numărătoarea lumânării cât săptămâna 24/5 e deschisă; fără „Vol” (Twelve Data nu dă volum la forex).</li>
+<li><b>Știrile</b> unui cip forex se filtrează (simbolul cu „/” era aruncat din filtru: se vedeau toate știrile).</li>
+<li><b>FIX-ETOROSTALE</b>: prețul de rezervă al ferestrei de ordin doar pentru acțiunile de la Nasdaq / NYSE și forex (aurul eToro „GOLD” e la Nasdaq Barrick: fără preț, nu unul greșit).</li>
+</ul>
+
+<h2 id="fd-marketmove">FD-MARKETMOVE — Reacția pieței în scorul acțiunilor (20 nov 2026)</h2>
+<p>Cerut de utilizator: „Au fost două zile catastrofale pentru piață … și scorul nu a reflectat treaba asta.” „Nu poți nici acum să spui că scorul la acțiuni este 40,8, este incorect. Trebuie luat în calcul ce se întâmplă în piață acum.” „Scorul trebuie să reflecte cu o oarecare întârziere sau relativitate ce se întâmplă în piață.” Reperele lui: „o zi proastă pentru S&amp;P 500 este −0,5; pentru SpaceX −1 sau 2%”.</p>
+<h3>1. Ce era (date reale)</h3>
+<ul>
+<li>Scorul (și partea Acțiuni) venea doar din știri: ~1.300–2.200 de știri de acțiuni pe zi, cele mai multe despre companii (rezultate, ratinguri), deci media stătea aproape de neutru și în zilele de panică.</li>
+<li>19 nov: S&amp;P 500 −2,02%, Nasdaq 100 −2,21%, Dow −2,19%, Russell −2,18%; Acțiuni 53,7, ziua 51,6 (indexul utilizatorului). 20 nov, în ședință: S&amp;P 500 −2,17%, Nasdaq 100 −3,86% (semiconductorii −8,9%), Fear &amp; Greed CNN 11 („extreme fear”); Acțiuni 40,1, ziua 38,2.</li>
+<li>Mișcarea obișnuită a unei zile (mediana ultimelor 60 de ședințe): S&amp;P 500 ±0,51%, Nasdaq 100 ±0,84%, exact reperul utilizatorului.</li>
+</ul>
+<h3>2. Regula</h3>
+<ul>
+<li><b>Indicii:</b> S&amp;P 500 și Nasdaq 100 (cei din banda paginii Azi), cu aceeași pondere. Date de la CNBC (în timp real), cu rezervele existente (Cboe, Nasdaq).</li>
+<li><b>Mișcarea în zile obișnuite:</b> pentru fiecare indice, schimbarea de la închiderea anterioară împărțită la mișcarea unei zile obișnuite a lui (mediana din cele 60 de ședințe dinainte; cel puțin 20). Așa, −2% la S&amp;P 500 înseamnă 3,9 zile obișnuite, iar −3,74% la Nasdaq 100, 4,5 („relativitatea”). <b>m</b> = media lor.</li>
+<li><b>Scorul reacției:</b> tanh(m ÷ 4), pe scala unei știri (−1…+1): o zi obișnuită −0,24, două −0,46, patru −0,76. Reacția singură, pe scala 0–100, e afișată lângă (20 nov: 7,6).</li>
+<li><b>Cât cântărește:</b> |m| ÷ (|m| + 1,5) din partea Acțiuni. Cu cât mișcarea e mai rară, cu atât cântărește mai mult: o zi liniștită (0,2) 12%, o zi proastă (1) 40%, două zile 57%, patru 73%, opt 84%. Reacția intră în partea Acțiuni ca o știre în plus, cu ponderea care îi dă exact această cotă (cel puțin cât ponderea a 4 știri, cât trage spre neutru indexul). Ziua întreagă o ia cu aceeași pondere, alături de toate știrile (20 nov: ~70% din zi).</li>
+<li><b>În timp:</b> în timpul ședinței, ultimul preț (cotația, recitită la cel mult 20 s); orele trecute ale zilei, din lumânările de 30 de minute. După închidere, reacția rămâne ce a fost, iar cota ei se înjumătățește la fiecare 8 ore, ca ponderea unei știri („întârzierea”): în dimineața de după un crah încă trage scorul în jos (la 9:00 în București cam 40% din cota de la închidere). La deschiderea următoare contează mișcarea zilei noi.</li>
+<li><b>În oglindă:</b> o creștere la fel de rară ridică scorul la fel de mult (11 nov: +1,31% / +2,28% → Acțiuni 54,6 → 77,6).</li>
+<li><b>Motivele zilei</b> (cele mai pozitive / negative) rămân știrile.</li>
+</ul>
+<h3>3. Rezultatul pe zilele reale (indexul utilizatorului)</h3>
+<table>
+<thead><tr><th>Ziua</th><th>S&amp;P 500 / Nasdaq 100</th><th>Acțiuni înainte → acum</th><th>Ziua înainte → acum</th></tr></thead>
+<tbody>
+<tr><td>11 nov</td><td>+1,31% / +2,28%</td><td>54,6 → 77,6</td><td>52,0 → 74,5</td></tr>
+<tr><td>16 nov</td><td>−1,92% / −2,67%</td><td>41,7 → 16,6</td><td>40,5 → 18,1</td></tr>
+<tr><td>17 nov</td><td>−1,03% / −0,72%</td><td>45,8 → 35,2</td><td>44,2 → 35,4</td></tr>
+<tr><td>18 nov</td><td>−0,23% / +0,42%</td><td>49,7 → 49,7</td><td>46,0 → 46,1</td></tr>
+<tr><td>19 nov</td><td>−2,02% / −2,21%</td><td>53,7 → 20,7</td><td>51,6 → 22,3</td></tr>
+<tr><td>20 nov, în ședință</td><td>−2,17% / −3,86%</td><td>40,1 → 11,7</td><td>38,2 → 12,6</td></tr>
+</tbody>
+</table>
+<h3>4. Unde se vede</h3>
+<ul>
+<li><b>Azi</b> (site): sub cele patru părți, un rând: „Piața acum: S&amp;P 500 −2,00%, Nasdaq 100 −3,74%, de 3,9 și 4,5 ori mișcarea unei zile obișnuite. Reacția ei (7.6) are 74% din scorul Acțiunilor; din știri singure ar fi 40.3.” După închidere: „La închiderea de joi, 19 noiembrie: … mai are 12% … (scade cu orele de la închidere)”. Sub 1%, rândul nu apare.</li>
+<li><b>Cum s-a calculat?</b>: „Pe scurt” spune reacția și cota ei din Acțiuni și din zi; pasul 4, „Reacția pieței de acțiuni”, cu fiecare indice, ziua obișnuită, m, scorul, cota, ponderea și media cu ea; „Pe categorii” arată la Acțiuni și valoarea din știri singure; „Parametrii”, regulile.</li>
+<li><b>Aplicația iOS</b>: același rând în detaliul sentimentului (iPhone și iPad), aceiași pași în „Cum s-a calculat”. Cardul de pe Azi arată valorile noi.</li>
+<li><b>Rezumatul</b> (Claude) primește reacția și cotele ei.</li>
+<li><b>Boții</b>: scorul zilei și al ariei Acțiuni o conțin. Într-o zi de panică, un LONG pe acțiuni trece mai greu de prag, un SHORT mai ușor; la crypto se schimbă doar partea „ziua”.</li>
+<li><b>Istoricul</b> (ultimele 30 de zile) se recalculează o dată, cu reacția fiecărei zile din lumânările zilnice. Zilele deja subțiate de retenție își păstrează valoarea.</li>
+</ul>
+<h3>5. Cazuri limită</h3>
+<ul>
+<li><b>Datele indicilor nu vin</b> (CNBC, apoi rezervele): scorul e doar din știri, ca înainte, și nicio zi nu se îngheață până nu revin ambii indici (o zi înghețată fără reacție ar rămâne greșită). Recalcularea istoricului așteaptă și ea datele.</li>
+<li><b>O citire eșuată</b> (CNBC cade din când în când): un indice își păstrează ultimul istoric bun 15 minute și ultimele lumânări de 30 de minute. Altfel, orele trecute ale zilei ar lua toate ultimul preț și graficul zilei ar sări (văzut în audit: 18:00 de la 19,2 la 11,2 într-un minut).</li>
+<li><b>Un singur indice are date:</b> reacția din el; zilele nu se îngheață.</li>
+<li><b>Un indice e cu o zi în urmă</b> (o sursă întârziată): e lăsat deoparte, ca să nu amestece două zile.</li>
+<li><b>Istoricul nu are încă bara zilei</b> (citit înainte de 9:30, ținut 5 minute): ședința de azi se ia din cotație, când cotația e măsurată de la ultima închidere din istoric. Înainte de 9:30, în weekend sau de sărbători, cotația e a zilei trecute: nu se inventează nicio ședință.</li>
+<li><b>Imediat după miezul nopții</b>, fără nicio știre de acțiuni: partea Acțiuni așteaptă prima știre (ca până acum), apoi primește și reacția.</li>
+<li><b>Weekend, sărbători:</b> ultima ședință, stinsă: sâmbătă dimineața o treime din cota de la închidere, duminică aproape nimic, luni dimineața nimic.</li>
+<li><b>Închidere devreme</b> (13:00, a doua zi după Thanksgiving, Ajunul Crăciunului): ultimul preț contează ca „în curs” până la 16:00 New York, apoi se stinge.</li>
+<li><b>Fusul orar:</b> fiecare își vede ziua lui. O zi încheiată se socotește la miezul nopții ei (la București, la o oră după închidere: cota × 0,92).</li>
+<li><b>Prea puține ședințe</b> înaintea unei zile (sub 20): nicio reacție pentru ea.</li>
+</ul>
+
+<h3 id="fd-marketmove-crypto">FD-MARKETMOVE · Crypto și explicația pe înțeles (20 nov 2026)</h3>
+<p>Cerut de utilizator după deploy: „după asta vreau un mecanism similar pentru crypto” și „nu cred că ai actualizat și «Cum s-a calculat sentimentul zilei». E nevoie de explicație.” (Pasul 4 era în producție, dar mai mult formule.)</p>
+<ul>
+<li><b>Monedele:</b> BTC și ETH, cu aceeași pondere, de la bursa implicită a adminului (KuCoin), din lumânări de o oră (100 de zile) și de o zi (200).</li>
+<li><b>Mișcarea:</b> crypto nu se închide, deci contează mișcarea din <b>ultimele 24 de ore</b> (prețul de acum, din lumânarea care se formează, față de închiderea orei de acum 24 de ore). O mișcare contează cât timp e în aceste 24 de ore („întârzierea”); nu se mai stinge separat.</li>
+<li><b>Ziua obișnuită:</b> mediana mișcării zilnice (UTC) din cele 60 de zile încheiate dinainte: BTC ±0,91%, ETH ±0,88% (nov 2026).</li>
+<li><b>Aceleași reguli</b> ca la acțiuni: scorul tanh(m ÷ 4), cota |m| ÷ (|m| + 1,5) din partea <b>Crypto</b>, ziua întreagă cu aceeași pondere. Ambele piețe intră în aceeași zi, fiecare în partea ei.</li>
+<li><b>Pe datele reale</b> (indexul utilizatorului): 20 nov (BTC −6,25%, ETH −8,20% în 24 h, de 6,9 și 9,5 ori o zi obișnuită) Crypto 26,1 → 5,9, ziua 37,6 → 10,3; 14 nov (BTC −5,77%, ETH −8,04%) 30,6 → 6,2; 15 nov (BTC +0,86%, ETH +2,59%) 34,4 → 62,9; 16 nov (+0,44% / +0,54%, o zi liniștită) 35,1 → 41,8.</li>
+<li><b>Cazuri limită:</b> lumânări vechi de peste 2 ore (bursa nu răspunde): fără reacție crypto; o citire eșuată folosește ultimele lumânări bune 15 minute; sub 20 de zile dinainte: fără reacție; prima știre crypto a zilei o aduce (ca la acțiuni); nicio zi nu se îngheață fără datele ambelor monede și ale ambilor indici. Istoricul se recalculează o dată (<code>INDEX_VERSION</code> 6).</li>
+<li><b>Pe Azi</b> (site și iOS), sub cele patru părți, câte un rând pentru fiecare piață, în ordinea părților: „Crypto în ultimele 24 de ore: BTC −6,25%, ETH −8,20%, de 6,9 și 9,5 ori mișcarea unei zile obișnuite. Reacția pieței (4.3) are 85% din scorul Crypto; din știri singure ar fi 26.1.” și rândul acțiunilor.</li>
+<li><b>„Cum s-a calculat?”</b>, pasul 4, „Reacția piețelor”:<ul>
+<li><b>de ce</b>, pe înțeles: știrile despre acțiuni și crypto sunt mai ales despre companii și proiecte, iar media lor stă aproape de neutru chiar și într-o zi de panică; așa că intră și ce face piața, față de o zi obișnuită a ei, cu atât mai mult cu cât mișcarea e mai rară;</li>
+<li><b>cum</b>, pentru fiecare piață: Acțiuni (S&amp;P 500 și Nasdaq 100, de la închiderea anterioară, stinsă după închidere), Crypto (BTC și ETH, ultimele 24 de ore), ziua obișnuită;</li>
+<li>pentru fiecare piață, calculul: mișcările, m, scorul (și cât ar da reacția singură), cota, ponderea, partea din știri singure și cu reacția, partea din zi;</li>
+<li>media zilei cu ambele reacții.</li>
+</ul>
+„Pe scurt” are câte un rând pentru fiecare piață; „Pe categorii” arată la Crypto și la Acțiuni valoarea din știri singure.</li>
+</ul>
+
+<h2 id="fix-tdbots">FIX-TDBOTS — creditele Twelve Data: boții întâi, Azi doar când e deschis (20 nov 2026)</h2>
+<p>Cerut de utilizator: „aplicația consumă toate cele 55 de credite pe minut. Asta nu e normal. Chartul meu actualizează o dată la 30 de secunde… din cauza asta boții nu pot citi lumânările și nu pot face tranzacții.” „Dacă nu mă uit la view-ul de azi nu vreau să mai consume credite… Dacă mă uit la grafice vreau graficele să consume creditele. Și desigur, boții, în fundal. Boții au importanță mare.” Decizia lui: forex-ul și mărfurile „scoase de pe Azi și din bandă”.</p>
+<h3>1. Ce era (date reale, 20 nov)</h3>
+<ul>
+<li>10.456 de credite folosite până la 18:45 UTC (plan Grow, 55 pe minut). Ritmul măsurat: ~15 pe minut, în rafale.</li>
+<li><b>Prețurile forex și mărfuri</b> (6 perechi + aur + Brent, din favorite): 1 credit pe pereche pe minut, pe cardurile de pe Azi și în banda de sus a site-ului, care e pe <b>fiecare</b> pagină: ~8 pe minut tot timpul, plus liniile lor (8 la 10 minute).</li>
+<li><b>Scanerul</b>: favoritele citite cu cheia utilizatorului cât timp era în aplicație, oriunde: 21 de simboluri × 2 timeframe-uri ≈ 42 de credite odată, la fiecare 30 de minute.</li>
+<li><b>Botul „Acțiuni”</b>: 13 acțiuni la fiecare închidere de 5 minute (plus timeframe-ul mare): 13–26 odată.</li>
+<li>Graficul deschis: ~3,4 pe minut (lumânările la un minut, prețul live la 25 s).</li>
+<li>Când rafalele cădeau în același minut, botul era refuzat: jurnalul lui are „limita Twelve Data de 55 cereri pe minut a fost atinsă” la 15:25:18 și 18:08:24 UTC, ambele imediat după o repornire (deploy), când toate memoriile sunt goale.</li>
+</ul>
+<h3>2. Ce se schimbă</h3>
+<ul>
+<li><b>Boții întâi.</b> Din fiecare minut, creditele de care au nevoie boții sunt păstrate pentru ei: atâtea cât lucruri diferite (simbol și timeframe, un preț) au citit boții utilizatorului în ultimele 15 minute, pentru că le citesc odată, la închiderea lumânării. Restul (graficele, Azi, scanerul, logo-urile) nu poate intra în rezervă, dar are mereu cel puțin un sfert din minut. Un bot poate folosi tot minutul. Mesajul unei cereri oprite: „26 din cele 55 de cereri Twelve Data pe minut sunt păstrate pentru boți; revine în N s”.</li>
+<li><b>Azi consumă doar cât e deschis.</b> Scanerul citește acțiunile cu cheia utilizatorului doar cât pagina Azi e deschisă (ea cere scanerul la fiecare minut; trei minute fără cerere înseamnă închisă). La redeschidere, o rundă pornește imediat. Cel mult 8 acțiuni pe rundă (rundele sunt la 5 minute), deci fără rafale.</li>
+<li><b>Forex și mărfuri</b> nu mai apar pe Azi (site și iOS) și nici în banda de sus. Rămân în Liste și pe graficul lor, unde prețul se citește doar cât sunt deschise. Scanerul nu le mai citește.</li>
+<li><b>Graficele</b> consumă cât sunt deschise, ca înainte. <b>Boții</b> rulează în fundal, cu prioritate.</li>
+<li>Memoria de lumânări a serverului ține 400 de serii, nu 100: boții, scanerul și graficele nu se mai împing una pe alta afară (o serie scoasă era cumpărată din nou).</li>
+</ul>
+<h3>3. Cazuri limită</h3>
+<ul>
+<li>Un bot nou sau unul care n-a citit în ultimele 15 minute: prima lui citire intră cu prioritate (poate folosi tot minutul), apoi rezerva îl cuprinde.</li>
+<li>Planul gratuit (8 pe minut): rezerva e cel mult 6, restul are 2.</li>
+<li>Un bot oprit: rezerva lui dispare după 15 minute.</li>
+<li>Doar forex în favorite: Azi spune că nu urmărești încă nicio monedă sau acțiune (forex-ul e în Liste).</li>
+<li>Pagina Azi deschisă în fundal (alt tab al browserului): browserul nu o mai citește; după trei minute scanerul se oprește.</li>
+<li>Prima pornire a aplicației iOS citește scanerul o dată (pregătirea memoriei): o rundă de cel mult 8 acțiuni.</li>
+</ul>
+
+<h3 id="fix-nominprofit">FIX-NOMINPROFIT · fără minimul de 10 USD profit pe tranzacție (20 nov 2026)</h3>
+<ul>
+<li>„Elimină minimul de 10 dolari profit pe tranzacție.” Până acum (FIX-BOTBUDGET) un bot Slingshot nu intra într-o tranzacție care la take profit ar fi adus sub 10 USD după comisioane. Mărea suma până la acel prag, iar când nici suma maximă nu ajungea, sărea intrarea.</li>
+<li>Acum suma e doar partea din bugetul liber împărțit între tranzacțiile care se mai pot deschide, cel mult suma maximă pe tranzacție. Fără minim, botul intră și cu puțin, și cu un take profit apropiat.</li>
+<li>Rămân regulile care nu țin de acest minim: un take profit care nu acoperă nici comisioanele de intrare și ieșire e refuzat, iar minimul platformei pentru o comandă se verifică la pornirea botului.</li>
+<li>Când în cont e mai puțin decât cere tranzacția, botul intră cu cât este (doar fără nimic disponibil nu intră).</li>
+<li>AI-ul („AI confirmă”) alege suma până la maximul primit; nu mai primește un minim. O sumă de 0 de la el lasă propunerea botului.</li>
+<li>Formularul botului (site), rezumatul și avertismentele de la verificare nu mai pomenesc minimul.</li>
+</ul>
+
+<h3 id="fix-lateentry">FIX-LATEENTRY · intrarea târzie și citirea la un minut (20 nov 2026)</h3>
+<ul>
+<li>Utilizatorul: „Pe ANT acum este semnal de short… prețul actual e bun de intrat… de ce nu intră botul? Intră doar când primește un semnal? Dacă pornește și vede totuși că există un semnal și suntem aproape de prețul de intrare, de ce nu ar intra dacă toate condițiile sunt respectate?” și „5 minute de așteptare pentru a verifica lumânările unui simbol e foarte mult. Mută la 1 minut.” Decizii: prețul „puțin mai rău, până la 10% din drum”, vechimea „cât timp e activ”.</li>
+<li><b>Ce era:</b> botul intra doar pe un semnal confirmat chiar pe lumânarea pe care tocmai a citit-o. Un semnal confirmat pe o lumânare neprocesată nu mai era luat niciodată, chiar dacă rămânea activ. Asta se întâmpla cât botul era oprit (un deploy) sau când între două citiri se închideau două lumânări. Botul citea apoi un simbol abia la închiderea lumânării următoare. Dacă Twelve Data nu o publicase încă, reîncerca după încă o lumânare (5 minute pe 5m).</li>
+<li><b>Citirea:</b> fiecare simbol e citit la fiecare minut, oricare ar fi timeframe-ul. Pentru un bot de acțiuni cu 13 simboluri înseamnă ~13 credite Twelve Data pe minut, din rezerva boților (FIX-TDBOTS).</li>
+<li><b>Intrarea târzie:</b> la fiecare citire, și imediat după pornire, botul ia ultimul semnal activ al fiecărei direcții, confirmat pe o lumânare dinainte. Condițiile: Slingshot îl ține activ (n-a atins SL sau TP, n-a fost invalidat), prețul e între SL și TP, și e cel mult cu 10% din drumul de la intrare la take profit mai rău decât închiderea lumânării de confirmare. Contează pentru oricât timp e activ. Restul regulilor se aplică la fel: direcția, scorul, aria, știrile, AI-ul, bugetul, o poziție pe simbol. SL și TP sunt ale semnalului.</li>
+<li><b>O singură dată:</b> un semnal pe care botul a intrat (la timp sau târziu) nu mai e luat. Nici după ce poziția s-a închis la SL sau TP-ul botului, chiar dacă Slingshot îl ține activ. Un semnal la care AI-ul a spus nu nu mai e întrebat la citirile următoare. Același motiv de refuz pentru același semnal apare o singură dată în jurnal.</li>
+<li><b>Jurnalul:</b> „Intrare târzie: semnalul s-a confirmat la 18:25 UTC, la 129,09; prețul de acum e cel mult cu 10% din drumul spre take profit mai rău.” AI-ul află și el că intrarea e târzie.</li>
+<li><b>În producție:</b> la 20:47:40 UTC botul „Acțiuni” a intrat SHORT pe SPCX la 129,49, pe semnalul confirmat la 18:25 la 129,09.</li>
+</ul>
+
+<h3 id="fix-etorometa">FIX-ETOROMETA · o poziție eToro pe o listare nouă (20 nov 2026)</h3>
+<ul><li>„Primesc «poziția nu mai e deschisă» când deschid short-ul făcut acum de bot pe SPCX.” Poziția era deschisă la eToro (botul o regăsea după ID), dar API-ul eToro de metadate nu cunoaște încă listarea nouă SpaceX (instrumentul 15618). Portofoliul o arăta deci ca „#15618”, iar ecranul poziției botului, care caută SPCX, n-o găsea. Acum simbolul unui instrument necunoscut API-ului se ia din lista publică eToro (aceeași rezervă ca la căutarea ANT): SPCX. Test în <code>brokers.test.ts</code>. Deploy eb7e13de.</li></ul>
+<h3 id="fix-pushmargin">FIX-PUSHMARGIN · notificarea de deschidere: suma din buget și levierul (20 nov 2026)</h3>
+<ul><li>„Pe mine mă interesează la un trade ce sumă din bugetul meu e cheltuită, nu valoarea tranzacției… notificarea trebuie să pună valoarea din buget, suma folosită la trade și levierul.” Notificarea scria „valoare 650,00 USD” (suma × levier). Acum scrie „SHORT SPCX · 130,00 USD · levier 5× · la 129,49” (bugetul scos: „nu e loc de ea”). Levierul apare mereu (și 1×). Fără marjă cunoscută: valoarea împărțită la levier. Test în <code>push/service.test.ts</code>.</li></ul>
 </body></html>

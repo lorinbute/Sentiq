@@ -1,9 +1,10 @@
 // The price of a symbol now (FD-BOT §8), shared by the bots and Paper Trading (FD-PAPER §5): a coin's last 1-minute close
 // from the user's price source, a share's Nasdaq quote.
 import type { BotInput } from '../../shared/bot.ts';
+import { fxSymbolOf } from '../../shared/fx.ts';
 import { MarketError, type MarketData } from './market.ts';
 import type { MarketSource } from './source.ts';
-import type { StockData } from './stocks.ts';
+import type { StockData, TdWho } from './stocks.ts';
 
 export interface QuoteDeps {
   market: MarketData;
@@ -23,13 +24,23 @@ export interface Quote {
  * A symbol's price now (FD-BOT §8): a coin's last 1-minute close from the user's price source, a share's Nasdaq quote.
  * FIX-2ZPRICE: without a candle in the last 2 minutes (a thin pair, no trades), the source's last trade (its ticker).
  * `open`: a share's only while the market trades ('closed' otherwise).
+ * FD-FXCOMMODITIES: a pair or a commodity on a stocks account ("EUR/USD", or an account's "EURUSD"): Twelve Data's quote
+ * (the user's key), `open` by its 24/5 week; `stockMaxAge` its age too. FIX-TDBOTS: `who` 'bot' for a bot's look (its
+ * Twelve Data credits come first).
  */
-export async function readQuote(d: QuoteDeps, userId: number, market: BotInput['market'], sym: string, open: boolean): Promise<Quote | 'closed'> {
+export async function readQuote(d: QuoteDeps, userId: number, market: BotInput['market'], sym: string, open: boolean, stockMaxAge?: number, who: TdWho = 'app'): Promise<Quote | 'closed'> {
   if (market === 'stock') {
     const stocks = d.stocks;
     if (!stocks) throw new Error('datele pentru acțiuni nu sunt disponibile');
+    const fx = fxSymbolOf(sym);
+    if (fx) {
+      const q = await stocks.fxQuote(userId, fx, stockMaxAge, who);
+      if (open && !q.open) return 'closed';
+      if (q.last === null || !(q.last > 0)) throw new Error('fără preț');
+      return { price: q.last, lastTrade: false };
+    }
     if (open && (await stocks.confirmedStatus())?.state !== 'open') return 'closed';
-    const q = await stocks.quote(sym);
+    const q = await stocks.quote(sym, stockMaxAge);
     if (q.last === null || !(q.last > 0)) throw new Error('fără preț');
     return { price: q.last, lastTrade: false };
   }
@@ -54,8 +65,9 @@ export async function readQuote(d: QuoteDeps, userId: number, market: BotInput['
   throw new Error('fără preț');
 }
 
-export async function readPrice(d: QuoteDeps, userId: number, market: BotInput['market'], sym: string, open: boolean): Promise<number | 'closed'> {
-  const q = await readQuote(d, userId, market, sym, open);
+/** `stockMaxAge`: how old a share's kept quote may be (FIX-BOTPRICE: a bot's look). */
+export async function readPrice(d: QuoteDeps, userId: number, market: BotInput['market'], sym: string, open: boolean, stockMaxAge?: number, who: TdWho = 'app'): Promise<number | 'closed'> {
+  const q = await readQuote(d, userId, market, sym, open, stockMaxAge, who);
   return q === 'closed' ? q : q.price;
 }
 

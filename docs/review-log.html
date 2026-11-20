@@ -9937,4 +9937,32 @@ Suita completă: 120 de fișiere, 1.226 de teste, toate trec; <code>tsc</code> c
 <li>Verificat pe serverul de audit, cu un AI simulat (fără niciun furnizor real; răspunde doar unui titlu trimis singur). Aplicația pe iPad: „Bitcoin ETF inflows…” (doar reguli) → „Trimite la analiză” → „Se analizează…” → −0,35, Gemini, importanța 2 (AI), „De ce”; rândul din listă −0,35; butonul dispare. Site (Chrome fără sunet): „Rezultate trimestriale NVIDIA” cu logo-ul pătrat de 14 px.</li>
 <li>Teste: suita întreagă 1274 / 1274 (cu <code>ai-one.test.ts</code> și ruta din <code>server.test.ts</code>), typecheck curat; iOS 185 / 185.</li>
 </ul>
+
+<h2 id="runda-357--fix-etorolev-fix-stockcountdown">Runda 357 — FIX-ETOROLEV, FIX-STOCKCOUNTDOWN (19 nov 2026)</h2>
+<ul>
+<li><strong>Levierul la eToro:</strong> verificarea, motorul și execuția (stop loss trimis la eToro la un levier peste 1×), plus formularul pe site și în aplicație. Un test vechi verifica textul de dinainte al mesajului: legat acum de <code>LEVERAGE_FUTURES</code>. Suita întreagă: 1275 / 1276 la prima rulare (acel test), apoi testele de levier 5 / 5.</li>
+<li><strong>Cronometrul la acțiuni:</strong> reparat în aplicație, dar nu și pe site înaintea deploy-ului de la 16:29 (utilizatorul a observat). Reparat apoi și pe site (<code>barLeft</code>); merge la următorul deploy. Testele graficului 107 / 107, typecheck curat.</li>
+<li><strong>Deploy:</strong> urmărirea Kudu nu a pornit singură aplicația (în zsh, <code>set -- $R</code> nu desparte cuvintele), deci pornirea s-a dat de mână la 16:38:22, la ~3 minute după build. Notat în procedură.</li>
+</ul>
+
+<h2 id="runda-358">Runda 358 — FD-TRADESALL (server), FIX-ETOROLEV3, FIX-ETOROTP, FIX-ETOROPENDING, FIX-BOT24 (19 nov 2026)</h2>
+<ul>
+<li><strong>Găsite și reparate:</strong> numele contului dublat în mesajele lui „Toate” („eToro: eToro: …”, mesajul platformei începea deja cu el): <code>named</code>, cu test. Curățarea deschiderilor refuzate rula după citirea prețurilor, deci nu și cu bursa închisă: mutată înaintea lor (botul 4 și-a scos short-ul AMD la 21:44 UTC, după deploy). Testul „așteptare veche” avea ceasul botului mutat cu zile: aliniat. Câmpul de levier de pe site avea două controale într-o etichetă (testul FIX-BOTLABEL): despărțit.</li>
+<li><strong>Verificat:</strong> conturi doar virtuale, un cont care nu răspunde, o monedă fără curs, rezultate fără istoric închis, istoricul combinat cu chei unice, ordinea conturilor (inclusiv id-uri necunoscute), ordin refuzat la trimitere, rămas în așteptare, anulat după, o așteptare fără id de ordin, bursa închisă, levierul 3× salvat înainte.</li>
+<li>Suita întreagă 1277 / 1277, typecheck curat.</li>
+</ul>
+<h2 id="runda-359">Runda 359 — aceeași arie, a doua trecere (19 nov 2026)</h2>
+<ul><li>Zero probleme noi.</li></ul>
+
+<h2 id="runda-360">Runda 360 — FD-FXCOMMODITIES (boți, ordine, site, iOS) și FIX-ETOROSTALE (20 nov 2026)</h2>
+<ul>
+<li>Filtrul de știri arunca simbolurile cu „/”: un cip EUR/USD arăta toate știrile. Reparat, cu test.</li>
+<li>Graficul forex avea două zecimale (1,10). Acum patru sub 10, cu test.</li>
+<li>Prețul de rezervă al ferestrei de ordin eToro lua orice simbol eToro drept ticker Nasdaq (GOLD = Barrick). Limitat la acțiuni Nasdaq / NYSE și forex, cu test.</li>
+<li>Comutatorul Forex / Mărfuri apărea târziu și împingea câmpul (site și iOS). Acum vine din setările de la pornire.</li>
+<li>iOS: ordinul și botul deschise de pe un grafic forex porneau drept crypto; logo-ul (bara, linia de stare); graficul implicit dintr-o pereche; „Vol 0”; starea 24/5 și numărătoarea lipseau din linia de stare.</li>
+<li>Site: numărătoarea lumânării lipsea pe forex; textul filtrului de arie.</li>
+<li>Recunoașterea forex: și codurile de monedă înlocuite (o pereche veche nu e o acțiune pe Paper).</li>
+<li>Hook-ul de setări din AddSymbol era chemat după un <code>&amp;&amp;</code>: acum necondiționat.</li>
+</ul>
 </body></html>

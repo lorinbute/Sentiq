@@ -648,3 +648,13 @@ export interface TradeLogRow {
 
 /** A demo / paper / practice account: its orders are not real. */
 export const isDemoEnv = (env: string) => env === 'demo' || env === 'paper';
+
+/**
+ * FIX-ETOROLEV3: the leverages eToro accepts (19 Nov 2026, AMD refused at 3×: „User Leverage settings Possible
+ * Leverages[1,2,5] does not contain requested value: 3”): a bot's and an order's on eToro are one of them.
+ */
+export const ETORO_LEVERAGES = [1, 2, 5] as const;
+export const isEtoroLeverage = (n: number): boolean => (ETORO_LEVERAGES as readonly number[]).includes(n);
+/** The largest one at most `n` (at least 1×): a remembered leverage eToro does not accept. */
+export const snapEtoroLeverage = (n: number): number => [...ETORO_LEVERAGES].reverse().find((l) => l <= n) ?? 1;
+export const ETORO_LEVERAGE_TEXT = 'La eToro, levierul e 1×, 2× sau 5×.';

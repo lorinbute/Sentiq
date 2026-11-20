@@ -33,3 +33,18 @@ describe('a watched position closed (FD-PUSH)', () => {
     expect(tradeHistoryLink(12)).toBe('/trades#history-12');
   });
 });
+
+describe("FIX-PUSHMARGIN: a bot's opening says the sum taken from its budget and the leverage, not the position's value", () => {
+  it('„SHORT SPCX · 130,00 USD · levier 5× · la 129,49”', async () => {
+    const db = await testDb();
+    const sent: Record<string, unknown>[] = [];
+    const apns = { send: async (_env: string, _token: string, payload: Record<string, unknown>) => (sent.push(payload), { ok: true, status: 200, reason: '' }) } as unknown as Apns;
+    const push = new PushService({ db, log: silentLogger, apns, accounts: {} as unknown as AccountsService, now: () => 1_800_000_000_000 });
+    await push.register(1, 'cd'.repeat(32), 'sandbox');
+    const row = { id: 4, user_id: 1, name: 'Acțiuni', area: 'stocks', notify: true, config: JSON.stringify({ maxAmount: 1000 }) } as never;
+    await push.botRan(row, [{ kind: 'enter', symbol: 'SPCX', message: '', detail: { side: 'short', price: 129.49, qty: 5.0197, leverage: 5, margin: 130 } as never }], []);
+    const body = (sent[0]!.aps as { alert: { body: string } }).alert.body;
+    expect(body).toBe('SHORT SPCX · 130,00 USD · levier 5× · la 129,49');
+    expect(body).not.toMatch(/valoare|650|buget/);
+  });
+});

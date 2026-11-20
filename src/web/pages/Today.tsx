@@ -1,4 +1,5 @@
 // The Today page as a cockpit (FD-REDESIGN): one screen of tiles at 1440 × 900, fewer columns below.
+import { isFxItem } from '../fx.ts';
 import { type CSSProperties, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router';
@@ -19,6 +20,7 @@ import { ErrorNote, fmtScore, Loading } from '../components/ui.tsx';
 import { CoinLogo, EventIcon, TopicIcon } from '../components/icons.tsx';
 import { aiNameOf, ScoreWhy } from '../components/ScoreWhy.tsx';
 import { effectLine, weighLine } from '../why-text.ts';
+import { marketLine, marketShown } from '../market-text.ts';
 import { IndexExplain } from '../components/IndexExplain.tsx';
 import { CalendarClock, Flame, Gauge, History, Radio, TrendingDown, TrendingUp, type LucideIcon } from 'lucide-react';
 
@@ -254,6 +256,12 @@ function SentimentTile() {
               </div>
             ))}
           </div>
+          {/* FD-MARKETMOVE: the markets' reactions in their parts (and the day), in the order of the parts above. */}
+          {[s.crypto, s.market].filter(marketShown).map((m) => (
+            <p key={m.area} className="text-[12.5px] text-muted">
+              {marketLine(m, tz, s.asOf)}
+            </p>
+          ))}
           {s.counts.pending > 0 && <span className="text-[12.5px] text-faint">{s.counts.pending} știri încă în analiză</span>}
           {explain && <IndexExplain onClose={closeExplain} />}
         </>
@@ -486,10 +494,11 @@ function TrendArrow({ up }: { up: boolean }) {
 function CoinsTile() {
   const settings = useSettings();
   const watchlist = useWatchlist();
-  const all = watchlist.data ?? [];
-  // Shares and indices (FD-INDICES) share the stock card and its data; everything else is a coin.
+  // FIX-TDBOTS: pairs and commodities are not on Today (their prices cost the user's Twelve Data credits; they stay in
+  // the lists and on their charts). Shares and indices (FD-INDICES) share the stock card and its data; the rest are coins.
+  const all = (watchlist.data ?? []).filter((w) => !isFxItem(w));
   const coins = all.filter((w) => w.kind === 'crypto');
-  const stocks = all.filter((w) => w.kind !== 'crypto');
+  const stocks = all.filter((w) => w.kind === 'stock' || w.kind === 'index');
   const sparks = useSparks(coins.map((w) => `${w.coin}/${w.quote}`));
   const stockSymbols = stocks.map((w) => w.coin);
   const quotes = useStockQuotes(stockSymbols);

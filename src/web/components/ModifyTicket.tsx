@@ -13,6 +13,8 @@ import { Modal } from './Modal.tsx';
 import { DemoBadge, TRADING_KEY, TRADING_LOG_KEY, uuid } from './OrderTicket.tsx';
 import { stepImpact, type ModifySeed } from './modify-seeds.ts';
 import { settlePortfolio } from '../portfolio-settle.ts';
+import { fmtPlain } from '../format.ts';
+import { isFxRate } from '../../shared/fx.ts';
 
 export const HOW_RO: Record<ModifyHow, string> = {
   amend: 'modificare directă',
@@ -80,6 +82,9 @@ export function useModifySend(accountId: number) {
 
 /** The confirmation: each change (old → new, how it goes out), the warnings, the errors. */
 export function ModifyConfirm({ preview, impact }: { preview: ModifyPreview; impact?: (s: ModifyStepPlan) => string | null }) {
+  // FIX-DECIMALS: the levels shown with a price's decimals (a forex / commodity rate four under 10), an amount with its own.
+  const fx = isFxRate(preview.ticket.symbol);
+  const shown = (label: string, v: number | null | undefined) => fmtPlain(v, 8, label.startsWith('Cantitate') ? null : fx);
   return (
     <div className="flex flex-col gap-3 text-[13.5px]">
       <ul className="flex flex-col gap-2">
@@ -89,8 +94,8 @@ export function ModifyConfirm({ preview, impact }: { preview: ModifyPreview; imp
               <div key={l.label} className="flex flex-wrap items-baseline justify-between gap-x-3">
                 <span className="text-faint">{l.label}</span>
                 <span className="num text-text">
-                  {l.before !== undefined && <>{plain(l.before)} → </>}
-                  {s.removes ? <span className="text-bear">șters</span> : <span className="font-semibold">{plain(l.after)}</span>}
+                  {l.before !== undefined && <>{shown(l.label, l.before)} → </>}
+                  {s.removes ? <span className="text-bear">șters</span> : <span className="font-semibold">{shown(l.label, l.after)}</span>}
                 </span>
               </div>
             ))}
@@ -102,7 +107,7 @@ export function ModifyConfirm({ preview, impact }: { preview: ModifyPreview; imp
       </ul>
       {preview.last !== null && (
         <div className="text-[12.5px] text-faint">
-          Prețul de acum: <span className="num text-text">{plain(preview.last)}</span>
+          Prețul de acum: <span className="num text-text">{fmtPlain(preview.last, 8, fx)}</span>
         </div>
       )}
       {preview.warnings.length > 0 && (

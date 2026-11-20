@@ -3,6 +3,7 @@ import ccxt, { type Exchange, type MarketInterface } from 'ccxt';
 import { TIMEFRAMES, tfSeconds, type Timeframe } from '../../shared/time.ts';
 import type { Candle } from '../../shared/indicator/slingshot.ts';
 import { MARKET_EXCHANGES } from '../../shared/settings.ts';
+import { maxDecimals } from '../../shared/decimals.ts';
 import { isRateLimitError, withRetry } from '../exchange/retry.ts';
 
 export type MarketExchangeId = (typeof MARKET_EXCHANGES)[number];
@@ -255,7 +256,10 @@ export class MarketData {
     const candles = entry.candles.slice(-count);
     let lastClosedIndex = candles.length - 1;
     while (lastClosedIndex >= 0 && (candles[lastClosedIndex] as Candle).t + tfMs > now) lastClosedIndex--;
-    return { exchange: id, symbol, tf, candles, pricePrecision: precisionDigits(ex, market), lastClosedIndex, fetchedAt: entry.fetchedAt };
+    // FIX-DECIMALS: the chart's decimals (its scale, labels, what a drag rounds to) at most the shown ones (XRP 2,12).
+    const last = candles.at(-1)?.c;
+    const pricePrecision = Math.min(precisionDigits(ex, market), last !== undefined ? maxDecimals(last) : 12);
+    return { exchange: id, symbol, tf, candles, pricePrecision, lastClosedIndex, fetchedAt: entry.fetchedAt };
   }
 
   private store(key: string, entry: CacheEntry): void {

@@ -1,7 +1,9 @@
 // Relevant icons for everything the UI lists (FD-ICONS): coin logos, news topics, calendar events, Slingshot
 // alerts and signal outcomes. Purely decorative for screen readers: the text next to them says it all.
+import { fxKindOf } from '../../shared/fx.ts';
 import { useState } from 'react';
 import { clsx } from 'clsx';
+import { Droplet } from 'lucide-react';
 import {
   Activity,
   ArrowDownToLine,
@@ -59,11 +61,27 @@ const STOCK_TICKER = /^[A-Z][A-Z0-9]*(?:\.[A-Z0-9]+)?$/;
  * keeps it to initials. `square`, a stock: the company's logo (FD-STOCKLOGOS, /api/logo/s/SYM, a rounded square), never
  * the logo of a coin that happens to share the ticker (FD-SENTIQ §4).
  */
-export function CoinLogo({ coin, size = 20, className, badge = false, square = false }: { coin: string; size?: number; className?: string; badge?: boolean; square?: boolean }) {
+export function CoinLogo({ coin, size = 20, className, badge = false, square = false, fx }: { coin: string; size?: number; className?: string; badge?: boolean; square?: boolean; fx?: 'forex' | 'commodity' }) {
   const sym = coin.toUpperCase();
   const [failedNow, setFailedNow] = useState<string | null>(null);
   const key = square ? `s:${sym}` : sym;
   const valid = sym.length <= 15 && (square ? STOCK_TICKER : COIN_TICKER).test(sym);
+  // FD-FXCOMMODITIES: a forex pair (a banknote) or a commodity (a gem for the metals, a drop for oil), in a square as an
+  // index, never initials that could pass for a coin or a share. Without its kind given: told by its form ("EUR/USD").
+  const fxKind = fx ?? fxKindOf(sym);
+  if (fxKind) {
+    const hue = coinHue(sym);
+    const Glyph = fxKind === 'forex' ? Banknote : /^(WTI|XBR|URALS)/.test(sym) ? Droplet : Gem;
+    return (
+      <span
+        className={clsx('inline-flex shrink-0 items-center justify-center rounded-[28%]', className)}
+        style={{ width: size, height: size, background: `hsl(${hue} 40% 24%)`, color: `hsl(${hue} 75% 78%)` }}
+        aria-hidden
+      >
+        <Glyph size={Math.round(size * 0.62)} strokeWidth={2.2} />
+      </span>
+    );
+  }
   // An index (FD-INDICES, id "^SPX"): a chart in a square, never initials that could pass for a coin or a share.
   if (sym.startsWith('^')) {
     const hue = coinHue(sym);

@@ -55,6 +55,14 @@ describe('the bot settings (FD-BOT §3–§6)', () => {
     expect(errors({ strategy: 'premium', ...common, market: 'stock', symbols: ['AAPL', 'MSFT'], premium: { ...premium, maxOpen: 2 } })).toEqual([]);
   });
 
+  it('FIX-BOT20: up to 20 symbols, still at most 10 trades open at once', () => {
+    const syms = (n: number) => Array.from({ length: n }, (_, i) => `S${String.fromCharCode(65 + i)}`);
+    const stock = { strategy: 'premium', ...common, market: 'stock' };
+    expect(errors({ ...stock, symbols: syms(20), premium: { ...premium, maxOpen: 10 } })).toEqual([]);
+    expect(errors({ ...stock, symbols: syms(21), premium })).toContain('Cel mult 20 simboluri');
+    expect(errors({ ...stock, symbols: syms(20), premium: { ...premium, maxOpen: 11 } }).join(' ')).toMatch(/Tranzacțiile deschise odată/);
+  });
+
   it('a real bot on an account (shares too: FD-BOT §10); the leverage anywhere (FIX-PAPERLEV: the check refuses it off futures on a real account)', () => {
     expect(errors({ strategy: 'premium', ...common, exec: 'real', accountId: 1, market: 'stock', symbols: ['AAPL'], premium })).toEqual([]);
     expect(errors({ strategy: 'premium', ...common, exec: 'real', premium })).toContain('Alege contul în care tranzacționează botul.');
@@ -65,7 +73,12 @@ describe('the bot settings (FD-BOT §3–§6)', () => {
 
   it('checks the symbols, the period and the number of symbols per kind', () => {
     expect(errors({ strategy: 'premium', ...common, symbols: ['BTCUSDT'], premium })).toContain('„BTCUSDT” nu e o pereche crypto (BTC/USDT)');
-    expect(errors({ strategy: 'premium', ...common, market: 'stock', symbols: ['BTC/USDT'], premium })).toContain('„BTC/USDT” nu e simbolul unei acțiuni (AAPL)');
+    expect(errors({ strategy: 'premium', ...common, market: 'stock', symbols: ['BTC/USDT'], premium })).toContain('„BTC/USDT” nu e simbolul unei acțiuni (AAPL) sau al unei perechi forex / mărfi în USD (EUR/USD)');
+    // FD-FXCOMMODITIES: a pair or a commodity in USD beside the shares; another currency refused; a made-up pair is neither.
+    expect(errors({ strategy: 'premium', ...common, market: 'stock', symbols: ['AAPL', 'EUR/USD', 'XAU/USD', 'HG1'], premium })).toEqual([]);
+    expect(errors({ strategy: 'premium', ...common, market: 'stock', symbols: ['EUR/GBP'], premium })).toContain('„EUR/GBP” nu e cotat în USD: boții tranzacționează forex și mărfuri doar în USD (EUR/USD, XAU/USD)');
+    expect(errors({ strategy: 'premium', ...common, market: 'stock', symbols: ['XAU/EUR'], premium })[0]).toMatch(/nu e cotat în USD/);
+    expect(errors({ strategy: 'premium', ...common, market: 'stock', symbols: ['EUR/XYZ'], premium })[0]).toMatch(/nu e simbolul unei acțiuni/);
     expect(errors({ strategy: 'premium', ...common, symbols: ['BTC/USDT', 'BTC/USDT'], premium })).toContain('„BTC/USDT” apare de două ori');
     expect(errors({ strategy: 'grid', ...common, symbols: ['BTC/USDT', 'ETH/USDT'], grid })).toContain('Un bot Grid are un singur simbol.');
     expect(errors({ strategy: 'grid', ...common, startsAt: 2000, endsAt: 1000, grid })).toContain('Sfârșitul trebuie să fie după început.');

@@ -1,5 +1,7 @@
 // Addresses of the Charts page: /charts/BTC/USDT for a pair, /charts/s/AAPL for a stock (FD-SENTIQ §4.3),
-// /charts/i/SPX for an index (FD-INDICES).
+// /charts/i/SPX for an index (FD-INDICES), /charts/f/EUR-USD for a forex pair and /charts/m/XAU-USD for a commodity
+// (FD-FXCOMMODITIES: "-" for the "/" of the symbol, readable).
+import type { FxKind } from '../../shared/fx.ts';
 import { plainSymbol } from '../../shared/indices.ts';
 import { tfSeconds, type Timeframe } from '../../shared/time.ts';
 
@@ -8,13 +10,20 @@ export const stockChartPath = (sym: string) => `/charts/s/${encodeURIComponent(s
 /** An index by its id ("^SPX") or symbol ("SPX"): the address has the symbol. */
 export const indexChartPath = (id: string) => `/charts/i/${encodeURIComponent(plainSymbol(id))}`;
 
-export const chartPathOf = (w: { kind?: 'crypto' | 'stock' | 'index'; coin: string; quote: string }) =>
-  w.kind === 'stock' ? stockChartPath(w.coin) : w.kind === 'index' ? indexChartPath(w.coin) : `/charts/${w.coin}/${w.quote}`;
+/** FD-FXCOMMODITIES: a pair's or a commodity's chart ("EUR/USD" → /charts/f/EUR-USD). */
+export const fxChartPath = (kind: FxKind, sym: string) => `/charts/${kind === 'forex' ? 'f' : 'm'}/${encodeURIComponent(sym.replace('/', '-'))}`;
+/** The symbol of a forex or commodity chart's address ("EUR-USD" → "EUR/USD"). */
+export const fxFromPath = (seg: string) => decodeURIComponent(seg).replace('-', '/').toUpperCase();
 
-/** `charts.symbol` as saved ("BTC/USDT", "stock:AAPL" or "index:SPX") → its address. */
+export const chartPathOf = (w: { kind?: 'crypto' | 'stock' | 'index' | 'forex' | 'commodity'; coin: string; quote: string }) =>
+  w.kind === 'stock' ? stockChartPath(w.coin) : w.kind === 'index' ? indexChartPath(w.coin) : w.kind === 'forex' || w.kind === 'commodity' ? fxChartPath(w.kind, w.coin) : `/charts/${w.coin}/${w.quote}`;
+
+/** `charts.symbol` as saved ("BTC/USDT", "stock:AAPL", "index:SPX", "forex:EUR/USD" or "commodity:XAU/USD") → its address. */
 export function rememberedPath(saved: string): string {
   if (saved.startsWith('stock:')) return stockChartPath(saved.slice('stock:'.length));
   if (saved.startsWith('index:')) return indexChartPath(saved.slice('index:'.length));
+  if (saved.startsWith('forex:')) return fxChartPath('forex', saved.slice('forex:'.length));
+  if (saved.startsWith('commodity:')) return fxChartPath('commodity', saved.slice('commodity:'.length));
   const [b = 'BTC', q = 'USDT'] = saved.split('/');
   return `/charts/${b}/${q}`;
 }

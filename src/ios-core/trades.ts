@@ -2,11 +2,12 @@
 // FD-ORDEREDIT, FIX-BOTLEVELS, FIX-BOTDRAG, FIX-SLTPDUP): each line with its box, which can be dragged, what its ×
 // does, the groups with lines dragged (the change they make), the levels just sent. The levels sent are kept here
 // (the engine lives as long as the app) until the platform lists them, at most a minute.
+import { fxCompact } from '../shared/fx.ts';
 import type { AccountView, Portfolio } from '../shared/api-types.ts';
 import type { BotLevel } from '../shared/bot.ts';
 import type { ModifyResult, ModifyTicket } from '../shared/trading.ts';
 import { PNL_COLORS, tradeLinesOf, type PnlBasis } from '../web/chart/pnl.ts';
-import { botLinesOf, onChart, withoutDuplicates } from '../web/chart/bot-lines.ts';
+import { botLinesOf, onChart, stillHeld, withoutDuplicates } from '../web/chart/bot-lines.ts';
 import { anchorOf, botDraftOf, draftGroups, draftTicket, isDraggable, lineActionOf, lineCloses, liveDrafts, sentLevels, withDrafts, withSent, type AccountLine, type Drafts, type SentLevel } from '../web/chart/trade-drafts.ts';
 import { chartLineOf, labelText, TRADE_COLORS } from '../web/chart/trade-labels.ts';
 import { canReverse } from '../web/chart/reverse.ts';
@@ -37,7 +38,8 @@ let sentSymbol = '';
 
 /** The lines of the accounts that can hold this asset (useTradeLines). */
 function linesOf(a: TradesInput): AccountLine[] {
-  const [base = '', quote = 'USDT'] = a.stock ? [a.symbol, 'USD'] : a.symbol.split('/');
+  // FD-FXCOMMODITIES: a pair or a commodity by its compact form on the accounts (EUR/USD → EURUSD, as eToro's).
+  const [base = '', quote = 'USDT'] = a.stock ? [fxCompact(a.symbol), 'USD'] : a.symbol.split('/');
   const relevant = a.accounts.filter((x) => (x.kind === 'stocks') === a.stock);
   const several = relevant.length > 1;
   const lines: AccountLine[] = [];
@@ -47,7 +49,8 @@ function linesOf(a: TradesInput): AccountLine[] {
     const r = tradeLinesOf({ base, quote, lastPrice: a.lastPrice, positions: d.positions, balances: d.balances, orders: d.orders, account: several ? account.label : undefined, accountId: account.id, stock: a.stock }, PNL_COLORS);
     for (const l of r.lines) if (l.role !== 'pnl') lines.push({ ...l, account });
   }
-  const levels = a.botLevels.filter((l) => onChart(l, { base, quote, stock: a.stock }) && relevant.some((x) => x.id === l.accountId));
+  // FIX-BOTLEVELGONE: only while the account still holds the bot's position (a close shows at once).
+  const levels = a.botLevels.filter((l) => onChart(l, { base, quote, stock: a.stock }) && relevant.some((x) => x.id === l.accountId) && stillHeld(l, a.portfolios[String(l.accountId)]));
   const named = new Set(levels.map((l) => l.bot.id)).size > 1;
   const botLines: AccountLine[] = [];
   for (const account of relevant) {

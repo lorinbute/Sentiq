@@ -1,6 +1,8 @@
 // The symbol list on the right of the chart (FD-CHARTTV §3), as TradingView's watchlist: one of the user's watch lists
 // (chosen on top, FD-WATCHLISTS §4) with each symbol's last price, change and change %, the open one framed, reordered
 // by dragging (or Alt + ↑ / ↓), and the search on top. On a phone it is a panel sliding in from the right (FD-WATCHDRAWER).
+import type { FxEntry } from '../../shared/api-types.ts';
+import { FX_READY, fxPrecision, isFxItem, useFxQuotes } from '../fx.ts';
 import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import { Link } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
@@ -11,7 +13,7 @@ import { plainSymbol, searchIndices } from '../../shared/indices.ts';
 import { api, qs } from '../api.ts';
 import { useScrollLock } from '../scroll-lock.ts';
 import { useVisibleArea } from '../visible-area.ts';
-import { chartPathOf, indexChartPath, stockChartPath } from '../chart/paths.ts';
+import { chartPathOf, indexChartPath, stockChartPath, fxChartPath } from '../chart/paths.ts';
 import { WATCHLIST_DEFAULT } from '../chart/watchlist-prefs.ts';
 import { fmtPct, fmtPrice } from '../format.ts';
 import { useReorderList, useSaveSettings, useSettings, useWatchlists } from '../hooks.ts';
@@ -62,6 +64,17 @@ function SymbolSearch({ onPick }: { onPick: (path: string) => void }) {
     staleTime: 10 * 60_000,
     retry: false,
   });
+  // FD-FXCOMMODITIES: Twelve Data's pairs and commodities (none without the user's key; hidden until all of it is there).
+  const fxFound = useQuery({
+    queryKey: ['fx', 'panel', term],
+    queryFn: async () => {
+      const [f, m] = await Promise.all([api.get<FxEntry[]>(`/api/fx/search${qs({ kind: 'forex', q: term })}`), api.get<FxEntry[]>(`/api/fx/search${qs({ kind: 'commodity', q: term })}`)]);
+      return [...f.slice(0, 6).map((h) => ({ ...h, kind: 'forex' as const })), ...m.slice(0, 6).map((h) => ({ ...h, kind: 'commodity' as const }))];
+    },
+    enabled: FX_READY && term.length >= 2,
+    staleTime: 10 * 60_000,
+    retry: false,
+  });
   const pick = (path: string) => {
     onPick(path);
     setQ('');
@@ -71,11 +84,12 @@ function SymbolSearch({ onPick }: { onPick: (path: string) => void }) {
   const shares = stocks.data ?? [];
   // FD-INDICES: the seven indices are known here, no request needed.
   const indices = term.length >= 2 ? searchIndices(term) : [];
+  const fxs = fxFound.data ?? [];
   // Group titles only when more than one kind was found.
-  const titled = [pairs, shares, indices].filter((l) => l.length > 0).length > 1;
-  const open = term !== '' && !!(results.data || stocks.data || indices.length > 0);
+  const titled = [pairs, shares, indices, fxs].filter((l) => l.length > 0).length > 1;
+  const open = term !== '' && !!(results.data || stocks.data || indices.length > 0 || fxs.length > 0);
   // The results in the order shown, for the keyboard.
-  const paths = [...pairs.map((r) => `/charts/${r.base}/${r.quote}`), ...shares.map((r) => stockChartPath(r.symbol)), ...indices.map((i) => indexChartPath(i.id))];
+  const paths = [...pairs.map((r) => `/charts/${r.base}/${r.quote}`), ...shares.map((r) => stockChartPath(r.symbol)), ...indices.map((i) => indexChartPath(i.id)), ...fxs.map((h) => fxChartPath(h.kind, h.symbol))];
   const onKey = (e: ReactKeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       if (!open) return;
@@ -168,6 +182,23 @@ function SymbolSearch({ onPick }: { onPick: (path: string) => void }) {
               </button>
             </li>
           ))}
+          {titled && fxs.length > 0 && (
+            <li role="presentation" className="px-3.5 pt-1.5 pb-0.5 text-[11.5px] text-faint">
+              Forex și mărfuri
+            </li>
+          )}
+          {fxs.map((h, i) => {
+            const n = pairs.length + shares.length + indices.length + i;
+            return (
+              <li key={`${h.kind}:${h.symbol}`} role="presentation">
+                <button type="button" {...opt(n)} className={row(n)} onClick={() => pick(fxChartPath(h.kind, h.symbol))}>
+                  <CoinLogo coin={h.symbol} size={16} fx={h.kind} />
+                  <span className="font-medium">{h.symbol}</span>
+                  <span className="min-w-0 truncate text-[12.5px] text-faint">{h.name}</span>
+                </button>
+              </li>
+            );
+          })}
         </ul>
       )}
     </div>
@@ -295,10 +326,16 @@ export function ListDrawer({ open, onClose, children }: { open: boolean; onClose
 /** Each symbol's last price and change, from the same queries as the market strip (no request more). */
 export function usePriceRows(items: WatchItem[]): (w: WatchItem) => Row {
   const coins = items.filter((w) => w.kind === 'crypto');
-  const stocks = items.filter((w) => w.kind !== 'crypto');
+  const stocks = items.filter((w) => w.kind === 'stock' || w.kind === 'index');
   const sparks = useSparks(coins.map((w) => `${w.coin}/${w.quote}`));
   const quotes = useStockQuotes(stocks.map((w) => w.coin));
+  // FD-FXCOMMODITIES: pairs and commodities from Twelve Data.
+  const fxQuotes = useFxQuotes(items.filter(isFxItem).map((w) => (w as WatchItem).coin));
   return (w: WatchItem): Row => {
+    if (isFxItem(w)) {
+      const q = fxQuotes.data?.get(w.coin);
+      return { last: q?.last ?? null, change: q?.change ?? null, pct: q?.changePct ?? null, precision: fxPrecision(q?.last), error: q?.error ? `Prețul nu s-a putut încărca: ${q.error}` : null };
+    }
     if (w.kind === 'crypto') {
       const q = sparks[coins.indexOf(w)];
       const closes = q?.data?.closes ?? [];
@@ -422,7 +459,7 @@ export function Watchlist({ current, onPick, inDrawer = false, contained = false
                         )}
                       >
                         <span className="flex min-w-0 flex-1 items-center gap-2">
-                          <CoinLogo coin={w.coin} size={18} badge={w.kind === 'stock'} square={w.kind === 'stock'} />
+                          <CoinLogo coin={w.coin} size={18} badge={w.kind === 'stock'} square={w.kind === 'stock'} fx={w.kind === 'forex' || w.kind === 'commodity' ? w.kind : undefined} />
                           <span className="truncate font-medium">{plainSymbol(w.coin)}</span>
                           {w.kind === 'crypto' && showQuote && <span className="shrink-0 text-[11.5px] text-faint">/{w.quote}</span>}
                         </span>

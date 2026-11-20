@@ -4,7 +4,7 @@ import { botInputSchema, DEFAULT_WEIGHTS, rrText, type DcaConfig, type GridConfi
 import type { SlingshotResult, SlingshotSignal } from '../../shared/indicator/slingshot.ts';
 import { afterClose, dcaStep, dealLevels, newDca, nextSafety } from './dca.ts';
 import { closeAllUnits, gridMoves, gridStopped, initGrid, netUnits, startMoves, triggered } from './grid.ts';
-import { barEvents, exitAt, fitFunds, levelsFor, signalFate, sizeFor, withMargin, type Sized } from './premium.ts';
+import { barEvents, exitAt, fitFunds, lateSignals, levelsFor, signalFate, sizeFor, withMargin, type Sized } from './premium.ts';
 import { areaAgainst, favoured, marketScore, passes, scoreReach } from './score.ts';
 import { floorToStep } from './exec.ts';
 
@@ -246,55 +246,53 @@ describe('Slingshot Premium (FD-BOT §6)', () => {
     expect(parse({ longMin: 50, shortMax: 2.5 }).error?.issues[0]?.message).toBe('Scorul maxim pentru short: un număr întreg');
   });
 
-  it('size (FIX-BOTBUDGET): the free budget shared among the trades still to open, at most the maximum a trade, at least what brings 10 at the take profit', () => {
-    const base = { cfg: { ...premium, maxPerTrade: 450 }, futures: true, budget: 500, committed: 0, leverage: 3, price: 100, sl: 98, tp: 105, feePct: 0.1, minProfit: 10, currency: 'USDT' };
+  it('size (FIX-BOTBUDGET, FIX-NOMINPROFIT): the free budget shared among the trades still to open, at most the maximum a trade, no least', () => {
+    const base = { cfg: { ...premium, maxPerTrade: 450 }, futures: true, budget: 500, committed: 0, leverage: 3, price: 100, sl: 98, tp: 105, feePct: 0.1 };
     // Two trades to open: 250 each (500 / 2), a position of 750 at 3×.
     const two = sizeFor({ ...base, slots: 2 }) as Sized;
     expect(two).toMatchObject({ margin: 250, lev: 3, notional: 750, qty: 7.5, notes: [] });
-    // The least: 10 / (3 × (5% − 0.2%)) ≈ 69.44; the most: the maximum a trade and the free budget.
-    expect(two.lower).toBeCloseTo(10 / (3 * 0.048), 9);
+    // No least (FIX-NOMINPROFIT); the most: the maximum a trade and the free budget.
+    expect(two.lower).toBe(0);
     expect(two.upper).toBe(450);
     // The second sees what the first left: 250 for the one left.
     expect(sizeFor({ ...base, committed: 250, slots: 1 })).toMatchObject({ margin: 250 });
     // One trade alone: the maximum a trade (450), not the whole budget.
     expect(sizeFor({ ...base, slots: 1 })).toMatchObject({ margin: 450 });
-    // Ten trades on 450: a share of 45 is too small; each takes the least that brings 10 (~69).
+    // Ten trades on 450: 45 each, however little it brings at the take profit.
     const ten = sizeFor({ ...base, budget: 450, slots: 10 }) as Sized;
-    expect(ten.margin).toBeCloseTo(10 / (3 * 0.048), 9);
-    // What 450 out of 500 leaves (50) makes no trade: it would bring ~7.2 at the take profit.
-    expect(sizeFor({ ...base, committed: 450, slots: 1 })).toEqual({ error: 'cu cel mult 50,00 USDT disponibili pentru tranzacție, ea ar aduce la take profit 7,20 USDT: sub minimul de 10 USD.' });
+    expect(ten.margin).toBeCloseTo(45, 9);
+    // What 450 out of 500 leaves (50) is a trade (it brings ~7.2 at the take profit).
+    expect(sizeFor({ ...base, committed: 450, slots: 1 })).toMatchObject({ margin: 50 });
     expect(sizeFor({ ...base, committed: 500, slots: 1 })).toEqual({ error: 'bugetul botului e tot în tranzacții deschise.' });
     // A take profit that does not pay the commissions in and out.
     expect(sizeFor({ ...base, slots: 1, tp: 100.15 })).toEqual({ error: 'take profit-ul e prea aproape: nu acoperă comisioanele de intrare și de ieșire.' });
-    // Another currency (ETH/BTC): the minimum is its 10 dollars, said in both.
-    const btc = { ...base, cfg: { ...premium, maxPerTrade: 0.5 }, budget: 1, price: 0.05, sl: 0.049, tp: 0.0525, minProfit: 10 / 100_000, currency: 'BTC' };
+    // Another currency (ETH/BTC): the same, whatever its dollars.
+    const btc = { ...base, cfg: { ...premium, maxPerTrade: 0.5 }, budget: 1, price: 0.05, sl: 0.049, tp: 0.0525 };
     expect(sizeFor({ ...btc, slots: 1 })).toMatchObject({ margin: 0.5 });
-    expect(sizeFor({ ...btc, budget: 0.0005, slots: 1 })).toEqual({ error: 'cu cel mult 0,0005 BTC disponibili pentru tranzacție, ea ar aduce la take profit 0,000072 BTC: sub minimul de 10 USD (0,0001 BTC).' });
+    expect(sizeFor({ ...btc, budget: 0.0005, slots: 1 })).toMatchObject({ margin: 0.0005 });
   });
 
-  it('size: the leverage lowered for the liquidation (the least worked out with it); spot at 1×', () => {
+  it('size: the leverage lowered for the liquidation; spot at 1×', () => {
     // A stop loss 9% away: at 10× the liquidation is ~9.5% away; the leverage comes down to 8× (80% of 12% > 9%).
-    const far = sizeFor({ cfg: { ...premium, maxPerTrade: 1000 }, futures: true, budget: 1000, committed: 0, slots: 1, leverage: 10, price: 100, sl: 91, tp: 120, feePct: 0.1, minProfit: 10, currency: 'USDT' }) as Sized;
+    const far = sizeFor({ cfg: { ...premium, maxPerTrade: 1000 }, futures: true, budget: 1000, committed: 0, slots: 1, leverage: 10, price: 100, sl: 91, tp: 120, feePct: 0.1 }) as Sized;
     expect(far.lev).toBe(8);
     expect(far.notes[0]).toMatch(/Levierul a fost coborât/);
-    expect(far.lower).toBeCloseTo(10 / (8 * 0.198), 9);
-    // Spot: no leverage; 100 at a take profit 10% away brings ~9.8: under 10, no trade; at 20% away, it does.
-    expect(sizeFor({ cfg: premium, futures: false, budget: 1000, committed: 0, slots: 4, leverage: 5, price: 100, sl: 98, tp: 110, feePct: 0.1, minProfit: 10, currency: 'USDT' })).toEqual({ error: 'cu cel mult 100,00 USDT disponibili pentru tranzacție, ea ar aduce la take profit 9,80 USDT: sub minimul de 10 USD.' });
-    const spot = sizeFor({ cfg: premium, futures: false, budget: 1000, committed: 0, slots: 4, leverage: 5, price: 100, sl: 98, tp: 120, feePct: 0.1, minProfit: 10, currency: 'USDT' }) as Sized;
-    expect(spot).toMatchObject({ lev: 1, margin: 100, notional: 100 });
+    // Spot: no leverage; 100 at a take profit 10% away (~9.8 at the take profit) is a trade too (FIX-NOMINPROFIT).
+    expect(sizeFor({ cfg: premium, futures: false, budget: 1000, committed: 0, slots: 4, leverage: 5, price: 100, sl: 98, tp: 110, feePct: 0.1 })).toMatchObject({ lev: 1, margin: 100, notional: 100 });
   });
 
   it('the account\'s money and the AI\'s choice stay within the bounds', () => {
-    const sized = sizeFor({ cfg: { ...premium, maxPerTrade: 450 }, futures: true, budget: 500, committed: 0, slots: 2, leverage: 3, price: 100, sl: 98, tp: 105, feePct: 0.1, minProfit: 10, currency: 'USDT' }) as Sized;
-    // The account has 120: the trade is cut to it (margin and opening fee), above its least.
+    const sized = sizeFor({ cfg: { ...premium, maxPerTrade: 450 }, futures: true, budget: 500, committed: 0, slots: 2, leverage: 3, price: 100, sl: 98, tp: 105, feePct: 0.1 }) as Sized;
+    // The account has 120: the trade is cut to it (margin and opening fee).
     const fit = fitFunds(sized, 120, 0.1, 100) as Sized;
     expect(fit.margin).toBeCloseTo(120 / 1.003, 9);
-    // 60 is under the least (~69): no trade.
-    expect(fitFunds(sized, 60, 0.1, 100)).toBeNull();
-    // The AI's amount brought within [least, most].
+    // 60 too (FIX-NOMINPROFIT: no least); nothing: no trade.
+    expect((fitFunds(sized, 60, 0.1, 100) as Sized).margin).toBeCloseTo(60 / 1.003, 9);
+    expect(fitFunds(sized, 0, 0.1, 100)).toBeNull();
+    // The AI's amount brought within [0, most].
     expect(withMargin(sized, 400, 100).margin).toBe(400);
     expect(withMargin(sized, 5000, 100).margin).toBe(450);
-    expect(withMargin(sized, 10, 100).margin).toBeCloseTo(sized.lower, 9);
+    expect(withMargin(sized, 10, 100).margin).toBe(10);
     expect(withMargin(sized, 400, 100)).toMatchObject({ notional: 1200, qty: 12 });
   });
 
@@ -362,5 +360,34 @@ describe("the market's score (FD-BOT §6, FD-BOTDIR)", () => {
     expect(areaAgainst('short', { index: 60, count: 5 })).toBe(true);
     expect(areaAgainst('short', { index: 59, count: 5 })).toBe(false);
     expect(areaAgainst('long', null)).toBe(false);
+  });
+});
+
+describe('FIX-LATEENTRY: the late signals', () => {
+  const sig = (o: Partial<SlingshotSignal>): SlingshotSignal => ({ side: 'short', bar: 5, time: 5000, confirmBar: 6, confirmTime: 6000, entry: 105, sl: 110, tp: 90, breakout: 100, outcome: 'active', provisional: false, ...o });
+  const r = (signals: SlingshotSignal[]) => ({ signals }) as unknown as SlingshotResult;
+  const candles = Array.from({ length: 10 }, (_, i) => ({ c: i === 6 ? 100 : 99 }));
+
+  it('active, before the closed bar, the price at most 10% of the way to the take profit worse than the entry', () => {
+    // A short entered at 100, take profit 90: down to 99 (10% of the way) is still good; higher is better.
+    expect(lateSignals(r([sig({})]), 9, candles, 99).map((s) => s.at)).toEqual([100]);
+    expect(lateSignals(r([sig({})]), 9, candles, 104)).toHaveLength(1);
+    expect(lateSignals(r([sig({})]), 9, candles, 98.9)).toHaveLength(0);
+    // Past its stop loss or its take profit: no.
+    expect(lateSignals(r([sig({})]), 9, candles, 111)).toHaveLength(0);
+    // Confirmed on the closed bar itself (a regular signal), provisional, closed by Slingshot: no.
+    expect(lateSignals(r([sig({ confirmBar: 9 })]), 9, candles, 100)).toHaveLength(0);
+    expect(lateSignals(r([sig({ provisional: true })]), 9, candles, 100)).toHaveLength(0);
+    expect(lateSignals(r([sig({ outcome: 'invalidated' })]), 9, candles, 100)).toHaveLength(0);
+    // Without the candles (hand-made bars): none.
+    expect(lateSignals(r([sig({})]), 9, undefined, 100)).toHaveLength(0);
+  });
+
+  it('a long the other way round; the latest active of each side', () => {
+    const long = sig({ side: 'long', sl: 90, tp: 120, time: 6000 });
+    expect(lateSignals(r([long]), 9, candles, 102).map((s) => s.side)).toEqual(['long']);
+    expect(lateSignals(r([long]), 9, candles, 102.1)).toHaveLength(0);
+    const older = sig({ side: 'long', sl: 90, tp: 120, time: 3000, confirmBar: 3 });
+    expect(lateSignals(r([older, long]), 9, candles, 100).map((s) => s.time)).toEqual([6000]);
   });
 });

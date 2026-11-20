@@ -3,7 +3,7 @@
 import { useState, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { clsx } from 'clsx';
-import type { TodayExplain } from '../../shared/api-types.ts';
+import type { MarketPart, TodayExplain } from '../../shared/api-types.ts';
 import { api } from '../api.ts';
 import { confidenceLabel, fmtNum, fmtTime, indexLabel, indexTone } from '../format.ts';
 import { useTz } from '../hooks.ts';
@@ -11,6 +11,7 @@ import { Modal } from './Modal.tsx';
 import { ScoreWhy } from './ScoreWhy.tsx';
 import { PremiumBadge } from './IndicatorPicker.tsx';
 import { fmtPoints } from '../why-text.ts';
+import { marketMoves, marketRarity, marketShown, marketWhen, sharePct, signedPct } from '../market-text.ts';
 import { ErrorNote, fmtScore, Loading } from './ui.tsx';
 
 const CAT: Record<string, string> = { crypto: 'Crypto', stocks: 'Acțiuni', macro: 'Macro', geopolitics: 'Geopolitică' };
@@ -89,11 +90,55 @@ function Summary({ e }: { e: TodayExplain }) {
             Cele mai multe știri vin de la {most.name}: {most.count}, cu {pct(t.weight > 0 ? most.weight / t.weight : 0)} din pondere{mostCut ? `, tăiată de plafonul de ${pct(e.params.sourceCap)}` : ''}.
           </li>
         )}
+        {[e.crypto, e.market].filter(marketShown).map((m) => (
+          <li key={m.area}>
+            {marketWhen(m, e.tz, e.asOf)}: {marketMoves(m)}, {marketRarity(m)}. Reacția pieței intră la {m.area === 'crypto' ? 'Crypto' : 'Acțiuni'} cu {sharePct(m.share)} din scorul lor și{' '}
+            {sharePct(m.dayShare)} din ziua întreagă.
+          </li>
+        ))}
         <li>
-          Media ponderată a scorurilor iese {signed(t.raw)}, deci indicele {t.index.toFixed(1)}: {indexLabel(t.index).toLowerCase()}.
+          Media ponderată a scorurilor{e.market || e.crypto ? ', cu reacția piețelor,' : ''} iese {signed(t.raw)}, deci indicele {t.index.toFixed(1)}: {indexLabel(t.index).toLowerCase()}.
         </li>
       </ul>
     </section>
+  );
+}
+
+/** FD-MARKETMOVE: the reaction of a part, if it has one. */
+const marketOf = (e: TodayExplain, c: string): MarketPart | null => (c === 'stocks' ? e.market : c === 'crypto' ? e.crypto : null) ?? null;
+
+/** FD-MARKETMOVE: one market's reaction, step by step (step 4). */
+function MarketBlock({ m, e }: { m: MarketPart; e: TodayExplain }) {
+  const p = e.params;
+  const r = e.rules;
+  const part = m.area === 'crypto' ? 'Crypto' : 'Acțiuni';
+  const partNews = e.breakdown[m.area].weight - m.weight;
+  return (
+    <div className="mt-3 flex flex-col gap-1">
+      <h5 className="text-[13px] font-semibold text-text">{part}</h5>
+      <p>
+        {marketWhen(m, e.tz, e.asOf)}: {m.indices.map((i) => `${i.name} ${signedPct(i.changePct)} (o zi obișnuită: ±${fmtNum(i.typicalPct, 2, 2)}%)`).join('; ')}.
+      </p>
+      <Formula>
+        m = media({m.indices.map((i) => signed(i.z, 2)).join('; ')}) = {signed(m.move, 2)} zile obișnuite
+      </Formula>
+      <Formula>
+        scor = tanh({signed(m.move, 2)} ÷ {fmtNum(r.market.scale, 0)}) = {signed(m.sentiment)} <span className="text-faint">(singură, reacția ar da {m.value.toFixed(1)})</span>
+      </Formula>
+      <Formula>
+        cota = |m| ÷ (|m| + {fmtNum(r.market.strength, 1)}) × prospețime {n2(m.decay)} = {n2(m.strength)} × {n2(m.decay)} = {n2(m.share)}
+      </Formula>
+      <p>
+        {m.area === 'crypto' ? 'Piața crypto nu se închide: prospețimea e 1.' : m.live ? 'Ședința e în curs: prospețimea e 1.' : 'Ședința s-a închis: prospețimea scade cu orele.'} Reacția intră ca o știre în plus la {part},
+        cu ponderea care îi dă cota ei din scorul lor:
+      </p>
+      <Formula>
+        pondere = {n2(m.share)} ÷ (1 − {n2(m.share)}) × {partNews < p.shrinkK ? `max(${n2(partNews)}, ${fmtNum(p.shrinkK, 2)})` : n2(partNews)} = {n2(m.weight)}
+      </Formula>
+      <p>
+        {part}: din știri singure {m.news.toFixed(1)}, cu reacția pieței {e.breakdown[m.area].index.toFixed(1)}; în ziua întreagă, piața are {sharePct(m.dayShare)}.
+      </p>
+    </div>
   );
 }
 
@@ -112,6 +157,10 @@ function Body({ e, tz }: { e: TodayExplain; tz: string }) {
   const restShare = hidden.reduce((a, it) => a + it.share, 0) + e.rest.share;
   const restContribution = hidden.reduce((a, it) => a + it.contribution, 0) + e.rest.contribution;
   const conf = { low: 'mică', medium: 'medie', high: 'mare' }[t.confidence];
+  // FD-MARKETMOVE: the news' own mean (step 3), then the markets' reactions (step 4) when there is one.
+  const news = e.news ?? { raw: t.raw, weight: t.weight };
+  const markets = [e.crypto, e.market].filter((x): x is MarketPart => Boolean(x));
+  const n = markets.length ? 1 : 0;
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-wrap items-end gap-x-5 gap-y-1">
@@ -186,20 +235,50 @@ function Body({ e, tz }: { e: TodayExplain; tz: string }) {
           </Step>
           <Step n={3} title="Media ponderată a scorurilor">
             <Formula>
-              Σ(pondere × scor) ÷ Σ pondere = {signed(t.raw)} <span className="text-faint">(Σ pondere = {n2(t.weight)})</span>
+              Σ(pondere × scor) ÷ Σ pondere = {signed(news.raw)} <span className="text-faint">(Σ pondere = {n2(news.weight)})</span>
             </Formula>
           </Step>
-          <Step n={4} title="Spre neutru când sunt puține știri">
+          {markets.length > 0 && (
+            <Step n={4} title="Reacția piețelor">
+              <p>
+                <span className="text-text">De ce:</span> știrile despre acțiuni și crypto sunt mai ales despre companii și proiecte (rezultate, ratinguri, lansări), iar media lor stă aproape de
+                neutru chiar și într-o zi de panică. Așa că în scor intră și ce face piața: cât s-a mișcat, față de o zi obișnuită a ei. Cu cât mișcarea e mai rară, cu atât cântărește mai mult: o zi
+                liniștită aproape nu contează, o zi de panică trage scorul spre capăt.
+              </p>
+              <ul className="mt-1 list-disc space-y-0.5 pl-5">
+                <li>
+                  <span className="text-text">Acțiuni:</span> S&amp;P 500 și Nasdaq 100, de la închiderea anterioară. După închidere reacția rămâne, dar cântărește tot mai puțin (la jumătate la fiecare{' '}
+                  {fmtNum(p.halfLifeH, 1)} ore, ca știrile), până la ședința următoare.
+                </li>
+                <li>
+                  <span className="text-text">Crypto:</span> BTC și ETH în ultimele 24 de ore (piața nu se închide): o mișcare contează cât timp e în aceste 24 de ore.
+                </li>
+                <li>
+                  <span className="text-text">O zi obișnuită</span> a fiecăruia: mișcarea mediană din ultimele {r.market.sessions} de zile de tranzacționare.
+                </li>
+              </ul>
+              {markets.map((m) => (
+                <MarketBlock key={m.area} m={m} e={e} />
+              ))}
+              <p className="mt-2">Ziua întreagă le ia cu aceleași ponderi, alături de toate știrile:</p>
+              <Formula>
+                ({signed(news.raw)} × {n2(news.weight)}
+                {markets.map((m) => ` + ${m.sentiment < 0 ? `(${signed(m.sentiment)})` : signed(m.sentiment)} × ${n2(m.weight)}`).join('')}) ÷ ({n2(news.weight)}
+                {markets.map((m) => ` + ${n2(m.weight)}`).join('')}) = {signed(t.raw)} <span className="text-faint">(Σ pondere = {n2(t.weight)})</span>
+              </Formula>
+            </Step>
+          )}
+          <Step n={4 + n} title="Spre neutru când sunt puține știri">
             <Formula>
               {signed(t.raw)} × {n2(t.weight)} ÷ ({n2(t.weight)} + {fmtNum(p.shrinkK, 2)}) = {signed(t.shrunk)}
             </Formula>
           </Step>
-          <Step n={5} title="Pe scala 0–100">
+          <Step n={5 + n} title="Pe scala 0–100">
             <Formula>
               50 + 50 · tanh({fmtNum(p.gamma, 2)} × {signed(t.shrunk)}) = {t.index.toFixed(1)}
             </Formula>
           </Step>
-          <Step n={6} title="Încrederea">
+          <Step n={6 + n} title="Încrederea">
             <p>
               Σ pondere {n2(t.weight)}: <span className="text-text">{conf}</span> (sub {fmtNum(r.confidence.medium, 0)} mică, sub {fmtNum(r.confidence.high, 0)} medie, altfel mare).
             </p>
@@ -209,7 +288,7 @@ function Body({ e, tz }: { e: TodayExplain; tz: string }) {
 
       <section aria-labelledby="ix-cats" className="flex flex-col gap-2">
         <h3 id="ix-cats" className="panel-title">Pe categorii</h3>
-        <p className="text-[12.5px] text-faint">Fiecare categorie, la fel, doar din știrile ei (cu plafonul ei).</p>
+        <p className="text-[12.5px] text-faint">Fiecare categorie, la fel, doar din știrile ei (cu plafonul ei){markets.length ? '; la Crypto și la Acțiuni, și reacția pieței' : ''}.</p>
         <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2">
           {(['crypto', 'stocks', 'macro', 'geopolitics'] as const).map((c) => {
             const b = e.breakdown[c];
@@ -220,6 +299,7 @@ function Body({ e, tz }: { e: TodayExplain; tz: string }) {
                   <span className="text-faint">
                     {' '}
                     · {b.count} știri{b.count ? ` · Σ pondere ${n2(b.weight)} · media ${signed(b.raw)}` : ''}
+                    {marketOf(e, c) ? ` · cu reacția pieței (${sharePct((marketOf(e, c) as MarketPart).share)}); din știri singure ${(marketOf(e, c) as MarketPart).news.toFixed(1)}` : ''}
                   </span>
                 </span>
                 <span className={clsx('num shrink-0 font-semibold', b.count ? TONE[indexTone(b.index)] : 'text-faint')}>{b.count ? b.index.toFixed(1) : '—'}</span>
@@ -332,6 +412,12 @@ function Body({ e, tz }: { e: TodayExplain; tz: string }) {
           <li>
             factori: sponsorizat {fmtNum(r.spec.sponsored, 1)}, speculativ / rezumat {fmtNum(r.spec.speculative, 1)}; tema energie / AI × {fmtNum(r.theme, 1)}
           </li>
+          {r.market && (
+            <li>
+              reacția piețelor (S&amp;P 500 și Nasdaq 100; BTC și ETH): ziua obișnuită din {r.market.sessions} de zile; scor tanh(m ÷ {fmtNum(r.market.scale, 0)}); cota |m| ÷ (|m| +{' '}
+              {fmtNum(r.market.strength, 1)})
+            </li>
+          )}
         </ul>
         <p className="text-[12.5px] text-faint">Din aplicație se schimbă greutatea surselor (Setări → Admin → Surse); restul, din cod.</p>
       </section>

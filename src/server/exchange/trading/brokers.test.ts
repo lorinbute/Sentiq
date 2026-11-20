@@ -1,10 +1,10 @@
 // FD-TRADING, TD-TRADING §8: the brokers' orders over a simulated HTTP: what leaves (path, body, headers), what comes
 // back, and how their refusals are explained.
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { setFetchImpl } from '../../net/http.ts';
 import type { OrderTicket } from '../../../shared/trading.ts';
 import { AlpacaTrader } from './alpaca.ts';
-import { closePlan, EtoroTrader, nthRequestId } from './etoro.ts';
+import { closePlan, EtoroTrader, nthRequestId, resetEtoroCaches } from './etoro.ts';
 import { resetTrading212Cache, Trading212Trader } from './trading212.ts';
 
 const KEY = '0f3c2a1e-5b6d-4c7e-8f90-a1b2c3d4e5f6';
@@ -18,6 +18,9 @@ interface Sent {
 }
 
 /** Answers by `METHOD path-fragment`; records every request. */
+// FIX-ETOROLIMIT: eToro's instruments and the late rates' pause are kept across a trader's calls: each test starts clean.
+beforeEach(() => resetEtoroCaches());
+
 function serve(routes: [string, (s: Sent) => { status?: number; body?: unknown }][]): Sent[] {
   const sent: Sent[] = [];
   setFetchImpl((async (input: string | URL | Request, init?: RequestInit) => {
@@ -103,7 +106,7 @@ describe('eToro (FD-TRADING)', () => {
     const sent = serve([
       ['GET /market-data/search', () => ({ body: search })],
       ['GET /trading/info/real/pnl', () => ({ body: portfolio })],
-      ['GET /instruments/rates', () => ({ body: { rates: [{ instrumentId: 1001, ask: 200 }] } })],
+      ['GET /instruments/rates', () => ({ body: { rates: [{ instrumentId: 1001, ask: 200, date: new Date().toISOString() }] } })],
       ['POST /api/v2/trading/execution/orders', () => ({ body: { orderId: 777, referenceId: KEY } })],
       ['GET /api/v2/trading/info/orders:lookup', () => ({ body: { orderId: 777, status: { id: 3 } } })],
     ]);
@@ -117,6 +120,103 @@ describe('eToro (FD-TRADING)', () => {
     expect(order.body).toEqual({ action: 'open', transaction: 'buy', instrumentId: 1001, orderType: 'mkt', leverage: 1, amount: 500, orderCurrency: 'usd', takeProfitRate: 250 });
   });
 
+  it('FIX-ETOROSEARCH: the exact symbol among partial matches, past the first page; then eToro\'s own list; none: refused', async () => {
+    const now = Date.parse('2026-11-20T15:00:00Z');
+    const fresh = new Date(now - 5_000).toISOString();
+    // 100 partial matches on the first page (ANT.24-7, ANTO.L…), the listing itself on the second.
+    const partial = Array.from({ length: 100 }, (_, i) => ({ instrumentId: 20_000 + i, internalSymbolFull: i === 0 ? 'ANT.24-7' : `XANT${i}` }));
+    const sent = serve([
+      ['GET /market-data/search', (x) => ({ body: x.url.includes('internalSymbolFull=ANT&') ? { totalItems: 101, items: x.url.includes('pageNumber=2') ? [{ instrumentId: 15781, internalSymbolFull: 'ANT', displayname: 'Anthropic, PBC', internalAssetClassName: 'Stocks', internalExchangeName: 'Nasdaq' }] : partial } : { totalItems: 0, items: [] } })],
+      ['GET instrumentsmetadata', () => ({ body: { InstrumentDisplayDatas: [{ InstrumentID: 16001, SymbolFull: 'NEWCO', InstrumentDisplayName: 'NewCo', InstrumentTypeID: 5, ExchangeID: 5 }] } })],
+      ['GET /instruments/rates', (x) => ({ body: { rates: [{ instrumentID: Number(/instrumentIds=(\d+)/.exec(x.url)?.[1]), lastExecution: 101.5, date: fresh }] } })],
+    ]);
+    const t = new EtoroTrader({ publicKey: 'p', userKey: 'u' }, 'real', async () => undefined);
+    expect(await t.price('ANT', now)).toBe(101.5);
+    const searches = sent.filter((x) => x.url.includes('/market-data/search'));
+    expect(searches.map((x) => /pageNumber=(\d+)/.exec(x.url)?.[1])).toEqual(['1', '2']);
+    expect(searches[0]?.url).toContain('pageSize=100');
+    expect(sent.find((x) => x.url.includes('/instruments/rates'))?.url).toContain('instrumentIds=15781');
+    expect(sent.some((x) => x.url.includes('instrumentsmetadata'))).toBe(false);
+    // Not found by the search: eToro's own list of its instruments gives its id.
+    expect(await t.price('NEWCO', now)).toBe(101.5);
+    expect(sent.filter((x) => x.url.includes('/instruments/rates')).at(-1)?.url).toContain('instrumentIds=16001');
+    // In neither: refused, as before.
+    await expect(t.price('NOPE', now)).rejects.toThrow('eToro nu are simbolul NOPE.');
+  });
+
+  it("FIX-ETOROSTALE: a bot's price only from a rate at most 60 s old (eToro was seen 3 h 26 min late); none without a time", async () => {
+    const now = Date.parse('2026-11-19T23:17:05Z');
+    let date: string | undefined = '2026-11-19T19:51:03.43Z';
+    const sent = serve([
+      ['GET /market-data/search', () => ({ body: { items: [{ instrumentId: 1, internalSymbolFull: 'EURUSD' }] } })],
+      ['GET /instruments/rates', () => ({ body: { rates: [{ instrumentID: 1, lastExecution: 1.09706, ...(date ? { date } : {}) }] } })],
+    ]);
+    const t = new EtoroTrader({ publicKey: 'p', userKey: 'u' }, 'real', async () => undefined);
+    const rates = () => sent.filter((x) => x.url.includes('/instruments/rates')).length;
+    expect(await t.price('EURUSD', now)).toBeNull();
+    // FIX-ETOROLIMIT: a late rate pauses the asking for 10 minutes (each would be dropped and costs eToro's limit).
+    date = '2026-11-19T23:17:00Z';
+    expect(await t.price('EURUSD', now + 60_000)).toBeNull();
+    expect(rates()).toBe(1);
+    const later = now + 11 * 60_000;
+    date = new Date(later - 55_000).toISOString();
+    expect(await t.price('EURUSD', later)).toBe(1.09706);
+    date = undefined;
+    expect(await t.price('EURUSD', later)).toBeNull();
+    date = new Date(later - 61_000).toISOString();
+    expect(await t.price('EURUSD', later)).toBeNull();
+    expect(rates()).toBe(4);
+    // The instrument was searched once (its id never changes).
+    expect(sent.filter((x) => x.url.includes('/market-data/search'))).toHaveLength(1);
+  });
+
+  it('FIX-ETOROSTALE: the order form takes eToro\'s rate only fresh, else the market data\'s (Nasdaq / Twelve Data), else none', async () => {
+    serve([
+      ['GET /market-data/search', (s) => ({ body: { items: s.url.includes('GOLD') ? [{ instrumentId: 18, internalSymbolFull: 'GOLD', internalAssetClassName: 'Commodity', internalExchangeName: 'Commodity' }] : [{ instrumentId: 1, internalSymbolFull: 'EURUSD', internalAssetClassName: 'Forex', internalExchangeName: 'FX' }] } })],
+      ['GET /trading/info/real/pnl', () => ({ body: { clientPortfolio: { credit: 1000, positions: [] } } })],
+      ['GET /instruments/rates', () => ({ body: { rates: [{ instrumentID: 1, lastExecution: 1.09752, date: new Date(Date.now() - 3 * 3600_000).toISOString() }] } })],
+    ]);
+    const asked: string[] = [];
+    const t = new EtoroTrader({ publicKey: 'p', userKey: 'u' }, 'real', async () => undefined, async (s) => (asked.push(s), 1.09687));
+    // The chart's pair: eToro's EURUSD; the price the market data's (eToro's was 3 h old).
+    expect(await t.instrument('stock', 'EUR/USD')).toMatchObject({ symbol: 'EURUSD', last: 1.09687 });
+    expect(asked).toEqual(['EURUSD']);
+    const none = new EtoroTrader({ publicKey: 'p', userKey: 'u' }, 'real', async () => undefined);
+    expect((await none.instrument('stock', 'EUR/USD')).last).toBeNull();
+    // A commodity of the charts is refused (only forex on eToro); eToro's own GOLD is a symbol as any other.
+    await expect(t.instrument('stock', 'XAU/USD')).rejects.toMatchObject({ code: 'INVALID', message: expect.stringMatching(/doar forex/) });
+    await expect(t.instrument('stock', 'HG1')).rejects.toMatchObject({ code: 'INVALID' });
+
+    // eToro's own gold ("GOLD", from the trades page): not priced from Nasdaq, where GOLD is Barrick: none.
+    asked.length = 0;
+    expect(await t.instrument('stock', 'GOLD/USD')).toMatchObject({ symbol: 'GOLD', last: null });
+    expect(asked).toEqual([]);
+  });
+
+  it('FIX-ETOROFX: JPY/USD goes through USDJPY: the other side, levels 1/x, yen as dollars; its positions read back as JPY/USD', async () => {
+    const sent = serve([
+      ['GET /market-data/search', (s) => ({ body: { items: s.url.includes('USDJPY') ? [{ instrumentId: 5, internalSymbolFull: 'USDJPY', internalAssetClassName: 'Forex', internalExchangeName: 'FX' }] : [] } })],
+      ['GET /trading/info/real/pnl', () => ({ body: { clientPortfolio: { credit: 5000, positions: [{ positionID: 901, instrumentID: 5, units: 1000, isBuy: false, leverage: 1, openRate: 150 }] } } })],
+      ['GET /instruments/rates', () => ({ body: { rates: [{ instrumentId: 5, lastExecution: 150, date: new Date().toISOString() }] } })],
+      ['POST /api/v2/trading/execution/orders', () => ({ body: { orderId: 779 } })],
+      ['GET /api/v2/trading/info/orders:lookup', () => ({ body: { orderId: 779, status: { id: 3 } } })],
+    ]);
+    const t = new EtoroTrader({ publicKey: 'p', userKey: 'u' }, 'real', async () => undefined);
+    // eToro's short of 1 000 dollars at 150 yen is a long of 150 000 yen at 1/150 on JPY/USD.
+    const info = await t.instrument('stock', 'JPY/USD');
+    expect(info.positions).toEqual([expect.objectContaining({ id: '901', isBuy: true, units: 150000, openRate: 1 / 150 })]);
+    expect(info.last).toBeCloseTo(1 / 150, 12);
+    // A long of 150 000 yen with its levels: a short of 1 000 dollars on USDJPY, SL 155, TP 145.
+    const p = await t.normalize(ticket({ symbol: 'JPY/USD', side: 'buy', amount: 150000, amountIn: 'base', stopLoss: 1 / 155, takeProfit: 1 / 145 }));
+    expect(p.errors).toEqual([]);
+    expect(p.warnings[0]).toMatch(/JPY\/USD se tranzacționează ca USD\/JPY: un long pe JPY\/USD e un short pe USD\/JPY, SL 155, TP 145/);
+    await t.place(p);
+    expect(sent.find((s) => s.method === 'POST')?.body).toMatchObject({ transaction: 'sellShort', instrumentId: 5, units: 1000, stopLossRate: 155, takeProfitRate: 145 });
+    // Half of the yen closed: half of the position's dollars.
+    const c = await t.normalize(ticket({ symbol: 'JPY/USD', side: 'sell', amount: 75000, close: { positionIds: ['901'], units: 75000 } }));
+    expect(c.ticket).toMatchObject({ symbol: 'USDJPY', close: { positionIds: ['901'], units: 500 } });
+  });
+
   it('lists each position of the instrument with its P/L, to pick the ones to close (FD-ETOROPICK)', async () => {
     const pf = { clientPortfolio: { credit: 5000, positions: [
       { positionID: 111, instrumentID: 1001, units: 2, isBuy: true, leverage: 1, openRate: 180, amount: 360, openDateTime: '2026-03-02T10:00:00Z', unrealizedPnL: { pnL: 40, closeRate: 200 } },
@@ -127,7 +227,7 @@ describe('eToro (FD-TRADING)', () => {
     serve([
       ['GET /market-data/search', () => ({ body: search })],
       ['GET /trading/info/real/pnl', () => ({ body: pf })],
-      ['GET /instruments/rates', () => ({ body: { rates: [{ instrumentId: 1001, ask: 200 }] } })],
+      ['GET /instruments/rates', () => ({ body: { rates: [{ instrumentId: 1001, ask: 200, date: new Date().toISOString() }] } })],
     ]);
     const t = new EtoroTrader({ publicKey: 'p', userKey: 'u' }, 'real', async () => undefined);
     const info = await t.instrument('stock', 'AAPL');
@@ -152,7 +252,7 @@ describe('eToro (FD-TRADING)', () => {
     serve([
       ['GET /market-data/search', () => ({ body: search })],
       ['GET /trading/info/real/pnl', () => ({ body: pf })],
-      ['GET /instruments/rates', () => ({ body: { rates: [{ instrumentId: 1001, ask: 200 }] } })],
+      ['GET /instruments/rates', () => ({ body: { rates: [{ instrumentId: 1001, ask: 200, date: new Date().toISOString() }] } })],
     ]);
     const info = await new EtoroTrader({ publicKey: 'p', userKey: 'u' }, 'real', async () => undefined).instrument('stock', 'AAPL');
     expect(info).toMatchObject({
@@ -168,7 +268,7 @@ describe('eToro (FD-TRADING)', () => {
     const sent = serve([
       ['GET /market-data/search', () => ({ body: search })],
       ['GET /trading/info/demo/pnl', () => ({ body: portfolio })],
-      ['GET /instruments/rates', () => ({ body: { rates: [{ ask: 200 }] } })],
+      ['GET /instruments/rates', () => ({ body: { rates: [{ ask: 200, date: new Date().toISOString() }] } })],
       ['POST /api/v2/trading/execution/demo/orders', () => ({ body: { orderId: 778 } })],
       ['GET /api/v2/trading/info/demo/orders:lookup', () => ({ body: { orderId: 778, status: { id: 4, errorMessage: 'Market closed' } } })],
       ['POST /market-close-orders/positions/999', () => ({ status: 400, body: { message: 'Position not found' } })],

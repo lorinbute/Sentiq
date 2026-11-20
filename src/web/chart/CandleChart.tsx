@@ -1339,7 +1339,7 @@ export function CandleChart({
   useEffect(() => {
     const cur = seriesRef.current?.current;
     if (!cur) return;
-    cur.setData(lastBar ? { price: lastBar.c, precision: digits, closesAt: countdown && tfMs > 0 ? Math.min(lastBar.t + tfMs, closeCap ?? Number.POSITIVE_INFINITY) : null, format: fmtBarCountdown, fontSize: scaleFont } : null);
+    cur.setData(lastBar ? { price: lastBar.c, precision: digits, bar: countdown && tfMs > 0 ? { open: lastBar.t, step: tfMs, cap: closeCap ?? null } : null, format: fmtBarCountdown, fontSize: scaleFont } : null);
     if (!countdown || !lastBar) return;
     const t = setInterval(() => cur.tick(), 1000);
     return () => clearInterval(t);

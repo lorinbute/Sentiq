@@ -13,3 +13,16 @@ export function fmtBarCountdown(ms: number): string {
   if (h > 0) return `${pad(h)}:${pad(m)}:${pad(s)}`;
   return `${pad(m)}:${pad(s)}`;
 }
+
+/**
+ * FIX-STOCKCOUNTDOWN: the time left in the period now (ms), from the last candle's open: a share's candles are read once
+ * a minute (no live feed), so the period after the last one read counts on (the countdown stood at "00:00" once that
+ * one's time had passed); at most until the market closes (`cap`). Null: none left (under a second, a closed market).
+ */
+export function barLeft(lastOpen: number, stepMs: number, cap: number | null, now: number): number | null {
+  let closes = lastOpen + stepMs;
+  if (stepMs > 0 && closes <= now) closes += Math.floor((now - closes) / stepMs) * stepMs + stepMs;
+  if (cap !== null) closes = Math.min(closes, cap);
+  const left = closes - now;
+  return left >= 1000 ? left : null;
+}

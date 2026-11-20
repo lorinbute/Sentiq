@@ -418,6 +418,13 @@ describe('stocks in the news (FD-SENTIQ §4.4)', () => {
     expect(await db.all('SELECT id FROM sources WHERE auto IS NOT NULL')).toEqual([]);
     expect(await db.all("SELECT id FROM news WHERE id = 'n1'")).toEqual([]);
     expect(await db.all("SELECT news_id FROM news_coins WHERE news_id = 'n1'")).toEqual([]);
+    // FIX-SOURCEDELETE: a feed the admin deleted is not made again while the stock is followed, added again or not.
+    await add('MSFT');
+    await syncStockSources(db);
+    await db.run("INSERT INTO deleted_sources(source_id, url, deleted_at) VALUES ('nasdaq-msft', ?, 1)", [nasdaqFeedUrl('MSFT')]);
+    await db.run("DELETE FROM sources WHERE id = 'nasdaq-msft'");
+    await syncStockSources(db, 'MSFT');
+    expect(await db.all('SELECT id FROM sources WHERE auto IS NOT NULL')).toEqual([]);
   });
 
   it('deletes a feed left switched off by the old rule (FD-AUTOFEED §2: BSOL)', async () => {

@@ -2,8 +2,10 @@
 // immediate limit; by USD amount or units; buy or short; leverage, SL / TP), closing positions (all or some units),
 // cancelling a pending order. A 200 means "accepted for processing": the outcome is read back from the order lookup.
 import { randomUUID } from 'node:crypto';
-import { etoroProtectionOf, type ClosablePosition, type HeldPosition, type InstrumentInfo, type ModifyPreview, type ModifyResult, type ModifyStepPlan, type ModifyTicket, type OrderPreview, type OrderResult, type OrderTicket, type TradeMarket, type TradeSymbol } from '../../../shared/trading.ts';
+import { ETORO_LEVERAGE_TEXT, etoroProtectionOf, isEtoroLeverage, type ClosablePosition, type HeldPosition, type InstrumentInfo, type ModifyPreview, type ModifyResult, type ModifyStepPlan, type ModifyTicket, type OrderPreview, type OrderResult, type OrderTicket, type TradeMarket, type TradeSymbol } from '../../../shared/trading.ts';
+import { ETORO_COMMODITY_TEXT, etoroInverseOf, fxCompact, fxFromCompact, fxKindOf } from '../../../shared/fx.ts';
 import { brokerCall } from './http.ts';
+import { httpRequest } from '../../net/http.ts';
 import { commonChecks, fmtPlain, modifyStatus, protectionChecks, TradingError, type CancelInput, type ModifyPlan, type Trader } from './types.ts';
 
 const BASE = 'https://public-api.etoro.com';
@@ -52,15 +54,127 @@ interface Held {
   rate: number | null;
 }
 
+/**
+ * FD-FXCOMMODITIES: eToro's symbol of Sentiq's: a forex pair without its "/" (EUR/USD → EURUSD, eToro's own: EURUSD,
+ * GBPUSD, AUDUSD, NZDUSD seen on eToro on 19 Nov 2026), a share as it is (AAPL/USD → AAPL). A commodity of the charts
+ * (XAU/USD, HG1) is refused (the user: only forex on eToro); one of eToro's own ("GOLD") is a symbol as any other.
+ */
+export function etoroSymbolOf(symbol: string): string {
+  const s = symbol.trim().toUpperCase();
+  const td = fxKindOf(s) ? s : fxFromCompact(s);
+  const kind = td ? fxKindOf(td) : null;
+  if (kind === 'commodity') throw new TradingError('INVALID', ETORO_COMMODITY_TEXT);
+  if (kind === 'forex' && td) return etoroInverseOf(td) ?? fxCompact(td);
+  return s.replace(/\/.*$/, '');
+}
+
+/** 1/x with the digits a rate has (eToro takes a rate, not a long fraction). */
+const flip = (x: number | undefined): number | undefined => (x === undefined || !(x > 0) ? x : Number((1 / x).toPrecision(6)));
+
+/** An eToro position on USDJPY as one on JPY/USD: the other side, its units in yen (at its own rate), its rate 1/x. */
+function inverted(p: ClosablePosition, rate: number | null): ClosablePosition {
+  const r = p.openRate ?? rate;
+  return { ...p, isBuy: !p.isBuy, units: r ? Number((p.units * r).toFixed(4)) : p.units, openRate: p.openRate ? 1 / p.openRate : null };
+}
+
+/**
+ * FIX-ETOROSTALE: a bot takes eToro's rate only this fresh, by the rate's own time. eToro's public API was seen giving
+ * rates 3 h 26 min old (19 Nov 2026: EUR/USD at 23:11 UTC was Twelve Data's of 19:46); an older one is not used.
+ */
+export const ETORO_RATE_MAX_AGE_MS = 60_000;
+
+/** FIX-BOT24: eToro's instrument ids by symbol (they never change). */
+const instrumentIds = new Map<string, number>();
+/**
+ * FIX-ETOROLIMIT (the user: „eToro limitează cererile acum” on EUR/USD): an instrument found once is kept (its id never
+ * changes), so a bot's check, an order and a look no longer search eToro for it each time.
+ */
+const resolved = new Map<string, { instrumentId: number; symbol: string; name: string; marketData: boolean }>();
+/**
+ * FIX-ETOROLIMIT: eToro's rates were seen hours late (FIX-ETOROSTALE): once one is, they are not asked for again for 10
+ * minutes (each would be dropped, and each costs a request of eToro's limit).
+ */
+const RATES_STALE_PAUSE_MS = 10 * 60_000;
+let ratesStaleUntil = 0;
+/** Tests: forget what was kept. */
+export function resetEtoroCaches(): void {
+  instrumentIds.clear();
+  resolved.clear();
+  ratesStaleUntil = 0;
+  listed = null;
+}
+
+/**
+ * FIX-ETOROSEARCH (the user: „nu pot adăuga ANT în bot … eroarea că ANT nu există … e fals”): eToro's search filters a
+ * symbol partly too (43 of its symbols contain „ANT”: ANT.24-7, ANT.RTH, ANTO.L…), a page at a time: the exact one is
+ * looked for on its first pages, 100 a page.
+ */
+export const ETORO_SEARCH_PAGE = 100;
+export const ETORO_SEARCH_PAGES = 5;
+/** eToro's own list of its instruments (its site's, public), read only when the search does not find a symbol. */
+export const ETORO_LISTED_URL = 'https://api.etorostatic.com/sapi/instrumentsmetadata/V1.1/instruments';
+const LISTED_TTL = 6 * 3_600_000;
+let listed: { at: number; bySymbol: Map<string, { instrumentId: number; name: string; type: number; exchange: number }>; byId: Map<number, { symbol: string; name: string; type: number }> } | null = null;
+
+/**
+ * FIX-ETOROSEARCH: a symbol in eToro's own list (exact, upper case): its id, name, and whether the market data prices
+ * the same thing (a forex pair, type 1; a share or an ETF, types 5 / 6, of Nasdaq or NYSE, exchanges 4 / 5); null when
+ * not there. The list (16 MB) is read at most every 6 hours, only after a search that did not find a symbol.
+ */
+async function listedNow(now: number): Promise<NonNullable<typeof listed>> {
+  if (!listed || now - listed.at > LISTED_TTL) {
+    const r = await httpRequest(ETORO_LISTED_URL, { headers: { Accept: 'application/json' }, timeoutMs: 30_000, maxBytes: 64 * 1024 * 1024 });
+    if (r.status !== 200) throw new TradingError('INVALID', `Lista instrumentelor eToro nu s-a putut citi (HTTP ${r.status}).`);
+    const rows = arr(obj(JSON.parse(r.body)).InstrumentDisplayDatas);
+    const bySymbol = new Map<string, { instrumentId: number; name: string; type: number; exchange: number }>();
+    const byId = new Map<number, { symbol: string; name: string; type: number }>();
+    for (const row of rows) {
+      const sym = str(row.SymbolFull)?.toUpperCase();
+      const id = num(row.InstrumentID);
+      if (!sym || id === null) continue;
+      const name = str(row.InstrumentDisplayName) ?? sym;
+      if (!bySymbol.has(sym)) bySymbol.set(sym, { instrumentId: id, name, type: num(row.InstrumentTypeID) ?? 0, exchange: num(row.ExchangeID) ?? 0 });
+      if (!byId.has(id)) byId.set(id, { symbol: sym, name, type: num(row.InstrumentTypeID) ?? 0 });
+    }
+    listed = { at: now, bySymbol, byId };
+  }
+  return listed;
+}
+
+/**
+ * FIX-ETOROMETA: an instrument by its id in eToro's own list (its symbol, name and type): for the portfolio's
+ * instruments eToro's market data does not know yet (new listings: SPCX, ANT), else shown by number („#15618”).
+ */
+export async function etoroListedById(id: number, now = Date.now()): Promise<{ symbol: string; name: string; type: number } | null> {
+  return (await listedNow(now)).byId.get(id) ?? null;
+}
+
+export async function etoroListed(symbol: string, now = Date.now()): Promise<{ instrumentId: number; name: string; marketData: boolean } | null> {
+  const hit = (await listedNow(now)).bySymbol.get(symbol.toUpperCase());
+  if (!hit) return null;
+  return { instrumentId: hit.instrumentId, name: hit.name, marketData: hit.type === 1 || ((hit.type === 5 || hit.type === 6) && (hit.exchange === 4 || hit.exchange === 5)) };
+}
+
 export class EtoroTrader implements Trader {
   private readonly headers: Record<string, string>;
   private readonly demo: boolean;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly fallback: (symbol: string) => Promise<number | null>;
 
-  constructor(creds: Record<string, string>, env: string, sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms))) {
+  /**
+   * `fallback`: FIX-ETOROSTALE, the price of a symbol from the market data (Nasdaq for a share, Twelve Data for a pair),
+   * when eToro's rate is not fresh.
+   */
+  constructor(
+    creds: Record<string, string>,
+    env: string,
+    sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+    fallback: (symbol: string) => Promise<number | null> = async () => null,
+  ) {
     this.headers = { 'x-api-key': creds.publicKey ?? '', 'x-user-key': creds.userKey ?? '' };
     this.demo = env === 'demo';
     this.sleep = sleep;
+    this.fallback = fallback;
   }
 
   private call(method: 'GET' | 'POST' | 'DELETE' | 'PATCH', path: string, requestId: string, body?: unknown): Promise<unknown> {
@@ -75,24 +189,91 @@ export class EtoroTrader implements Trader {
     return [];
   }
 
-  /** The instrument id of a symbol (exact match on eToro's full symbol). */
-  private async resolve(symbol: string): Promise<{ instrumentId: number; symbol: string; name: string }> {
-    const want = symbol.trim().toUpperCase().replace(/\/.*$/, '');
-    if (/^#\d+$/.test(want)) return { instrumentId: Number(want.slice(1)), symbol: want, name: want };
-    const r = obj(await this.call('GET', `/api/v1/market-data/search?internalSymbolFull=${encodeURIComponent(want)}`, randomUUID()));
-    const hit = arr(r.items).find((i) => (str(i.internalSymbolFull) ?? '').toUpperCase() === want);
+  /**
+   * The instrument id of a symbol (exact match on eToro's full symbol). `marketData`: FIX-ETOROSTALE, the market data
+   * prices the same instrument (a share of Nasdaq / NYSE, a forex pair); eToro's other symbols may be another thing there
+   * (eToro's gold "GOLD" is Barrick at Nasdaq).
+   */
+  private async resolve(symbol: string): Promise<{ instrumentId: number; symbol: string; name: string; marketData: boolean }> {
+    const want = etoroSymbolOf(symbol);
+    if (/^#\d+$/.test(want)) return { instrumentId: Number(want.slice(1)), symbol: want, name: want, marketData: false };
+    const kept = resolved.get(want);
+    if (kept) return kept;
+    // FIX-ETOROSEARCH: the exact symbol among the partial matches, on the first pages.
+    let hit: Record<string, unknown> | undefined;
+    for (let page = 1; page <= ETORO_SEARCH_PAGES && !hit; page++) {
+      const r = obj(await this.call('GET', `/api/v1/market-data/search?internalSymbolFull=${encodeURIComponent(want)}&pageSize=${ETORO_SEARCH_PAGE}&pageNumber=${page}`, randomUUID()));
+      const items = arr(r.items);
+      hit = items.find((i) => (str(i.internalSymbolFull) ?? '').toUpperCase() === want);
+      const total = num(r.totalItems);
+      if (items.length < ETORO_SEARCH_PAGE || (total !== null && page * ETORO_SEARCH_PAGE >= total)) break;
+    }
     const id = hit ? num(hit.instrumentId ?? hit.instrumentID ?? hit.InstrumentID) : null;
-    if (!hit || id === null) throw new TradingError('INVALID', `eToro nu are simbolul ${want}.`);
-    return { instrumentId: id, symbol: want, name: str(hit.displayname ?? hit.instrumentDisplayName ?? hit.displayName) ?? want };
+    if (!hit || id === null) {
+      // Not found by the search (a listing too new for it, or past its pages): eToro's own list of its instruments.
+      const own = await etoroListed(want).catch(() => null);
+      if (!own) throw new TradingError('INVALID', `eToro nu are simbolul ${want}.`);
+      const out = { instrumentId: own.instrumentId, symbol: want, name: own.name, marketData: own.marketData };
+      resolved.set(want, out);
+      return out;
+    }
+    const cls = str(hit.internalAssetClassName) ?? '';
+    const exchange = str(hit.internalExchangeName) ?? '';
+    const marketData = cls === 'Forex' || (/^(stocks|etf)$/i.test(cls) && /^(nasdaq|nyse)/i.test(exchange));
+    const out = { instrumentId: id, symbol: want, name: str(hit.displayname ?? hit.instrumentDisplayName ?? hit.displayName) ?? want, marketData };
+    resolved.set(want, out);
+    while (resolved.size > 2000) resolved.delete(resolved.keys().next().value as string);
+    return out;
   }
 
-  private async rate(instrumentId: number): Promise<number | null> {
+  /** FIX-ETOROLIMIT: whether eToro has a symbol (a bot's check), from the instrument kept or one search. */
+  async known(symbol: string): Promise<void> {
+    await this.resolve(symbol);
+  }
+
+  /**
+   * FIX-BOT24: an instrument's price now (its id found once, then kept): a bot's price at any hour, on any exchange.
+   * FIX-ETOROSTALE: null when eToro's rate is older than ETORO_RATE_MAX_AGE_MS or has no time (the bot takes another).
+   */
+  async price(symbol: string, now = Date.now()): Promise<number | null> {
+    const want = etoroSymbolOf(symbol);
+    let id = instrumentIds.get(want);
+    if (id === undefined) {
+      id = (await this.resolve(want)).instrumentId;
+      instrumentIds.set(want, id);
+      while (instrumentIds.size > 2000) instrumentIds.delete(instrumentIds.keys().next().value as string);
+    }
+    if (now < ratesStaleUntil) return null;
+    const r = await this.rateAt(id);
+    if (r.price !== null && r.at !== null && now - r.at > ETORO_RATE_MAX_AGE_MS) ratesStaleUntil = now + RATES_STALE_PAUSE_MS;
+    if (r.price === null || r.at === null || now - r.at > ETORO_RATE_MAX_AGE_MS) return null;
+    // FIX-ETOROFX: JPY/USD's price through USDJPY's.
+    return etoroInverseOf(symbol) && r.price > 0 ? 1 / r.price : r.price;
+  }
+
+  /**
+   * FIX-ETOROSTALE (the user's choice): the price the order form shows and checks with: eToro's rate when it is at most
+   * ETORO_RATE_MAX_AGE_MS old, else the market data's (Nasdaq for a share, Twelve Data for a pair), else none.
+   */
+  private async lastOf(ins: { instrumentId: number; symbol: string; marketData: boolean }): Promise<number | null> {
+    const now = Date.now();
+    if (now >= ratesStaleUntil) {
+      const r = await this.rateAt(ins.instrumentId);
+      if (r.price !== null && r.at !== null && now - r.at <= ETORO_RATE_MAX_AGE_MS) return r.price;
+      if (r.price !== null && r.at !== null) ratesStaleUntil = now + RATES_STALE_PAUSE_MS;
+    }
+    return ins.marketData ? this.fallback(ins.symbol).catch(() => null) : null;
+  }
+
+  /** An instrument's rate and its time (ms; null without one). */
+  private async rateAt(instrumentId: number): Promise<{ price: number | null; at: number | null }> {
     try {
       const r = obj(await this.call('GET', `/api/v1/market-data/instruments/rates?instrumentIds=${instrumentId}`, randomUUID()));
       const row = arr(r.rates)[0] ?? arr(r.items)[0] ?? {};
-      return num(row.lastExecution ?? row.ask ?? row.bid ?? row.rate);
+      const at = Date.parse(str(row.date) ?? '');
+      return { price: num(row.lastExecution ?? row.ask ?? row.bid ?? row.rate), at: Number.isFinite(at) ? at : null };
     } catch {
-      return null;
+      return { price: null, at: null };
     }
   }
 
@@ -125,7 +306,11 @@ export class EtoroTrader implements Trader {
 
   async instrument(_market: TradeMarket, symbol: string): Promise<InstrumentInfo> {
     const ins = await this.resolve(symbol);
-    const [{ cash, held }, rate] = await Promise.all([this.portfolio(ins.instrumentId), this.rate(ins.instrumentId)]);
+    const [{ cash, held: raw }, rawRate] = await Promise.all([this.portfolio(ins.instrumentId), this.lastOf(ins)]);
+    // FIX-ETOROFX: JPY/USD through USDJPY: its positions and its rate seen as JPY/USD's (the bot's own terms).
+    const inverse = etoroInverseOf(symbol) !== null;
+    const held = inverse ? { ...raw, positions: raw.positions.map((p) => inverted(p, rawRate)) } : raw;
+    const rate = inverse && rawRate ? 1 / rawRate : rawRate;
     const longs = held.positions.filter((p) => p.isBuy);
     const shorts = held.positions.filter((p) => !p.isBuy);
     // One side: the position, as before. Both (FD-HEDGEALL: eToro keeps every position apart, a short beside the
@@ -140,7 +325,7 @@ export class EtoroTrader implements Trader {
       name: ins.name,
       currency: 'USD',
       base: ins.symbol,
-      last: rate ?? held.rate,
+      last: rate,
       amountStep: null,
       minAmount: null,
       minCost: null,
@@ -157,9 +342,10 @@ export class EtoroTrader implements Trader {
   }
 
   async normalize(t: OrderTicket): Promise<OrderPreview> {
+    const via = etoroInverseOf(t.symbol);
+    if (via) return this.normalizeInverse(t, via);
     const ins = await this.resolve(t.symbol);
-    const [{ cash, held }, rate] = await Promise.all([this.portfolio(ins.instrumentId), this.rate(ins.instrumentId)]);
-    const last = rate ?? held.rate;
+    const [{ cash, held }, last] = await Promise.all([this.portfolio(ins.instrumentId), this.lastOf(ins)]);
     const warnings: string[] = [];
     const errors: string[] = [];
     if (t.market !== 'stock') errors.push('Pe eToro, instrumentele se tranzacționează ca acțiuni (simbolul eToro).');
@@ -190,6 +376,8 @@ export class EtoroTrader implements Trader {
     } else {
       if (!['market', 'mit', 'limit_ioc'].includes(t.kind)) errors.push('eToro deschide poziții la piață, la un preț țintă (market-if-touched) sau cu o limită imediată.');
       const lev = t.leverage ?? 1;
+      // FIX-ETOROLEV3: another leverage is refused by eToro.
+      if (!isEtoroLeverage(lev)) errors.push(ETORO_LEVERAGE_TEXT);
       if ((lev > 1 || t.side === 'sell') && t.stopLoss === undefined) errors.push(lev > 1 ? 'eToro cere stop loss la un levier peste 1×.' : 'eToro cere stop loss la o poziție short.');
       if (t.kind === 'limit_ioc' && t.price !== undefined && last !== null && Math.abs(t.price - last) / last > 0.1) errors.push(`eToro refuză o limită la peste 10% de prețul de acum (${fmtPlain(last)}).`);
       value = t.amountIn === 'quote' ? t.amount : last !== null ? t.amount * last : null;
@@ -220,6 +408,62 @@ export class EtoroTrader implements Trader {
     };
   }
 
+  /**
+   * FIX-ETOROFX: an order on JPY/USD as eToro takes it, on USDJPY: the other side, its levels and prices 1/x, its units
+   * (yen) as dollars at USDJPY's rate now (eToro's when fresh, else Twelve Data's), a part closed as the same share of
+   * the positions' dollars. The form's preview is the one sent (its ticket), with what was turned said first.
+   */
+  private async normalizeInverse(t: OrderTicket, via: string): Promise<OrderPreview> {
+    const ins = await this.resolve(t.symbol);
+    const [{ held }, rate] = await Promise.all([this.portfolio(ins.instrumentId), this.lastOf(ins)]);
+    const pair = `USD/${via.slice(3)}`;
+    let u: OrderTicket;
+    if (t.close) {
+      let units = t.close.units;
+      if (units !== undefined) {
+        const picked = held.positions.filter((p) => t.close?.positionIds.includes(p.id));
+        const dollars = picked.reduce((a, p) => a + p.units, 0);
+        const own = picked.reduce((a, p) => a + p.units * (p.openRate ?? rate ?? 0), 0);
+        if (!(own > 0)) throw new TradingError('INVALID', `Unitățile pozițiilor ${pair} nu se pot citi acum.`);
+        units = Number(((units / own) * dollars).toFixed(4));
+      }
+      u = { ...t, symbol: via, side: t.side === 'buy' ? 'sell' : 'buy', close: { ...t.close, ...(units !== undefined ? { units } : {}) } };
+    } else {
+      if (t.amountIn !== 'quote' && !(rate && rate > 0)) throw new TradingError('INVALID', `Prețul ${pair} nu se poate citi acum: unitățile ordinului nu se pot calcula.`);
+      u = {
+        ...t,
+        symbol: via,
+        side: t.side === 'buy' ? 'sell' : 'buy',
+        amount: t.amountIn === 'quote' ? t.amount : Number((t.amount / (rate as number)).toFixed(4)),
+        ...(t.stopLoss !== undefined ? { stopLoss: flip(t.stopLoss) } : {}),
+        ...(t.takeProfit !== undefined ? { takeProfit: flip(t.takeProfit) } : {}),
+        ...(t.price !== undefined ? { price: flip(t.price) } : {}),
+        ...(t.triggerPrice !== undefined ? { triggerPrice: flip(t.triggerPrice) } : {}),
+      };
+    }
+    const p = await this.normalize(u);
+    const what = t.close
+      ? `La eToro, ${t.symbol} e ${pair}: se închid pozițiile ${pair}.`
+      : `La eToro, ${t.symbol} se tranzacționează ca ${pair}: ${t.side === 'buy' ? 'un long' : 'un short'} pe ${t.symbol} e ${t.side === 'buy' ? 'un short' : 'un long'} pe ${pair}${u.stopLoss !== undefined ? `, SL ${fmtPlain(u.stopLoss)}` : ''}${u.takeProfit !== undefined ? `, TP ${fmtPlain(u.takeProfit)}` : ''}.`;
+    return { ...p, warnings: [what, ...p.warnings] };
+  }
+
+  /** An order's lookup read as a state: filled, rejected (with eToro's reason), cancelled; null: still in flight. */
+  private static stateOf(r: Record<string, unknown>): { status: OrderResult['status']; message: string | null } | null {
+    const status = obj(r.status);
+    const id = num(status.id);
+    if (id === 3 || id === 5) return { status: 'filled', message: null };
+    if (id === 4 || id === 10) return { status: 'rejected', message: `Refuzat de eToro: ${str(status.errorMessage) ?? str(status.errorCode) ?? 'fără motiv'}` };
+    if (id === 7 || id === 9) return { status: 'cancelled', message: 'Anulat la eToro.' };
+    return null;
+  }
+
+  /** FIX-ETOROPENDING: an order's state now (one lookup); still in flight: pending. */
+  async lookup(orderId: string): Promise<{ status: OrderResult['status']; message: string | null }> {
+    const r = obj(await this.call('GET', `/api/v2/trading/info/${this.seg()}orders:lookup?orderId=${encodeURIComponent(orderId)}`, randomUUID()));
+    return EtoroTrader.stateOf(r) ?? { status: 'pending', message: null };
+  }
+
   /** Reads the order back: filled, rejected (with the reason) or still in flight after a few seconds. */
   private async outcome(orderId: string | null, requestId: string): Promise<OrderResult> {
     for (let i = 0; i < LOOKUP_TRIES; i++) {
@@ -231,12 +475,9 @@ export class EtoroTrader implements Trader {
       } catch {
         continue;
       }
-      const status = obj(r.status);
-      const id = num(status.id);
       const oid = str(r.orderId) ?? orderId;
-      if (id === 3 || id === 5) return { status: 'filled', orderId: oid, message: null, followUps: [] };
-      if (id === 4 || id === 10) return { status: 'rejected', orderId: oid, message: `Refuzat de eToro: ${str(status.errorMessage) ?? str(status.errorCode) ?? 'fără motiv'}`, followUps: [] };
-      if (id === 7 || id === 9) return { status: 'cancelled', orderId: oid, message: null, followUps: [] };
+      const s = EtoroTrader.stateOf(r);
+      if (s) return { status: s.status, orderId: oid, message: s.status === 'cancelled' ? null : s.message, followUps: [] };
     }
     return { status: 'pending', orderId, message: 'Primit de eToro; se execută când piața permite (verifică pagina Tranzacții).', followUps: [] };
   }

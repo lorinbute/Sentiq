@@ -2,6 +2,7 @@
 // positions, waiting orders and closed trades are in the database. Orders are checked like a platform's (the same
 // shapes: OrderPreview, ModifyPlan…), filled at the prices the charts show (prices.ts), and the waiting ones, the stop
 // losses / take profits and the liquidations are looked at every few seconds (`match`, a job). Never an order anywhere.
+import { fxCompact, fxKindOf } from '../../shared/fx.ts';
 import type { Db } from '../db/database.ts';
 import type { Logger } from '../log.ts';
 import { ValidationError } from '../settings.ts';
@@ -163,10 +164,15 @@ const parseOrderId = (s: string): { kind: 'order' | 'sl' | 'tp'; id: number } | 
   return { kind: m[1] === 'p' ? 'order' : m[1] === 'sl-' ? 'sl' : 'tp', id: Number(m[2]) };
 };
 
-/** A symbol as the profile keeps it: a share without the `/USD` the pages show it with (AAPL/USD → AAPL), upper case. */
+/**
+ * A symbol as the profile keeps it: a share without the `/USD` the pages show it with (AAPL/USD → AAPL), upper case;
+ * FD-FXCOMMODITIES: a pair or a commodity of the charts in its compact form, as eToro's (EUR/USD → EURUSD, priced from
+ * Twelve Data by it).
+ */
 const ownSymbol = (market: TradeMarket | PaperMarket, symbol: string): string => {
   const s = symbol.trim().toUpperCase();
-  return market === 'stock' ? (s.split('/')[0] as string) : s;
+  if (market !== 'stock') return s;
+  return fxKindOf(s) ? fxCompact(s) : (s.split('/')[0] as string);
 };
 
 /** What the pages call a paper symbol: a share as `AAPL`, a coin as its pair. */

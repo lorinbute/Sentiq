@@ -23,8 +23,9 @@ import type { TraderFactory } from '../exchange/trading/service.ts';
 import { TradingError, type Trader } from '../exchange/trading/types.ts';
 import type { MarketData } from '../market/market.ts';
 import type { Candle, SlingshotResult, SlingshotSetup, SlingshotSignal } from '../../shared/indicator/slingshot.ts';
-import type { OrderTicket } from '../../shared/trading.ts';
-import { DEFAULT_WEIGHTS, type BotCheck, type BotDetail, type BotInput, type BotLevel, type BotView } from '../../shared/bot.ts';
+import { ETORO_LEVERAGE_TEXT, type OrderTicket } from '../../shared/trading.ts';
+import { ETORO_COMMODITY_TEXT, FX_ACCOUNT_TEXT, FX_KEY_TEXT } from '../../shared/fx.ts';
+import { DEFAULT_WEIGHTS, LEVERAGE_FUTURES, type BotCheck, type BotDetail, type BotInput, type BotLevel, type BotView } from '../../shared/bot.ts';
 import { BotEngine, commandLeft, type Bar } from './engine.ts';
 import type { BotState } from './state.ts';
 import { tfSeconds } from '../../shared/time.ts';
@@ -54,9 +55,9 @@ let positions: Portfolio['positions'];
 /** FIX-BOTSHORTS: the futures account's free USDT. */
 let futuresFree: number | null;
 /** What Slingshot says on each closed bar (an hour each); null: no bar. */
-let barSpec: { signals: Partial<SlingshotSignal>[]; alerts?: SlingshotResult['alerts']; setups?: Partial<SlingshotSetup>[]; range?: { high: number; low: number } } | null;
+let barSpec: { signals: Partial<SlingshotSignal>[]; alerts?: SlingshotResult['alerts']; setups?: Partial<SlingshotSetup>[]; range?: { high: number; low: number }; candles?: Bar['candles'] } | null;
 const HOUR = 60 * MIN;
-let mood: { index: number; area: number; areaCount: number };
+let mood: { index: number; area: number; areaCount: number; stocks?: number };
 let aiAnswer: { decision: 'enter' | 'skip'; confidence: number; reason: string; risks: string[]; amount?: number } | null;
 /** What the AI was asked (FD-BOTSLRR: no R:R in it). */
 let aiAsked: { system: string; prompt: string }[] = [];
@@ -98,6 +99,9 @@ let etoroPositions: { id: string; units: number; isBuy: boolean; openedAt: numbe
 /** eToro shows a new position only at the next reading (the order still being processed). */
 let etoroLate: boolean;
 let etoroLateList: typeof etoroPositions;
+/** FIX-ETOROPENDING: how eToro answers an opening (filled, refused, still waiting), and each order's state now. */
+let etoroAnswer: 'filled' | 'rejected' | 'pending';
+let etoroStates: Record<string, 'filled' | 'rejected' | 'cancelled' | 'pending'>;
 let etoroN = 0;
 const t212Trader = (): Trader => ({
   symbols: async () => [],
@@ -146,8 +150,21 @@ const etoroTrader = (): Trader => ({
         left -= take;
       }
       etoroPositions = etoroPositions.filter((x) => x.units > 1e-9);
-    } else (etoroLate ? etoroLateList : etoroPositions).push({ id: `e${++etoroN}`, units: t.amount, isBuy: t.side === 'buy', openedAt: clock });
+    } else {
+      const oid = `o${placed.length}`;
+      if (etoroAnswer === 'rejected') return { status: 'rejected', orderId: oid, message: 'Refuzat de eToro: levier nepermis', followUps: [] };
+      if (etoroAnswer === 'pending') {
+        etoroStates[oid] = 'pending';
+        return { status: 'pending', orderId: oid, message: 'Primit de eToro', followUps: [] };
+      }
+      (etoroLate ? etoroLateList : etoroPositions).push({ id: `e${++etoroN}`, units: t.amount, isBuy: t.side === 'buy', openedAt: clock });
+    }
     return { status: 'filled', orderId: `o${placed.length}`, message: null, followUps: [] };
+  },
+  price: async (symbol) => px[symbol] ?? null,
+  lookup: async (orderId) => {
+    const st = etoroStates[orderId] ?? 'filled';
+    return { status: st, message: st === 'rejected' ? 'Refuzat de eToro: levier nepermis' : st === 'cancelled' ? 'Anulat la eToro.' : null };
   },
 });
 const fakeTrader: TraderFactory = (a) => (a.exchange === 'trading212' ? t212Trader() : a.exchange === 'etoro' ? etoroTrader() : cryptoTrader());
@@ -180,9 +197,18 @@ const cryptoTrader = () => {
   return t;
 };
 
-/** A simulated US market, open. */
+/** A simulated US market, open (FIX-ETOROPENDING: closed when `marketClosed`). */
+let marketClosed = false;
+/** FD-FXCOMMODITIES: the forex week, closed over the weekend when set. */
+let fxClosed = false;
 const fakeStocks = {
-  confirmedStatus: async () => ({ state: 'open', label: 'Deschisă', opensAt: null, closesAt: null, fetchedAt: clock }),
+  /** FD-FXCOMMODITIES: a pair's or a commodity's Twelve Data quote. */
+  fxQuote: async (_userId: number, sym: string) => {
+    const p = px[sym];
+    if (p === undefined) throw new Error(`fără ${sym}`);
+    return { symbol: sym, last: p, change: null, changePct: null, open: !fxClosed, fetchedAt: clock };
+  },
+  confirmedStatus: async () => (marketClosed ? { state: 'closed', label: 'Închisă', opensAt: null, closesAt: null, fetchedAt: clock } : { state: 'open', label: 'Deschisă', opensAt: null, closesAt: null, fetchedAt: clock }),
   quote: async (sym: string) => {
     const p = px[sym];
     if (p === undefined) throw new Error(`fără ${sym}`);
@@ -277,7 +303,7 @@ const slingshot = (signals: Partial<SlingshotSignal>[], alerts: SlingshotResult[
 beforeEach(async () => {
   dir = mkdtempSync(path.join(tmpdir(), 'sq-bots-'));
   const config = { ...loadConfig({ SENTIQ_DATA_DIR: dir } as NodeJS.ProcessEnv), webDist: path.join(dir, 'no-web') };
-  ctx = await createContext(config, silentLogger, { nli: fakeNli, market: fakeMarket, clientFactory: fakeClients, traderFactory: fakeTrader, box: BOX, retryDelaysMs: [0, 0], db: await testDb() });
+  ctx = await createContext(config, silentLogger, { nli: fakeNli, market: fakeMarket, clientFactory: fakeClients, traderFactory: fakeTrader, box: BOX, retryDelaysMs: [0, 0], db: await testDb(), marketTape: null });
   app = await buildApp(ctx);
   await ctx.db.run('UPDATE users SET email = ?, name = ?, password_hash = ?, totp_secret = ?, totp_confirmed_at = 1 WHERE id = 1', ['admin@example.com', 'Admin', await hashPassword('Admin-password-1'), BOX.encrypt(newSecret())]);
   H = { host: 'localhost:4317', 'x-sentiq': '1', 'content-type': 'application/json', cookie: `sentiq_session=${await ctx.sessions.create(1, 'full')}` };
@@ -299,6 +325,9 @@ beforeEach(async () => {
   etoroPositions = [];
   etoroLate = false;
   etoroLateList = [];
+  etoroAnswer = 'filled';
+  etoroStates = {};
+  marketClosed = false;
   etoroN = 0;
   positions = [];
   futuresFree = 10_000;
@@ -317,7 +346,7 @@ beforeEach(async () => {
     // The closed bar of the bot's timeframe (an hour, a day for shares without a Twelve Data key).
     bars: async (_u, input, _s, now) => {
       const tf = tfSeconds(input.tf) * 1000;
-      return barSpec ? { ...slingshot(barSpec.signals, barSpec.alerts, Math.floor(now / tf) * tf - tf, barSpec.setups), ...(barSpec.range ?? {}) } : null;
+      return barSpec ? { ...slingshot(barSpec.signals, barSpec.alerts, Math.floor(now / tf) * tf - tf, barSpec.setups), ...(barSpec.range ?? {}), ...(barSpec.candles ? { candles: barSpec.candles } : {}) } : null;
     },
     accounts: Object.assign(Object.create(Object.getPrototypeOf(d.accounts)), d.accounts, {
       // FD-PAPER: a Paper Trading profile's portfolio is its own (the engine's); the other accounts are simulated here.
@@ -325,7 +354,7 @@ beforeEach(async () => {
     }),
     daily: Object.assign(Object.create(Object.getPrototypeOf(d.daily)), d.daily, {
       scopeFor: async () => null,
-      today: async () => ({ index: mood.index, confidence: 'high', counts: { positive: 10, neutral: 5, negative: 5, pending: 0, excluded: 0 }, breakdown: { crypto: { index: mood.area, raw: 0, weight: 1, count: mood.areaCount }, stocks: { index: 50, raw: 0, weight: 1, count: 5 }, macro: { index: 50, raw: 0, weight: 1, count: 5 }, geopolitics: { index: 50, raw: 0, weight: 1, count: 5 } }, drivers: { positive: [], negative: [] } }),
+      today: async () => ({ index: mood.index, confidence: 'high', counts: { positive: 10, neutral: 5, negative: 5, pending: 0, excluded: 0 }, breakdown: { crypto: { index: mood.area, raw: 0, weight: 1, count: mood.areaCount }, stocks: { index: mood.stocks ?? 50, raw: 0, weight: 1, count: 5 }, macro: { index: 50, raw: 0, weight: 1, count: 5 }, geopolitics: { index: 50, raw: 0, weight: 1, count: 5 } }, drivers: { positive: [], negative: [] } }),
       history: async () => [{ day: 'x', index: mood.index, confidence: 'high', count: 10, final: true }],
       coinItems: async () => [],
     }),
@@ -705,7 +734,8 @@ describe('real bots on shares (FD-BOT §10)', () => {
     const bot = await make({ ...stock, accountId: etoro, premium: { ...premium, direction: 'both' } });
     await firstBar();
     await nextBar({ signals: [{ entry: 195, sl: 190, tp: 230 }] });
-    expect(placed[0]).toMatchObject({ side: 'buy', amount: 0.5 });
+    // FIX-ETOROTP: the indicator's two levels go with the opening.
+    expect(placed[0]).toMatchObject({ side: 'buy', amount: 0.5, stopLoss: 190, takeProfit: 230 });
     let st = JSON.parse((await ctx.db.get<{ state: string }>('SELECT state FROM bots WHERE id = ?', [bot.id]))!.state) as BotState;
     expect(st.refs.AAPL).toEqual({ long: ['e1'], short: [] });
     px.AAPL = 231;
@@ -718,7 +748,7 @@ describe('real bots on shares (FD-BOT §10)', () => {
     etoroLate = true;
     await nextBar({ signals: [{ side: 'short', time: 9000, entry: 220, sl: 230, tp: 180 }] });
     // 100 USD at 216.
-    expect(placed[2]).toMatchObject({ side: 'sell', stopLoss: 230 });
+    expect(placed[2]).toMatchObject({ side: 'sell', stopLoss: 230, takeProfit: 180 });
     expect(placed[2]?.amount).toBeCloseTo(100 / 216, 9);
     expect(placed[2]).not.toHaveProperty('close');
     st = JSON.parse((await ctx.db.get<{ state: string }>('SELECT state FROM bots WHERE id = ?', [bot.id]))!.state) as BotState;
@@ -744,6 +774,120 @@ describe('real bots on shares (FD-BOT §10)', () => {
     expect(d.positions).toEqual([]);
     expect(d.history[0]).toMatchObject({ reason: 'external' });
     expect(placed).toHaveLength(1);
+  });
+
+  it('FIX-ETOROLEV: eToro takes a leverage as its app does: the check allows it (a stop loss needed), the opening carries it with its stop loss', async () => {
+    // Elsewhere off futures and Paper, still refused (Trading 212's shares).
+    expect((await post('/api/bots/check', { ...stock, accountId: t212, leverage: 2 })).json().errors).toContain(LEVERAGE_FUTURES);
+    const lev2 = { ...stock, accountId: etoro, leverage: 2 };
+    const r = (await post('/api/bots/check', lev2)).json() as BotCheck;
+    expect(r.errors).toEqual([]);
+    expect(r.warnings.join(' ')).toMatch(/stop loss-ul fiecărei poziții cu levier/);
+    // A leveraged DCA long needs the cycle's stop loss; a leveraged long grid its „Oprește sub”.
+    const dcaLong = { strategy: 'dca', ...common, exec: 'real', accountId: etoro, market: 'stock', symbols: ['AAPL'], leverage: 2, dca };
+    expect((await post('/api/bots/check', dcaLong)).json().errors).toContain('eToro cere stop loss la un levier peste 1×: pune stop loss-ul ciclului.');
+    const gridLong = { strategy: 'grid', ...common, exec: 'real', accountId: etoro, market: 'stock', symbols: ['AAPL'], leverage: 2, grid: { ...grid, lower: 190, upper: 210 } };
+    expect((await post('/api/bots/check', gridLong)).json().errors.join(' ')).toMatch(/pune „Oprește sub”/);
+    // Slingshot at 2×: the opening carries the leverage and the trade's stop loss; the position is twice its margin.
+    await make(lev2);
+    await firstBar();
+    await nextBar({ signals: [{ entry: 195, sl: 190, tp: 230 }] });
+    expect(placed[0]).toMatchObject({ side: 'buy', market: 'stock', leverage: 2, stopLoss: 190, takeProfit: 230 });
+    expect(placed[0]).not.toHaveProperty('marginMode');
+    expect(placed[0]?.amount).toBeCloseTo(1, 9);
+  });
+
+  it('FIX-ETOROPENDING: an opening eToro refuses is no position, its reason said', async () => {
+    const bot = await make({ ...stock, accountId: etoro, premium: { ...premium, direction: 'both' } });
+    await firstBar();
+    // Refused at once: nothing noted, the reason said.
+    etoroAnswer = 'rejected';
+    await nextBar({ signals: [{ entry: 195, sl: 190, tp: 230 }] });
+    expect(placed).toHaveLength(1);
+    let d = await detail(bot.id);
+    expect(d.positions).toEqual([]);
+    expect(d.events.map((e) => e.message).join(' ')).toMatch(/levier nepermis/);
+  });
+
+  it('FIX-ETOROPENDING: an opening still waiting at eToro is pending; when eToro cancels it, it goes without a result', async () => {
+    const bot = await make({ ...stock, accountId: etoro, premium: { ...premium, direction: 'both' } });
+    await firstBar();
+    // Received, still waiting: the position is pending (no result yet).
+    etoroAnswer = 'pending';
+    await nextBar({ signals: [{ entry: 195, sl: 190, tp: 230 }] });
+    expect(placed).toHaveLength(1);
+    let d = await detail(bot.id);
+    expect(d.positions).toHaveLength(1);
+    expect(d.positions[0]).toMatchObject({ side: 'long', pending: true, unrealized: null });
+    await look(2 * MIN);
+    expect((await detail(bot.id)).positions[0]).toMatchObject({ pending: true });
+    // eToro cancels it: the position goes, without a trade.
+    etoroStates.o1 = 'cancelled';
+    await look(2 * MIN);
+    d = await detail(bot.id);
+    expect(d.positions).toEqual([]);
+    expect(d.history).toEqual([]);
+    expect(d.events.map((e) => e.message).join(' ')).toMatch(/eToro nu a deschis poziția long \(Anulat la eToro\): botul a scos-o/);
+    const st = JSON.parse((await ctx.db.get<{ state: string }>('SELECT state FROM bots WHERE id = ?', [bot.id]))!.state) as BotState;
+    expect(st.refsWait.AAPL).toBeUndefined();
+  });
+
+  it('FIX-ETOROPENDING: an older wait without its order\'s id: the order found in the log, refused there, the position goes', async () => {
+    const bot = await make({ ...stock, accountId: etoro });
+    await firstBar();
+    etoroAnswer = 'pending';
+    await nextBar({ signals: [{ entry: 195, sl: 190, tp: 230 }] });
+    // As a wait saved before the id was kept (the AMD short of 19 Nov 2026), its order refused in the log.
+    const row = await ctx.db.get<{ state: string }>('SELECT state FROM bots WHERE id = ?', [bot.id]);
+    const st = JSON.parse(row!.state) as BotState;
+    const at = st.refsWait.AAPL!.at;
+    delete st.refsWait.AAPL?.orderId;
+    await ctx.db.run('UPDATE bots SET state = ? WHERE id = ?', [JSON.stringify(st), bot.id]);
+    // The log's time is the server's own (here the bot's clock has moved on by days).
+    await ctx.db.run("UPDATE trade_log SET status = N'rejected', message = N'Refuzat de eToro: levier nepermis', created_at = ? WHERE symbol = N'AAPL'", [at]);
+    // With the market closed too (no price read): eToro is asked all the same.
+    marketClosed = true;
+    await look(2 * MIN);
+    const d = await detail(bot.id);
+    expect(d.positions).toEqual([]);
+    expect(d.history).toEqual([]);
+    expect(d.events.map((e) => e.message).join(' ')).toMatch(/eToro nu a deschis poziția long \(Refuzat de eToro: levier nepermis\)/);
+  });
+
+  it('FIX-BOT24: a bot on eToro runs while the US market is closed, at eToro\'s price: it enters and exits at its levels', async () => {
+    marketClosed = true;
+    const bot = await make({ ...stock, accountId: etoro });
+    await firstBar();
+    await nextBar({ signals: [{ entry: 195, sl: 190, tp: 230 }] });
+    expect(placed[0]).toMatchObject({ side: 'buy', stopLoss: 190, takeProfit: 230 });
+    px.AAPL = 231;
+    await look();
+    expect(placed[1]).toMatchObject({ side: 'sell', close: { positionIds: ['e1'] } });
+    expect((await detail(bot.id)).history.map((t) => t.reason)).toEqual(['tp']);
+    // The check says it.
+    expect((await post('/api/bots/check', { ...stock, accountId: etoro })).json().warnings.join(' ')).toMatch(/rulează non-stop/);
+  });
+
+  it('FIX-ETOROLEV3: at eToro the leverage is 1×, 2× or 5×: another one is refused by the check, and a bot that has one sends nothing', async () => {
+    expect((await post('/api/bots/check', { ...stock, accountId: etoro, leverage: 3 })).json().errors).toContain(ETORO_LEVERAGE_TEXT);
+    expect((await post('/api/bots/check', { ...stock, accountId: etoro, leverage: 5 })).json().errors).toEqual([]);
+    // A bot saved at 3× before the rule: its entry is refused here, never sent (eToro would refuse it).
+    const bot = await make({ ...stock, accountId: etoro, leverage: 2 });
+    const row = await ctx.db.get<{ config: string }>('SELECT config FROM bots WHERE id = ?', [bot.id]);
+    await ctx.db.run('UPDATE bots SET config = ? WHERE id = ?', [JSON.stringify({ ...JSON.parse(row!.config), leverage: 3 }), bot.id]);
+    await firstBar();
+    await nextBar({ signals: [{ entry: 195, sl: 190, tp: 230 }] });
+    expect(placed).toEqual([]);
+    expect((await detail(bot.id)).positions).toEqual([]);
+  });
+
+  it('FIX-ETOROLEV: a leveraged DCA long at eToro opens with the cycle\'s stop loss', async () => {
+    await make({ strategy: 'dca', ...common, exec: 'real', accountId: etoro, market: 'stock', symbols: ['AAPL'], leverage: 2, dca: { ...dca, stopLoss: 10 } });
+    await look();
+    expect(placed[0]).toMatchObject({ side: 'buy', market: 'stock', leverage: 2 });
+    expect(placed[0]?.stopLoss).toBeCloseTo(180, 9);
+    // 100 USD × 2 at 200.
+    expect(placed[0]?.amount).toBeCloseTo(1, 9);
   });
 
   it('eToro shorts need a stop loss: the DCA cycle\'s, the grid\'s "Oprește peste"', async () => {
@@ -1437,7 +1581,7 @@ describe('FIX-2ZPRICE: a thin pair without a candle in the last minutes', () => 
     const body = { strategy: 'premium', ...common, symbols: ['BTC/USDT', '2Z/USDT'], premium };
     const c = (await post('/api/bots/check', body)).json() as BotCheck;
     expect(c.errors).toEqual([]);
-    expect(c.warnings.some((w) => /^Pe \S+, 2Z\/USDT n-a avut tranzacții în ultimele minute: botul ia prețul ultimei tranzacții \(0,01929\)\. La o pereche cu puține tranzacții, prețul de execuție poate fi departe de el\.$/.test(w))).toBe(true);
+    expect(c.warnings.some((w) => /^Pe \S+, 2Z\/USDT n-a avut tranzacții în ultimele minute: botul ia prețul ultimei tranzacții \(0,0193\)\. La o pereche cu puține tranzacții, prețul de execuție poate fi departe de el\.$/.test(w))).toBe(true);
     // A liquid pair: no word about it.
     expect(c.warnings.some((w) => w.includes('BTC/USDT n-a avut'))).toBe(false);
     const bot = await make(body);
@@ -1459,7 +1603,7 @@ describe('FIX-2ZPRICE: a thin pair without a candle in the last minutes', () => 
     const body = { strategy: 'premium', ...common, symbols: ['2Z/USDT'], premium };
     let c = (await post('/api/bots/check', body)).json() as BotCheck;
     expect(c.errors).toEqual([]);
-    expect(c.warnings.some((w) => w.includes('2Z/USDT n-a avut tranzacții în ultimele minute: botul ia prețul ultimei tranzacții (0,01929)'))).toBe(true);
+    expect(c.warnings.some((w) => w.includes('2Z/USDT n-a avut tranzacții în ultimele minute: botul ia prețul ultimei tranzacții (0,0193)'))).toBe(true);
     // The ticker silent: the last candle's close, the last trade too.
     ticks['2Z/USDT'] = null;
     c = (await post('/api/bots/check', body)).json() as BotCheck;
@@ -1699,7 +1843,7 @@ describe('FIX-BOTLEVELS: the levels a real bot keeps for its positions (the char
     await look(HOUR);
     const pos = (await stateOf(bot.id)).premium?.positions[0];
     expect(pos).toBeTruthy();
-    expect(await levels()).toEqual([{ bot: { id: bot.id, name: 'Crypto' }, accountId: account, active: true, market: 'futures', symbol: 'BTC/USDT', side: 'long', qty: pos!.qty, entry: 101, sl: 90, tp: 115, openedAt: pos!.openedAt }]);
+    expect(await levels()).toEqual([{ bot: { id: bot.id, name: 'Crypto' }, accountId: account, active: true, market: 'futures', symbol: 'BTC/USDT', side: 'long', qty: pos!.qty, entry: 101, sl: 90, tp: 115, openedAt: pos!.openedAt, margin: expect.any(Number) }]);
     // Paused: it still closes at them. A problem: it sends nothing until "Reia".
     await status(bot.id, 'paused');
     expect((await levels())[0]?.active).toBe(true);
@@ -2037,11 +2181,10 @@ describe('FIX-BOTBUDGET: the budget, the most a trade takes, shared among the tr
     // „Tranzacții deschise odată” above the symbols is saved: two in effect.
     expect(check.errors).toEqual([]);
     expect(check.summary.some((x) => x.startsWith('Bugetul: 500 USDT; pe tranzacție cel mult 450 USDT (poziția până la 1.350 USDT, la 3×); cel mult 2 tranzacții deschise odată (câte simboluri are botul).'))).toBe(true);
-    // 10 / 1.350 + 2 × 0,1% of commissions: the take profit at least 0,94% away.
-    expect(check.summary).toContain('Ca o tranzacție să aducă 10 USD, take profit-ul semnalului trebuie să fie la cel puțin 0,94% de la intrare (cu suma maximă pe tranzacție); la unul mai aproape, botul nu intră.');
-    // „Risc / câștig” with a take profit too close for it: said before the start.
+    // FIX-NOMINPROFIT: no minimum profit a trade, neither in the summary nor in the warnings.
+    expect(check.summary.join(' ')).not.toMatch(/10 USD|nu intră într-o tranzacție/);
     const close = (await post('/api/bots/check', { ...two(), premium: { ...budgeted, maxPerTrade: 100, levels: 'percent', slPct: 1, tpPct: 2 }, leverage: 1 })).json() as BotCheck;
-    expect(close.warnings).toContain('Cu suma maximă pe tranzacție (100 USDT), take profit-ul de 2% aduce cel mult 1,8 USDT după comisioane: sub 10 USD, deci botul nu intră.');
+    expect(close.warnings.join(' ')).not.toMatch(/10 USD|botul nu intră/);
     const bot = await make({ ...two(), premium: { ...budgeted, maxPerTrade: 450, maxOpen: 10 } });
     await firstBar();
     await nextBar({ signals: [{}] });
@@ -2054,18 +2197,20 @@ describe('FIX-BOTBUDGET: the budget, the most a trade takes, shared among the tr
     expect(enters.every((m) => / Suma: 250,00 USDT, poziția 750,00 USDT\./.test(m))).toBe(true);
   });
 
-  it('what the account has left is not a trade when it would bring under 10 at the take profit', async () => {
+  it('FIX-NOMINPROFIT: what the account has left is a trade, however little it brings at the take profit', async () => {
     px['SOL/USDT'] = 101;
-    // A profile of 300: the first takes 250 of the bot's 500, the account has ~49 left; at a take profit 3% away (×3),
-    // a trade needs ~120 to bring 10.
+    // A profile of 300: the first takes 250 of the bot's 500, the account has ~49 left: the second goes with it (before
+    // FIX-NOMINPROFIT it was skipped: under 10 at a take profit 3% away).
     const small = await ctx.paper.create(1, { label: 'Paper 300', kind: 'crypto', budget: 300, commissionType: 'percent', commissionValue: 0.1 }, 20);
     const bot = await make({ ...two(), accountId: small, premium: { ...budgeted, maxPerTrade: 450, maxOpen: 2 } });
     await firstBar();
     await nextBar({ signals: [{ tp: 104 }] });
     const d = await detail(bot.id);
-    expect(d.positions).toHaveLength(1);
+    expect(d.positions).toHaveLength(2);
     expect(d.positions[0]?.margin).toBeCloseTo(250, 4);
-    expect(d.events.some((e) => /^LONG: în cont sunt disponibili doar [\d,]+ USDT: prea puțin pentru o tranzacție care să aducă cel puțin 10 USD la take profit\.$/.test(e.message))).toBe(true);
+    expect(d.positions[1]?.margin).toBeGreaterThan(45);
+    expect(d.positions[1]?.margin).toBeLessThan(50);
+    expect(d.events.some((e) => /cel puțin 10 USD|minimul de 10 USD|prea puțin pentru o tranzacție/.test(e.message))).toBe(false);
   });
 
   it('with „AI confirmă” the AI chooses the amount within the bounds; it is asked with them', async () => {
@@ -2076,7 +2221,8 @@ describe('FIX-BOTBUDGET: the budget, the most a trade takes, shared among the tr
     const d = await detail(bot.id);
     expect(d.positions[0]?.margin).toBeCloseTo(300, 4);
     expect(d.events.find((e) => e.kind === 'enter')?.message).toMatch(/ Suma: 300,00 USDT, poziția 900,00 USDT\. Suma aleasă de AI\.$/);
-    expect(aiAsked.at(-1)?.prompt).toMatch(/Suma tranzacției \(marja, fără levier; poziția = suma × 3\): între [\d.]+ și 450\.00 USDT\. Propunerea botului: 450\.00 USDT \(bugetul liber 500\.00 USDT, împărțit la 1 tranzacție care se mai poate deschide\)\./);
+    expect(aiAsked.at(-1)?.prompt).toMatch(/Suma tranzacției \(marja, fără levier; poziția = suma × 3\): cel mult 450\.00 USDT\. Propunerea botului: 450\.00 USDT \(bugetul liber 500\.00 USDT, împărțit la 1 tranzacție care se mai poate deschide\)\./);
+    expect(aiAsked.at(-1)?.prompt).not.toMatch(/minim/);
     // An amount out of the bounds is brought within them.
     const other = await make({ strategy: 'premium', ...common, accountId: await paperProfile('Paper 2'), market: 'futures', leverage: 3, maxAmount: 500, premium: { ...budgeted, maxPerTrade: 450, ai: 'confirm' } });
     // Its first look notes the bar.
@@ -2104,7 +2250,7 @@ describe('FIX-PAPERLEV: on a Paper Trading profile every market has leverage, ma
     const account = (await ctx.accounts.create(1, { exchange: 'kucoin', label: 'KuCoin', credentials: { apiKey: 'k1234567', secret: 's1234567', password: 'p1234567' } })).id;
     await ctx.accounts.setTrading(account, ['spot', 'futures']);
     const real = { strategy: 'premium', ...common, accountId: account, premium };
-    expect((await check({ ...real, leverage: 3 })).errors).toContain('Levierul se aplică doar pe futures (pe spot și pe acțiuni, doar pe un profil Paper Trading).');
+    expect((await check({ ...real, leverage: 3 })).errors).toContain(LEVERAGE_FUTURES);
     expect((await check({ ...real, premium: { ...premium, direction: 'both' } })).errors).toContain('Pe spot nu se poate short: doar Long (short pe futures, pe acțiuni sau pe un profil Paper Trading).');
     const c = await check({ strategy: 'premium', ...common, leverage: 5, marginMode: 'cross', premium: { ...premium, direction: 'both' } });
     expect(c.errors).toEqual([]);
@@ -2390,5 +2536,121 @@ describe('FIX-BOTSHORTS: the entry at the setup, its levels at the confirmation,
     expect(pos?.signalTime).toBeUndefined();
     await look(4 * HOUR);
     expect((await detail(bot.id)).positions).toHaveLength(1);
+  });
+});
+
+describe('FD-FXCOMMODITIES: bots on forex and commodities (Twelve Data, in USD; eToro forex only, a Paper profile both)', () => {
+  let t212: number;
+  let etoro: number;
+  const fxBot = { strategy: 'premium', ...common, exec: 'real', market: 'stock', symbols: ['EUR/USD'], tf: '1h', premium: { ...premium, amount: 1000 } };
+  const firstBar = async () => {
+    clock = Math.ceil(clock / HOUR) * HOUR + 10 * MIN;
+    barSpec = { signals: [] };
+    await look(1);
+  };
+  const nextBar = async (spec: NonNullable<typeof barSpec>) => {
+    barSpec = spec;
+    await look(HOUR);
+  };
+  beforeEach(async () => {
+    fxClosed = false;
+    px['EUR/USD'] = 1.1;
+    px['XAU/USD'] = 3600;
+    // The user's Twelve Data key and its catalog, for the check (the engine's data are the simulated ones).
+    const td = ctx.stocks as unknown as Record<string, unknown>;
+    td.hasKey = async () => true;
+    td.fxEntry = async (_u: number, kind: string, symbol: string) => (['EUR/USD', 'XAU/USD'].includes(symbol) ? { symbol, name: symbol, group: kind === 'forex' ? 'Major' : 'Precious Metal' } : null);
+    td.timeframesFor = async () => ['1m', '5m', '15m', '30m', '1h', '2h', '4h', '1d', '1w'];
+    td.fxQuote = fakeStocks.fxQuote;
+    t212 = (await ctx.accounts.create(1, { exchange: 'trading212', label: 'T212', credentials: { apiKey: 'k1234567', secret: 's1234567' } })).id;
+    await ctx.accounts.setTrading(t212, ['stock']);
+    etoro = (await ctx.accounts.create(1, { exchange: 'etoro', label: 'eToro', credentials: { publicKey: 'pub-12345678', userKey: 'usr-12345678' } })).id;
+    await ctx.accounts.setTrading(etoro, ['stock']);
+  });
+
+  it('the check: the Twelve Data key, a symbol Twelve Data has, forex only on eToro, none on Trading 212', async () => {
+    const errs = async (body: Record<string, unknown>) => (await post('/api/bots/check', body)).json().errors as string[];
+    expect(await errs({ ...fxBot, accountId: paperStocks })).toEqual([]);
+    expect(await errs({ ...fxBot, accountId: paperStocks, symbols: ['XAU/USD'] })).toEqual([]);
+    expect(await errs({ ...fxBot, accountId: etoro })).toEqual([]);
+    expect(await errs({ ...fxBot, accountId: etoro, symbols: ['EUR/USD', 'XAU/USD'] })).toContain(`XAU/USD: ${ETORO_COMMODITY_TEXT}`);
+    expect(await errs({ ...fxBot, accountId: t212 })).toContain(FX_ACCOUNT_TEXT);
+    // FIX-ETOROFX: the yen is USD/JPY at eToro (the other way round): taken, traded through it.
+    expect((await errs({ ...fxBot, accountId: etoro, symbols: ['EUR/USD', 'JPY/USD'] })).join(' ')).not.toMatch(/JPY\/USD: eToro/);
+    expect(await errs({ ...fxBot, accountId: paperStocks, symbols: ['AUD/USD'] })).toContain('Twelve Data nu are perechea AUD/USD.');
+    (ctx.stocks as unknown as Record<string, unknown>).hasKey = async () => false;
+    expect(await errs({ ...fxBot, accountId: paperStocks })).toContain(FX_KEY_TEXT);
+  });
+
+  it('a Paper profile: EUR/USD entered on a signal at Twelve Data\'s price, kept as EURUSD; no area (a negative Acțiuni area does not stop it); out at its stop loss', async () => {
+    // The Acțiuni area against a long: a share would be stopped by it, a pair is not.
+    mood = { index: 50, area: 50, areaCount: 20, stocks: 20 };
+    const bot = await make({ ...fxBot, accountId: paperStocks });
+    await firstBar();
+    await nextBar({ signals: [{ entry: 1.1, sl: 1.09, tp: 1.13 }] });
+    let d = await detail(bot.id);
+    expect(d.positions[0]).toMatchObject({ symbol: 'EUR/USD', side: 'long', entry: 1.1, sl: 1.09, tp: 1.13 });
+    const parts = d.events.find((e) => e.kind === 'enter')?.detail?.score?.parts ?? [];
+    expect(parts.find((p) => p.key === 'area')).toMatchObject({ value: null });
+    // The profile holds it in eToro's compact form.
+    const pf = await ctx.accounts.portfolio(paperStocks, true);
+    expect(pf.positions.map((p) => p.symbol)).toEqual(['EURUSD/USD']);
+    // Over the weekend nothing moves (a profile trades the open week).
+    fxClosed = true;
+    px['EUR/USD'] = 1.08;
+    await look();
+    expect((await detail(bot.id)).positions).toHaveLength(1);
+    fxClosed = false;
+    await look();
+    d = await detail(bot.id);
+    expect(d.positions).toEqual([]);
+    expect(d.history[0]).toMatchObject({ symbol: 'EUR/USD', reason: 'sl' });
+  });
+
+  it('eToro: the order goes on the chart\'s pair with both levels (eToro\'s connector names it EURUSD)', async () => {
+    await make({ ...fxBot, accountId: etoro });
+    await firstBar();
+    await nextBar({ signals: [{ entry: 1.1, sl: 1.09, tp: 1.13 }] });
+    expect(placed[0]).toMatchObject({ market: 'stock', symbol: 'EUR/USD', side: 'buy', stopLoss: 1.09, takeProfit: 1.13 });
+  });
+});
+
+describe('FIX-LATEENTRY: a signal still active, caught late at a price still good; every symbol read each minute', () => {
+  /** 11 bars; the 8th (the signal's confirming bar) closes at 100. */
+  const candles = Array.from({ length: 11 }, (_, i) => ({ t: i * HOUR, o: 100, h: 101, l: 99, c: i === 8 ? 100 : 98, v: 1 }));
+  // A long confirmed on bar 8 (before the closed bar, 10): Slingshot keeps it active; its stop 90, its take profit 120.
+  const late = { side: 'long' as const, time: 7000, confirmBar: 8, confirmTime: 8000, sl: 90, tp: 120 };
+
+  it('entered at the first look when the price is within 10% of the way to the take profit; not when further; never twice', async () => {
+    px['BTC/USDT'] = 103; // 3 of the 20 to the take profit: 15%, too far
+    const bot = await make({ strategy: 'premium', ...common, premium });
+    barSpec = { signals: [late], candles };
+    await look(1);
+    expect((await detail(bot.id)).positions).toHaveLength(0);
+    // A minute later the price is back to 101 (5% of the way): the bot enters, with the signal's levels.
+    px['BTC/USDT'] = 101;
+    await look(60_000);
+    const d = await detail(bot.id);
+    expect(d.positions).toHaveLength(1);
+    expect(d.positions[0]).toMatchObject({ side: 'long', sl: 90, tp: 120 });
+    expect(d.events.find((e) => e.kind === 'enter')?.message).toMatch(/Intrare târzie: semnalul s-a confirmat la \d\d:\d\d UTC, la 100(,00)?; prețul de acum e cel mult cu 10% din drumul spre take profit mai rău\./);
+    // Its stop loss reached: closed; the signal still active by Slingshot is not entered again.
+    px['BTC/USDT'] = 89;
+    await look(60_000);
+    expect((await detail(bot.id)).positions).toHaveLength(0);
+    px['BTC/USDT'] = 100;
+    await look(60_000);
+    await look(60_000);
+    expect((await detail(bot.id)).positions).toHaveLength(0);
+  });
+
+  it('a signal Slingshot closed, or one the bot looks at the other way, is not entered late', async () => {
+    px['BTC/USDT'] = 100;
+    const bot = await make({ strategy: 'premium', ...common, premium });
+    barSpec = { signals: [{ ...late, outcome: 'sl' }], candles };
+    await look(1);
+    barSpec = { signals: [{ ...late, side: 'short', sl: 110, tp: 80 }], candles };
+    await look(60_000);
+    expect((await detail(bot.id)).positions).toHaveLength(0);
   });
 });

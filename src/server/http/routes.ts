@@ -8,7 +8,10 @@ import { DAY_MS, dayKey, isDayKey, isTimeframe, type Timeframe } from '../../sha
 import type { AppContext } from '../context.ts';
 import { readContext } from '../market/context.ts';
 import { coinLogo } from '../market/logos.ts';
-import { STATS_PERIODS } from '../exchange/trade-stats.ts';
+import { logoPicture } from '../market/stock-logos.ts';
+import { periodStart, STATS_PERIODS, type StatsPeriod } from '../exchange/trade-stats.ts';
+import { dollarRate, isVirtual, mergeAllHistory, orderAccounts, sumPortfolios, sumStats, type AllAccount } from '../exchange/all-accounts.ts';
+import { readPrice } from '../market/quote.ts';
 import { mergeHistory, OPEN_BEFORE_MS, withJournal, type TradeHistory } from '../exchange/trade-history.ts';
 import { CreditBudget, defaultStockAliases, STOCK_SYMBOL_RE, TD_PLAN_JOB, TwelveDataClient } from '../market/stocks.ts';
 import { reclassifySource } from '../news/ingest.ts';
@@ -37,9 +40,10 @@ import { me, sessionToken } from './auth.ts';
 import { relyingParty } from './auth-routes.ts';
 import { readCookie, setCookie } from './cookies.ts';
 import { ConflictError, NotFoundError } from './errors.ts';
-import { MAX_LISTS, MAX_WATCHED, type UnionChange } from '../watchlists/service.ts';
+import { MAX_LISTS, MAX_WATCHED, type UnionChange, type WatchAdd } from '../watchlists/service.ts';
+import { FX_SYMBOL_RE } from '../../shared/fx.ts';
 import { describeAiError } from '../ai/types.ts';
-import { MAX_ACCOUNTS_PER_USER, type AccountView } from '../exchange/accounts.ts';
+import { mapExchangeError, MAX_ACCOUNTS_PER_USER, type AccountView } from '../exchange/accounts.ts';
 
 const idParam = z.object({ id: z.coerce.number().int().positive() });
 const coinRe = /^[A-Z0-9]{1,15}$/;
@@ -336,9 +340,14 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   app.delete('/api/sources/:id', async (req) => {
     const { id } = parse(z.object({ id: z.string().max(80) }), req.params);
     await db.tx(async () => {
-      const src = await db.get<SourceRow>('SELECT builtin FROM sources WHERE id = ?', [id]);
+      const src = await db.get<Pick<SourceRow, 'url' | 'builtin' | 'auto'>>('SELECT url, builtin, auto FROM sources WHERE id = ?', [id]);
       if (!src) throw new NotFoundError(`Sursa ${id} nu există`);
-      if (src.builtin) throw new ConflictError('Sursele implicite nu se pot șterge, doar dezactiva');
+      // FIX-SOURCEDELETE (the user, 20 Nov 2026: a source that no longer works, deleted for good): a built-in or a stock's
+      // automatic feed is remembered as deleted, so the start and the watch lists never bring it back. Its news go
+      // with it (ON DELETE CASCADE).
+      if (src.builtin || src.auto) {
+        await db.run('IF NOT EXISTS (SELECT 1 FROM deleted_sources WHERE source_id = ?) INSERT INTO deleted_sources(source_id, url, deleted_at) VALUES (?, ?, ?)', [id, id, src.url, Date.now()]);
+      }
       await db.run('DELETE FROM sources WHERE id = ?', [id]);
     });
     return { ok: true };
@@ -349,7 +358,8 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   // follows) and its older changing routes work on the lists, for a tab opened before the update.
   const aliasesSchema = z.array(z.string().trim().min(3).max(40)).max(10);
   // A ticker of any kind (BTC, AAPL, BRK.B, ^SPX), for the routes that address an existing row.
-  const symbolRe = /^\^?[A-Z0-9][A-Z0-9.-]{0,14}$/;
+  // FD-FXCOMMODITIES: a forex pair or a commodity by its Twelve Data symbol ("EUR/USD", "XAU/USD"; "/" encoded in a path).
+  const symbolRe = /^\^?[A-Z0-9][A-Z0-9.-]{0,14}$|^[A-Z0-9]{1,10}\/[A-Z]{3}$/;
   const watchAddSchema = z.discriminatedUnion('kind', [
     z.object({
       kind: z.literal('crypto'),
@@ -373,9 +383,20 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         .transform((v, c) => indexId(v) ?? (c.addIssue({ code: 'custom', message: 'Indice necunoscut' }), z.NEVER)),
       aliases: aliasesSchema.optional(),
     }),
+    // FD-FXCOMMODITIES: one of Twelve Data's pairs or commodities (checked in its list, with the user's key).
+    z.object({ kind: z.literal('forex'), coin: z.string().trim().toUpperCase().regex(FX_SYMBOL_RE), aliases: aliasesSchema.optional() }),
+    z.object({ kind: z.literal('commodity'), coin: z.string().trim().toUpperCase().regex(FX_SYMBOL_RE), aliases: aliasesSchema.optional() }),
   ]);
   // Older clients send no kind.
-  const watchAdd = (body: unknown) => parse(watchAddSchema, { kind: 'crypto', ...((body ?? {}) as object) });
+  const watchAdd = async (userId: number, body: unknown): Promise<WatchAdd> => {
+    const w = parse(watchAddSchema, { kind: 'crypto', ...((body ?? {}) as object) });
+    if (w.kind !== 'forex' && w.kind !== 'commodity') return w;
+    // FD-FXCOMMODITIES: only with the user's Twelve Data key, only what Twelve Data lists (its name kept).
+    if (!(await ctx.stocks.hasKey(userId))) throw new ValidationError('Forex și mărfurile cer cheia ta Twelve Data (Setări → Date pentru acțiuni).');
+    const entry = await ctx.stocks.fxEntry(userId, w.kind, w.coin);
+    if (!entry) throw new ValidationError(`Twelve Data nu are ${w.kind === 'forex' ? 'perechea' : 'marfa'} ${w.coin}.`);
+    return { ...w, name: entry.name };
+  };
   const listWatchlist = async (userId: number) => (await ctx.watchlists.view(userId)).items;
   /** The rest of the app hears of a symbol new to the user or no longer followed (FD-AUTOFEED, FD-WATCHLISTS §6). */
   const afterUnion = async (user: { role: string }, change: UnionChange) => {
@@ -390,7 +411,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
 
   app.post('/api/watchlist', async (req) => {
     const user = me(req);
-    const w = watchAdd(req.body);
+    const w = await watchAdd(user.id, req.body);
     const r = await ctx.watchlists.add(user.id, await ctx.watchlists.firstListId(user.id), w);
     await afterUnion(user, r);
     return r.items;
@@ -409,7 +430,8 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     await db.tx(async () => {
       const row = await db.get<{ kind: string }>('SELECT kind FROM watchlist WHERE user_id = ? AND coin = ?', [user.id, coin]);
       if (!row) throw new NotFoundError(`${coin} nu este urmărit`);
-      if (row.kind !== 'crypto' && patch.quote !== undefined && patch.quote !== 'USD') throw new ValidationError(row.kind === 'index' ? 'Indicii sunt cotați în USD' : 'Acțiunile sunt cotate în USD');
+      if (row.kind !== 'crypto' && patch.quote !== undefined && patch.quote !== 'USD')
+        throw new ValidationError(row.kind === 'index' ? 'Indicii sunt cotați în USD' : row.kind === 'forex' || row.kind === 'commodity' ? 'Perechea își are moneda în simbol' : 'Acțiunile sunt cotate în USD');
       await db.run('UPDATE watchlist SET quote = COALESCE(?, quote), aliases = COALESCE(?, aliases) WHERE user_id = ? AND coin = ?', [
         patch.quote ?? null,
         patch.aliases ? JSON.stringify(patch.aliases) : null,
@@ -453,7 +475,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
 
   app.post('/api/watchlists/:id/items', async (req) => {
     const user = me(req);
-    const r = await ctx.watchlists.add(user.id, listParam(req), watchAdd(req.body));
+    const r = await ctx.watchlists.add(user.id, listParam(req), await watchAdd(user.id, req.body));
     await afterUnion(user, r);
     return r;
   });
@@ -482,7 +504,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   });
 
   // FD-WATCHLISTS §3: the "Date financiare" popup of a symbol (its description as the source wrote it: no translation).
-  const profileQuery = z.object({ kind: z.enum(['crypto', 'stock', 'index']), symbol: z.string().trim().toUpperCase().regex(symbolRe) });
+  const profileQuery = z.object({ kind: z.enum(['crypto', 'stock', 'index', 'forex', 'commodity']), symbol: z.string().trim().toUpperCase().regex(symbolRe) });
   const nameOf = async (userId: number, coin: string) => (await db.get<{ name: string | null }>('SELECT name FROM watchlist WHERE user_id = ? AND coin = ?', [userId, coin]))?.name ?? null;
 
   app.get('/api/symbols/profile', async (req) => {
@@ -524,7 +546,19 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   // ---------------- market ----------------
   app.get('/api/market/candles', async (req) => {
     const s = await ctx.marketSource.forUser(me(req).id);
-    const { asset } = parse(z.object({ asset: z.enum(['crypto', 'stock', 'index']).default('crypto') }).passthrough(), req.query);
+    const { asset } = parse(z.object({ asset: z.enum(['crypto', 'stock', 'index', 'forex', 'commodity']).default('crypto') }).passthrough(), req.query);
+    if (asset === 'forex' || asset === 'commodity') {
+      // FD-FXCOMMODITIES: a pair or a commodity by its Twelve Data symbol ("EUR/USD"), with the user's key.
+      const q = parse(
+        z.object({
+          symbol: z.string().trim().toUpperCase().regex(FX_SYMBOL_RE),
+          tf: z.string().refine(isTimeframe, 'Unsupported timeframe'),
+          limit: z.coerce.number().int().min(50).max(5000).default(s.candles),
+        }),
+        req.query,
+      );
+      return ctx.stocks.fxCandles(q.symbol, q.tf as Timeframe, q.limit, me(req).id, true);
+    }
     if (asset === 'index') {
       // FD-INDICES: daily and weekly candles of one of the catalog's indices ("SPX" or "^SPX").
       const q = parse(
@@ -538,7 +572,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         }),
         req.query,
       );
-      return ctx.stocks.candles(q.symbol, q.tf as Timeframe, q.limit, me(req).id);
+      return ctx.stocks.candles(q.symbol, q.tf as Timeframe, q.limit, me(req).id, true);
     }
     if (asset === 'stock') {
       // FD-SENTIQ §4.3: a share by its ticker (Twelve Data with the user's own key, FD-TDKEYS; otherwise Nasdaq daily).
@@ -550,7 +584,7 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
         }),
         req.query,
       );
-      return ctx.stocks.candles(q.symbol, q.tf as Timeframe, q.limit, me(req).id);
+      return ctx.stocks.candles(q.symbol, q.tf as Timeframe, q.limit, me(req).id, true);
     }
     const q = parse(
       z.object({
@@ -608,6 +642,33 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     return ctx.stocks.search(q, me(req).id);
   });
 
+  // ---------------- FD-FXCOMMODITIES: forex pairs and commodities (Twelve Data, the user's key) ----------------
+  const fxKindParam = z.enum(['forex', 'commodity']);
+  const fxSymbols = z
+    .string()
+    .transform((v) => [...new Set(v.split(',').map((x) => x.trim().toUpperCase()).filter(Boolean))])
+    .pipe(z.array(z.string().regex(FX_SYMBOL_RE)).min(1).max(MAX_WATCHED));
+
+  /** Whether the user can have them (their key): without it the categories are hidden. */
+  app.get('/api/fx/info', async (req) => ({ available: await ctx.stocks.hasKey(me(req).id) }));
+
+  app.get('/api/fx/search', async (req) => {
+    const q = parse(z.object({ kind: fxKindParam, q: z.string().trim().max(40).default('') }), req.query);
+    return ctx.stocks.fxSearch(me(req).id, q.kind, q.q);
+  });
+
+  app.get('/api/fx/quotes', async (req) => {
+    const { symbols } = parse(z.object({ symbols: fxSymbols }), req.query);
+    const userId = me(req).id;
+    if (!(await ctx.stocks.hasKey(userId))) throw new ValidationError('Forex și mărfurile cer cheia ta Twelve Data (Setări → Date pentru acțiuni).');
+    const one = (sym: string) =>
+      ctx.stocks.fxQuote(userId, sym).catch((err: Error) => ({ symbol: sym, last: null, change: null, changePct: null, open: false, fetchedAt: Date.now(), error: err.message.slice(0, 200) }));
+    // Five at a time (a credit each), in the request's order.
+    const out = [];
+    for (let i = 0; i < symbols.length; i += 5) out.push(...(await Promise.all(symbols.slice(i, i + 5).map(one))));
+    return out;
+  });
+
   app.get('/api/stocks/spark', async (req) => {
     const { symbol } = parse(z.object({ symbol: z.string().trim().toUpperCase().regex(LISTED_SYMBOL_RE) }), req.query);
     return ctx.stocks.spark(symbol);
@@ -658,12 +719,16 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   // FD-STOCKLOGOS: a company's logo (TradingView's, downloaded once and kept). With a session a new symbol makes this
   // server ask TradingView; without one (FD-PUSH: the notifications' extension) only a logo kept already is given, so an
   // anonymous caller can never make it ask anybody.
+  // FIX-LOGOBACKUP: a logo none has yet is asked again soon (10 minutes in the browser's and the app's cache, an hour on
+  // this server), not a day later; Twelve Data's picture (a JPEG / PNG) is served as itself.
   app.get('/api/logo/s/:symbol', async (req, reply) => {
     const { symbol } = req.params as { symbol: string };
-    const svg = req.user ? await ctx.stockLogos.logo(symbol) : await ctx.stockLogos.kept(symbol);
+    const logo = req.user ? await ctx.stockLogos.logo(symbol, me(req).id) : await ctx.stockLogos.kept(symbol);
+    if (!logo) return reply.code(404).header('Cache-Control', 'private, max-age=600').type('text/plain; charset=utf-8').send('');
     reply.header('Cache-Control', 'private, max-age=86400');
-    if (!svg) return reply.code(404).type('text/plain; charset=utf-8').send('');
-    return reply.header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'").type('image/svg+xml; charset=utf-8').send(svg);
+    const picture = logoPicture(logo);
+    if (picture) return reply.header('Content-Security-Policy', "default-src 'none'").type(picture.type).send(picture.bytes);
+    return reply.header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'").type('image/svg+xml; charset=utf-8').send(logo);
   });
 
   // Coin logo as an image (TD-ICONS). A missing logo is cached by the browser too, so it is asked once a day. Public
@@ -683,12 +748,15 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
   let lastManualScan = 0;
 
   app.get('/api/scanner', async (req) => {
+    // FIX-TDBOTS: the Today page asks every minute while it is open: only then are the user's shares read with their
+    // Twelve Data key. Opened again: a run now, not at the next one (on the instance running the jobs).
+    const back = ctx.scanner.viewed(me(req).id);
     // An instance that does not run the jobs (TD-AZURE §6) scans when a page asks, in the background, at most once a
     // minute: its results live in its own memory.
     if (!ctx.scheduler.leaderInfo().self && Date.now() - lastManualScan >= 60_000) {
       lastManualScan = Date.now();
       void ctx.scheduler.trigger('scanner').catch(() => undefined);
-    }
+    } else if (back && ctx.scheduler.leaderInfo().self) ctx.scheduler.nudge('scanner', 0);
     return scanOf(req);
   });
   app.post('/api/scanner/run', async (req) => {
@@ -850,7 +918,8 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     if (!(await ctx.accounts.owns(me(req).id, id))) throw new NotFoundError('Contul nu există');
   };
 
-  app.get('/api/accounts', async (req) => ctx.accounts.list(me(req).id));
+  // FD-TRADESALL: in the user's order (Tranzacții' menu: those not named after, as they were added).
+  app.get('/api/accounts', async (req) => orderAccounts(await ctx.accounts.list(me(req).id), (await mine(req)).trades.accountOrder));
 
   /** FD-MARKETSRC: an account added or removed can change where the user's prices come from. */
   const afterAccountsChange = (userId: number) => {
@@ -924,16 +993,13 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
 
   // FD-TRADES: the account's trades of the period (and the bots' open ones), each once: the bots' with their levels,
   // the platform's not made by a bot. The bots' reach a day before the period (their close hides the platform's).
-  app.get('/api/portfolio/:id/history', async (req): Promise<TradeHistory> => {
-    const { id } = parse(idParam, req.params);
-    const q = parse(z.object({ period: z.enum(STATS_PERIODS).default('30d'), force: z.enum(['0', '1']).optional() }), req.query);
-    await ownAccount(req, id);
-    const h = await ctx.accounts.tradeHistory(id, q.period, (await mine(req)).timezone, q.force === '1');
-    const bots = await ctx.bots.accountTrades(me(req).id, id, h.exchange, h.from - DAY_MS);
+  const historyOf = async (userId: number, id: number, period: StatsPeriod, tz: string, force: boolean): Promise<TradeHistory> => {
+    const h = await ctx.accounts.tradeHistory(id, period, tz, force);
+    const bots = await ctx.bots.accountTrades(userId, id, h.exchange, h.from - DAY_MS);
     // FIX-TRADESOLD: what the platform's history lacks (leverage, SL / TP), from the orders sent from Sentiq.
     const opened = h.rows.reduce((m, r) => Math.min(m, r.openedAt ?? Infinity), Infinity);
     const sent = Number.isFinite(opened)
-      ? await ctx.trading.sentFor(me(req).id, id, opened - OPEN_BEFORE_MS).catch((err: unknown) => {
+      ? await ctx.trading.sentFor(userId, id, opened - OPEN_BEFORE_MS).catch((err: unknown) => {
           ctx.log.warn(`trade history ${id}: the journal could not be read: ${(err as Error).message}`);
           return [];
         })
@@ -944,6 +1010,86 @@ export async function registerRoutes(app: FastifyInstance, ctx: AppContext): Pro
     const { rows, truncated } = mergeHistory(bots, own, h.from, to, to, h.broker);
     const { exchange: _exchange, broker: _broker, ...rest } = h;
     return { ...rest, to, rows, truncated };
+  };
+
+  app.get('/api/portfolio/:id/history', async (req): Promise<TradeHistory> => {
+    const { id } = parse(idParam, req.params);
+    const q = parse(z.object({ period: z.enum(STATS_PERIODS).default('30d'), force: z.enum(['0', '1']).optional() }), req.query);
+    await ownAccount(req, id);
+    return historyOf(me(req).id, id, q.period, (await mine(req)).timezone, q.force === '1');
+  });
+
+  // ---------------- FD-TRADESALL: „Toate” (every account at once) ----------------
+
+  /** The accounts „Toate” counts, in the user's order: the real-money ones, the virtual too when the user includes them. */
+  const allAccounts = async (req: FastifyRequest): Promise<{ list: AccountView[]; virtual: boolean }> => {
+    const prefs = (await mine(req)).trades;
+    const list = orderAccounts(await ctx.accounts.list(me(req).id), prefs.accountOrder);
+    return { list: list.filter((a) => prefs.allVirtual || !isVirtual(a)), virtual: prefs.allVirtual };
+  };
+
+  /** One unit of a currency in USD: the dollars 1:1; else the user's Twelve Data rate, else its USDT pair's price. */
+  const usdRate = async (userId: number, currency: string): Promise<number | null> => {
+    const d = dollarRate(currency);
+    if (d !== null) return d;
+    const td = await ctx.stocks.usdRate(userId, currency).catch(() => null);
+    if (td !== null) return td;
+    const p = await readPrice({ market: ctx.market, stocks: ctx.stocks, source: ctx.marketSource }, userId, 'spot', `${currency.toUpperCase()}/USDT`, false).catch(() => null);
+    return typeof p === 'number' && p > 0 ? p : null;
+  };
+
+  app.get('/api/portfolio/all', async (req) => {
+    const { force } = parse(z.object({ force: z.enum(['0', '1']).optional() }), req.query);
+    const userId = me(req).id;
+    const { list, virtual } = await allAccounts(req);
+    const read: AllAccount[] = await Promise.all(
+      list.map(async (a): Promise<AllAccount> => {
+        try {
+          const portfolio = await ctx.accounts.portfolio(a.id, force === '1');
+          return { accountId: a.id, label: a.label, portfolio, error: null, rate: await usdRate(userId, portfolio.currency) };
+        } catch (err) {
+          return { accountId: a.id, label: a.label, portfolio: null, error: mapExchangeError(err), rate: null };
+        }
+      }),
+    );
+    return sumPortfolios(read, virtual, Date.now());
+  });
+
+  app.get('/api/portfolio/all/stats', async (req) => {
+    const q = parse(z.object({ period: z.enum(STATS_PERIODS).default('30d'), force: z.enum(['0', '1']).optional() }), req.query);
+    const userId = me(req).id;
+    const tz = (await mine(req)).timezone;
+    const { list } = await allAccounts(req);
+    const parts = await Promise.all(
+      list.map(async (a) => {
+        try {
+          const stats = await ctx.accounts.tradeStats(a.id, q.period, tz, q.force === '1');
+          return { label: a.label, stats, error: null, rate: stats.net !== null ? await usdRate(userId, stats.currency) : null };
+        } catch (err) {
+          return { label: a.label, stats: null, error: mapExchangeError(err), rate: null };
+        }
+      }),
+    );
+    const now = Date.now();
+    return sumStats(parts, q.period, periodStart(q.period, now, tz), now);
+  });
+
+  app.get('/api/portfolio/all/history', async (req) => {
+    const q = parse(z.object({ period: z.enum(STATS_PERIODS).default('30d'), force: z.enum(['0', '1']).optional() }), req.query);
+    const userId = me(req).id;
+    const tz = (await mine(req)).timezone;
+    const { list } = await allAccounts(req);
+    const parts = await Promise.all(
+      list.map(async (a) => {
+        try {
+          return { accountId: a.id, label: a.label, history: await historyOf(userId, a.id, q.period, tz, q.force === '1'), error: null };
+        } catch (err) {
+          return { accountId: a.id, label: a.label, history: null, error: mapExchangeError(err) };
+        }
+      }),
+    );
+    const now = Date.now();
+    return mergeAllHistory(parts, q.period, periodStart(q.period, now, tz), now);
   });
 
   app.put('/api/portfolio/:id/cost-basis/:asset', async (req) => {

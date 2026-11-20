@@ -1,3 +1,5 @@
+import { commodityName, fxCompact, fxOpen, fxTradable, type FxKind } from '../../shared/fx.ts';
+import { useFxQuotes } from '../fx.ts';
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -37,7 +39,7 @@ import { ListDrawer, Watchlist } from '../components/Watchlist.tsx';
 import { OfflineBanner } from '../components/OfflineBanner.tsx';
 import { useMediaQuery } from '../media.ts';
 import { PNL_COLORS, PNL_COLORS_LIGHT, tradeLinesOf } from '../chart/pnl.ts';
-import { botLinesOf, onChart, withoutDuplicates } from '../chart/bot-lines.ts';
+import { botLinesOf, onChart, withoutDuplicates, stillHeld } from '../chart/bot-lines.ts';
 import { anchorOf, botDraftOf, draftGroups, draftTicket, isDraggable, lineActionOf, lineCloses, liveDrafts, sentLevels, withDrafts, withSent, type AccountLine, type Drafts, type SentLevel } from '../chart/trade-drafts.ts';
 import { chartLineOf, labelText, lineColor, TRADE_COLORS, TRADE_COLORS_LIGHT } from '../chart/trade-labels.ts';
 import { LineActionDialog, type LineAction } from '../components/LineActionDialog.tsx';
@@ -54,7 +56,7 @@ import { ChartMenu, type ChartMenuItem } from '../components/ChartMenu.tsx';
 import { ChartSettingsDialog } from '../components/ChartSettingsDialog.tsx';
 import { ChartStatusLine, statusLineOn } from '../components/ChartStatusLine.tsx';
 import { isMac } from '../components/CommandPalette.tsx';
-import { chartPathOf, nearestTimeframe, rememberedPath } from '../chart/paths.ts';
+import { chartPathOf, nearestTimeframe, rememberedPath, fxFromPath } from '../chart/paths.ts';
 import { INDEX_DELAY_NOTE, INDEX_TIMEFRAMES, INDICES, indexById, indexId, plainSymbol } from '../../shared/indices.ts';
 import { useMarketSource, useRevealInRow, useSettings, useStocksInfo, useTz, useWatchlist } from '../hooks.ts';
 import { ErrorNote, Loading, Panel, Toast, Warning, type ToastMessage } from '../components/ui.tsx';
@@ -595,7 +597,8 @@ function useTradeLines(symbol: string, show: boolean, lastPrice: number | null, 
     const byAccount = new Map<number, Portfolio>();
     if (!show) return { lines: [], portfolios: byAccount };
     const colors = theme === 'light' ? PNL_COLORS_LIGHT : PNL_COLORS;
-    const [base = '', quote = 'USDT'] = stock ? [symbol, 'USD'] : symbol.split('/');
+    // FD-FXCOMMODITIES: a pair or a commodity by its compact form on the accounts (EUR/USD → EURUSD, as eToro's).
+    const [base = '', quote = 'USDT'] = stock ? [fxCompact(symbol), 'USD'] : symbol.split('/');
     const lines: AccountLine[] = [];
     const several = relevant.length > 1;
     for (const p of portfolios) {
@@ -610,7 +613,8 @@ function useTradeLines(symbol: string, show: boolean, lastPrice: number | null, 
       for (const l of r.lines) if (l.role !== 'pnl') lines.push({ ...l, account });
     }
     // FIX-BOTLEVELS: each shown account's bot levels on this asset (a level that is an order there already is drawn once).
-    const levels = (botLevels.data ?? []).filter((l) => onChart(l, { base, quote, stock }) && relevant.some((a) => a.id === l.accountId));
+    // FIX-BOTLEVELGONE: only while the account still holds the bot's position (a close shows at once).
+    const levels = (botLevels.data ?? []).filter((l) => onChart(l, { base, quote, stock }) && relevant.some((a) => a.id === l.accountId) && stillHeld(l, byAccount.get(l.accountId)));
     const named = new Set(levels.map((l) => l.bot.id)).size > 1;
     const botLines: AccountLine[] = [];
     for (const account of relevant) {
@@ -630,7 +634,10 @@ export default function ChartsPage() {
   const stock = params.ticker ? params.ticker.toUpperCase() : null;
   // FD-INDICES: /charts/i/SPX; an index not in the list gets null here.
   const index = params.index ? indexId(params.index) : undefined;
-  const hasPair = Boolean(stock || params.index || (params.base && params.quote));
+  // FD-FXCOMMODITIES: /charts/f/EUR-USD, /charts/m/XAU-USD.
+  const fxSymbol = params.forex ? fxFromPath(params.forex) : params.commodity ? fxFromPath(params.commodity) : null;
+  const fxKind: FxKind | undefined = params.forex ? 'forex' : params.commodity ? 'commodity' : undefined;
+  const hasPair = Boolean(stock || params.index || fxSymbol || (params.base && params.quote));
   // `?.` on charts too: a server started before this version sends no `charts` group (FD-CHARTUX).
   const remembered = settings.data ? (settings.data.charts?.symbol ?? '') : undefined;
   // "Grafice" without a pair opens the last pair shown (FD-CHARTUX §2), else the first favourite.
@@ -644,6 +651,7 @@ export default function ChartsPage() {
   }
   if (index === null) return <ErrorNote error={new Error(`Indice necunoscut: ${params.index}. Indicii disponibili: ${INDICES.map((i) => i.symbol).join(', ')}.`)} />;
   if (index) return <ChartView stock index symbol={index} />;
+  if (fxSymbol && fxKind) return <ChartView stock fx={fxKind} symbol={fxSymbol} />;
   return stock ? <ChartView stock symbol={stock} /> : <ChartView stock={false} symbol={`${params.base?.toUpperCase()}/${params.quote?.toUpperCase()}`} />;
 }
 
@@ -653,7 +661,7 @@ const DEFAULT_CHART_PREFS: Settings['charts'] = { symbol: '', showPositions: tru
  * `symbol`: "BTC/USDT", the ticker ("AAPL") of a stock or the id ("^SPX") of an index. `stock`: a share or an index, both
  * served by the stock data; `index`: an index (FD-INDICES: 1d and 1w only, no positions).
  */
-function ChartView({ symbol, stock, index = false }: { symbol: string; stock: boolean; index?: boolean }) {
+function ChartView({ symbol, stock, index = false, fx }: { symbol: string; stock: boolean; index?: boolean; fx?: FxKind }) {
   // FD-IOSCHART: inside the iOS app the page is only the chart; the app draws the bar, the list and the tables.
   const embedded = useEmbedded();
   // The Twelve Data key is each user's own (FD-TDKEYS).
@@ -676,7 +684,8 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
   const chartTz = chartTimeZone(look, tz);
   // FD-TRADESOUND: the coin sound when a trade ends, while this chart is open and seen.
   // FIX-COINSOUND2: the trades of this chart only (an index has none).
-  useTradeEndSound(savedLook.alerts.tradeSound && !index, stock ? symbol : (symbol.split('/')[0] ?? symbol), stock);
+  // FD-FXCOMMODITIES: a pair's trades by its compact form on the accounts (EURUSD).
+  useTradeEndSound(savedLook.alerts.tradeSound && !index, stock ? fxCompact(symbol) : (symbol.split('/')[0] ?? symbol), stock);
   // Defaults fill in what an older server does not send yet.
   const prefs: Settings['charts'] = { ...DEFAULT_CHART_PREFS, ...s?.charts };
   // FD-PREMIUMHIDE: Slingshot and LMA off the chart, drawn, or on it but hidden with the legend's eye.
@@ -764,13 +773,15 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
 
   // Stocks: the server keeps candles a minute at least (Twelve Data's free plan has 8 requests a minute).
   // The coin's exchange named explicitly: the timeframes and the name shown are that exchange's.
-  const source = stock ? { asset: index ? 'index' : 'stock' } : { exchange: exchange || undefined };
+  // FD-FXCOMMODITIES: a pair or a commodity (Twelve Data, the user's key) by its symbol ("EUR/USD").
+  const source = stock ? { asset: index ? 'index' : (fx ?? 'stock') } : { exchange: exchange || undefined };
   // FD-KEYIDLE: a share's candles may cost the user's Twelve Data credits: not refreshed while the tab is not in use.
   const inUse = useInUse();
   const candles = useQuery({
     queryKey: ['candles', exchange, symbol, activeTf, limit],
     queryFn: () => api.get<CandlesResult>(`/api/market/candles${qs({ ...source, symbol, tf: activeTf, limit })}`),
-    refetchInterval: stock ? (inUse ? 60_000 : false) : chartSec <= 900 ? 10_000 : 30_000,
+    // FIX-STOCKLIVE: shares every 30 s (the server keeps them 25 s), as the user asked.
+    refetchInterval: stock ? (inUse ? 30_000 : false) : chartSec <= 900 ? 10_000 : 30_000,
     enabled: settings.isSuccess && tfs !== null,
   });
   const htfLimit = htfCandleCount(limit, chartSec, msSec, p.msSwing);
@@ -785,15 +796,18 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
     queryKey: ['stocks', 'quotes', symbol],
     queryFn: () => api.get<StockQuoteRow[]>(`/api/stocks/quotes${qs({ symbols: symbol })}`),
     refetchInterval: 60_000,
-    enabled: stock,
+    enabled: stock && !fx,
   });
-  const stockQuote = quoteQ.data?.[0];
+  // FD-FXCOMMODITIES: a pair's or a commodity's quote and its week (Twelve Data).
+  const fxQuotes = useFxQuotes(fx ? [symbol] : []);
+  const fxQuote = fx ? fxQuotes.data?.get(symbol) : undefined;
+  const stockQuote: StockQuoteRow | undefined = fx ? (fxQuote ? { symbol, name: null, last: fxQuote.last, change: fxQuote.change, changePct: fxQuote.changePct, status: fxQuote.open ? 'Open' : 'Closed', fetchedAt: fxQuote.fetchedAt } : undefined) : quoteQ.data?.[0];
   const watch = useWatchlist();
-  const companyName = stock ? (watch.data?.find((w) => w.kind !== 'crypto' && w.coin === symbol)?.name ?? indexById(symbol)?.name ?? stockQuote?.name ?? null) : null;
+  const companyName = stock ? (watch.data?.find((w) => w.kind !== 'crypto' && w.coin === symbol)?.name ?? indexById(symbol)?.name ?? (fx === 'commodity' ? commodityName(symbol) : null) ?? stockQuote?.name ?? null) : null;
 
   // The pair is remembered once its chart has loaded (a mistyped address does not replace the last good pair).
   const loadedSymbol = candles.data?.symbol;
-  const savedSymbol = index ? `index:${plainSymbol(symbol)}` : stock ? `stock:${symbol}` : symbol;
+  const savedSymbol = index ? `index:${plainSymbol(symbol)}` : fx ? `${fx}:${symbol}` : stock ? `stock:${symbol}` : symbol;
   useEffect(() => {
     if (!s || loadedSymbol !== symbol || s.charts?.symbol === savedSymbol || !CHART_SYMBOL_RE.test(savedSymbol)) return;
     remember({ charts: { symbol: savedSymbol } });
@@ -826,7 +840,7 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
   const runtime = studyRuntime.runtime;
   const precisionNow = candles.data?.pricePrecision ?? 2;
   const chartInfo: ChartInfo | null = useMemo(
-    () => (candles.data ? { kind: index ? 'index' : stock ? 'stock' : 'crypto', exchange: candles.data.exchange, symbol, tf: activeTf, precision: precisionNow } : null),
+    () => (candles.data ? { kind: fx ?? (index ? 'index' : stock ? 'stock' : 'crypto'), exchange: candles.data.exchange, symbol, tf: activeTf, precision: precisionNow } : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [Boolean(candles.data), candles.data?.exchange, index, stock, symbol, activeTf, precisionNow],
   );
@@ -1255,21 +1269,24 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
     return ref ? ((end.c - ref.c) / ref.c) * 100 : null;
   }, [candles.data, chartSec, stock]);
   const [base, quote] = stock ? [symbol, null] : symbol.split('/');
-  const market = stock ? info.data?.market : null;
+  // FD-FXCOMMODITIES: a pair's or a commodity's own week (24/5), not the US stock market's.
+  const fxWeekOpen = fx ? (fxQuote ? fxQuote.open : fxOpen(Date.now())) : null;
+  const market = stock && !fx ? info.data?.market : null;
   // FD-CHARTSTEADY §1: the header's values, and the previous symbol's, which hold their place while this one loads.
   const loadingCandles = !candles.data && !candles.isError;
   const priceText = last ? fmtPrice(last.c, precision) : null;
   const changeText = change24h !== null ? `${fmtPct(change24h)} 24h` : null;
   const sessionLabel = market?.state === 'closed' || market?.state === 'pre' || (!market && stockQuote?.status && /closed/i.test(stockQuote.status)) ? 'la închidere' : 'azi';
   const stockChangeText = stockQuote?.changePct != null ? `${fmtPct(stockQuote.changePct)} ${sessionLabel}` : null;
-  const sourceText = `${candles.data ? (EXCHANGE_NAME[candles.data.exchange] ?? candles.data.exchange) : stock ? '' : exchangeName}${market ? ` · ${MARKET_RO[market.state] ?? market.label}` : ''}${index && stockQuote?.delayed ? ' · până la 15 min întârziere' : ''}`;
+  const sourceText = `${candles.data ? (EXCHANGE_NAME[candles.data.exchange] ?? candles.data.exchange) : stock ? '' : exchangeName}${market ? ` · ${MARKET_RO[market.state] ?? market.label}` : ''}${fxWeekOpen === null ? '' : fxWeekOpen ? ' · deschis (24/5)' : ' · închis (weekend)'}${index && stockQuote?.delayed ? ' · până la 15 min întârziere' : ''}`;
   const priceGhost = useLatched(priceText);
   // One slot for the change, a coin's or a share's: moving from a coin to a share keeps the coin's width while loading.
   const changeGhost = useLatched(stock ? stockChangeText : changeText);
   const sourceGhost = useLatched(candles.data ? sourceText || null : null);
   // FD-TRADING §5: "Tranzacționează" with an account of the chart's kind where trading is on (never for an index).
   const tradingCaps = useTradingCaps(!index);
-  const canTrade = !index && (tradingCaps.data?.accounts ?? []).some((a) => a.enabled && a.markets.length > 0 && (a.kind === 'stocks') === stock);
+  // FD-FXCOMMODITIES: a pair on eToro or a stocks Paper Trading profile, a commodity on the profile only (the user's choice).
+  const canTrade = !index && (tradingCaps.data?.accounts ?? []).some((a) => a.enabled && a.markets.length > 0 && (fx ? fxTradable(a, fx, symbol) : (a.kind === 'stocks') === stock));
   const [ticket, setTicket] = useState<TicketSeed | null>(null);
   const closeTicket = useCallback(() => setTicket(null), []);
   // FD-BOT §1: the bots' window, from the chart's symbol, timeframe, price and the range of its last 100 candles.
@@ -1399,7 +1416,14 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
   const symbolLabel = base ? `${plainSymbol(base)}${quote ? `/${quote}` : ''}` : symbol;
   const coinAlias = !stock ? watch.data?.find((w) => w.kind === 'crypto' && w.coin === base)?.aliases.map((a) => a.replace(/^=/, '')).find((a) => a.toUpperCase() !== base?.toUpperCase()) : undefined;
   const instrumentName = companyName ?? coinAlias ?? null;
-  const statusMarket = stock ? (market ? { open: market.state === 'open', text: MARKET_RO[market.state] ?? market.label } : null) : { open: true, text: 'piața e deschisă non-stop' };
+  const statusMarket =
+    fxWeekOpen !== null
+      ? { open: fxWeekOpen, text: fxWeekOpen ? 'piața e deschisă (24/5)' : 'piața e închisă (weekend)' }
+      : stock
+        ? market
+          ? { open: market.state === 'open', text: MARKET_RO[market.state] ?? market.label }
+          : null
+        : { open: true, text: 'piața e deschisă non-stop' };
   const statusSource = candles.data ? (EXCHANGE_NAME[candles.data.exchange] ?? candles.data.exchange) : '';
   // The change since the day before: for candles shorter than a day (a day's or a week's own change is the candle's).
   const wantDay = look.status.dayChange && chartSec < 86_400;
@@ -1472,7 +1496,7 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
   // FD-IOSCHART: what the app's bar and tables show, and the app's commands (its bar's buttons).
   useHostReport(embedded, 'chart', {
     symbol,
-    kind: index ? 'index' : stock ? 'stock' : 'crypto',
+    kind: fx ?? (index ? 'index' : stock ? 'stock' : 'crypto'),
     base: base ?? symbol,
     quote: quote ?? null,
     label: symbolLabel,
@@ -1526,7 +1550,7 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
     else if (c.type === 'reset') resetView();
     else if (c.type === 'menu') setMenuAt({ x: Math.round(window.innerWidth / 2), y: Math.round(window.innerHeight / 3) });
     else if (c.type === 'ticket') {
-      if (canTrade) setTicket(stock ? { kind: 'stocks', symbol: base ?? symbol, price: last?.c } : { kind: 'crypto', symbol, price: last?.c });
+      if (canTrade) setTicket(stock ? { kind: 'stocks', symbol: base ?? symbol, price: last?.c, ...(fx ? { fx } : {}) } : { kind: 'crypto', symbol, price: last?.c });
     } else if (c.type === 'bots') {
       if (!index) openBots();
     } else if (c.type === 'positions') remember({ charts: { showPositions: c.on } });
@@ -1646,7 +1670,7 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
               {canTrade && (
                 <button
                   className="btn btn-primary max-sm:col-span-6"
-                  onClick={() => setTicket(stock ? { kind: 'stocks', symbol: base ?? symbol, price: last?.c } : { kind: 'crypto', symbol, price: last?.c })}
+                  onClick={() => setTicket(stock ? { kind: 'stocks', symbol: base ?? symbol, price: last?.c, ...(fx ? { fx } : {}) } : { kind: 'crypto', symbol, price: last?.c })}
                 >
                   <ArrowRightLeft size={16} aria-hidden /> Tranzacționează
                 </button>
@@ -1725,7 +1749,7 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
           </Warning>
         )}
 
-        {result?.warnings.includes('INSUFFICIENT_HISTORY') && <Warning>Istoric insuficient pentru încălzirea indicatorului; semnalele pot lipsi pe această pereche nouă.</Warning>}
+        {/* FIX-NOHISTWARN: a short history is plain on the chart (few candles, no signals): no warning about it. */}
         {slingshotDrawn && result?.warnings.includes('HTF_UNAVAILABLE') && (htf.isError || htf.data) && (
           <Warning>Nu s-au putut încărca lumânările pe {p.msTf}; liniile Market Structure sunt ascunse.</Warning>
         )}
@@ -1783,7 +1807,7 @@ function ChartView({ symbol, stock, index = false }: { symbol: string; stock: bo
                 onOpenHLine={openHLine}
                 tfMs={chartSec * 1000}
                 // A share's candle runs only with the market open, and ends by its close at the latest (a weekly one: not today).
-                countdown={!stock || (market?.state === 'open' && activeTf !== '1w')}
+                countdown={!stock || ((fx ? fxWeekOpen === true : market?.state === 'open') && activeTf !== '1w')}
                 closeCap={stock ? (market?.closesAt ?? null) : null}
                 logScale={prefs.logScale}
                 onLogScale={(on) => remember({ charts: { logScale: on } })}

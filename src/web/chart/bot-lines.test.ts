@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AccountView, OrderRow, PositionRow } from '../../shared/api-types.ts';
 import type { BotLevel } from '../../shared/bot.ts';
-import { BOT_NAME_MAX, botLinesOf, onChart, withoutDuplicates } from './bot-lines.ts';
+import { BOT_NAME_MAX, botLinesOf, onChart, withoutDuplicates, stillHeld } from './bot-lines.ts';
 import { PNL_COLORS, tradeLinesOf } from './pnl.ts';
 import { anchorOf, botDraftOf, draftTicket, isDraggable, lineActionOf, liveDrafts, withDrafts, withSent, type AccountLine } from './trade-drafts.ts';
 import { chartLineOf, TRADE_COLORS } from './trade-labels.ts';
@@ -15,7 +15,7 @@ const account = (over: Partial<AccountView> = {}): AccountView => ({
 // The real one (11 nov 2026, 03:00 in Romania): bot 2's LONG JUP on KuCoin, its levels kept by the bot.
 const OPENED = Date.UTC(2026, 10, 11, 1);
 const level = (over: Partial<BotLevel> = {}): BotLevel => ({
-  bot: { id: 2, name: 'Premium futures' }, accountId: 1, active: true, market: 'futures', symbol: 'JUP/USDT', side: 'long', qty: 3546, entry: 0.2538, sl: 0.24546642629734094, tp: 0.2642335737026591, openedAt: OPENED, ...over,
+  bot: { id: 2, name: 'Premium futures' }, accountId: 1, active: true, market: 'futures', symbol: 'JUP/USDT', side: 'long', qty: 3546, entry: 0.2538, sl: 0.24546642629734094, tp: 0.2642335737026591, openedAt: OPENED, margin: 300.02, ...over,
 }); // prettier-ignore
 const pos = (over: Partial<PositionRow> = {}): PositionRow => ({
   symbol: 'JUP/USDT:USDT', side: 'long', contracts: 3546, size: 3546, entryPrice: 0.2538, markPrice: 0.255, unrealizedPnl: 4.2, percentage: 1, liquidationPrice: 0.17, leverage: 3, marginMode: 'isolated', notional: 904, ...over,
@@ -40,6 +40,16 @@ describe('onChart', () => {
     // COIN the share is not COIN/USDT the coin, either way.
     expect(onChart(level({ market: 'stock', symbol: 'COIN' }), { base: 'COIN', quote: 'USDT', stock: false })).toBe(false);
     expect(onChart(level({ symbol: 'COIN/USDT' }), { base: 'COIN', quote: 'USD', stock: true })).toBe(false);
+  });
+
+  it('FD-FXCOMMODITIES: a pair\'s bot (EUR/USD) on its chart, by the accounts\' compact form; held while eToro shows EURUSD', () => {
+    const eur = level({ market: 'stock', symbol: 'EUR/USD', side: 'long' });
+    expect(onChart(eur, { base: 'EURUSD', quote: 'USD', stock: true })).toBe(true);
+    expect(onChart(eur, { base: 'EUR', quote: 'USD', stock: true })).toBe(false);
+    const read = (positions: { symbol: string; side: string }[], balances: { asset: string; total: number }[] = []) => ({ positions, balances });
+    expect(stillHeld(eur, read([{ symbol: 'EURUSD/USD', side: 'long' }]))).toBe(true);
+    expect(stillHeld(eur, read([], [{ asset: 'EURUSD', total: 1000 }]))).toBe(true);
+    expect(stillHeld(eur, read([{ symbol: 'GBPUSD/USD', side: 'long' }]))).toBe(false);
   });
 });
 
@@ -105,8 +115,11 @@ describe('on the chart', () => {
     expect(chartLineOf(sl, { last: 0.255, drafted: false, several: false, palette: TRADE_COLORS, close: false, draggable: true })).toMatchObject({
       style: 'dashed',
       draggable: true,
-      label: { qty: '3.546', text: '−29,55 USDT · bot', close: false, fill: false },
+      label: { qty: '300,02 USDT', text: '−29,55 USDT · bot', close: false, fill: false },
     });
+    // FIX-DECIMALS: the money the bot's position took, never its units; a server that does not say it: no amount.
+    const [bare] = withAccount(account(), botLinesOf([level({ margin: undefined })], JUP));
+    expect(chartLineOf(bare!, { last: 0.255, drafted: false, several: false, palette: TRADE_COLORS, close: false, draggable: true }).label?.qty).toBeNull();
     expect(chartLineOf(tp, { last: 0.255, drafted: false, several: true, palette: TRADE_COLORS, close: false, draggable: false }).label?.text).toBe('+37,00 USDT · bot · KuCoin');
     // An order's SL / TP stays solid.
     const own = accountLines(a, [order()]).find((l) => l.role === 'sl') as AccountLine;
@@ -169,5 +182,30 @@ describe('FIX-BOTDRAG: dragged', () => {
     const drafts = { [sl.id]: 0.24 };
     expect(liveDrafts(lines, drafts)).toBe(drafts);
     expect(liveDrafts(accountLines(a, []), drafts)).toEqual({});
+  });
+});
+
+describe('FIX-BOTLEVELGONE: a bot level only while its position is held', () => {
+  const lv = (over: object = {}) => ({ market: 'futures' as const, symbol: 'BTC/USDT', side: 'long' as const, ...over });
+  const pf = (positions: { symbol: string; side: string }[], balances: { asset: string; total: number }[] = [], errors?: object) => ({ positions, balances, ...(errors ? { errors } : {}) });
+
+  it('a futures position of its side keeps it; closed, or only the other side: gone', () => {
+    expect(stillHeld(lv(), pf([{ symbol: 'BTC/USDT:USDT', side: 'long' }]))).toBe(true);
+    expect(stillHeld(lv(), pf([]))).toBe(false);
+    expect(stillHeld(lv(), pf([{ symbol: 'BTC/USDT:USDT', side: 'short' }]))).toBe(false);
+    expect(stillHeld(lv({ side: 'short' }), pf([{ symbol: 'BTC/USDT:USDT', side: 'short' }]))).toBe(true);
+  });
+
+  it('a spot or share long: a holding keeps it; a broker short needs its position', () => {
+    expect(stillHeld(lv({ market: 'spot', symbol: 'SOL/USDT' }), pf([], [{ asset: 'SOL', total: 2 }]))).toBe(true);
+    expect(stillHeld(lv({ market: 'spot', symbol: 'SOL/USDT' }), pf([], [{ asset: 'SOL', total: 0 }]))).toBe(false);
+    expect(stillHeld(lv({ market: 'stock', symbol: 'AAPL' }), pf([{ symbol: 'AAPL/USD', side: 'long' }]))).toBe(true);
+    expect(stillHeld(lv({ market: 'stock', symbol: 'AAPL' }), pf([], [{ asset: 'AAPL', total: 3 }]))).toBe(true);
+    expect(stillHeld(lv({ market: 'stock', symbol: 'AMD', side: 'short' }), pf([], [{ asset: 'AMD', total: 3 }]))).toBe(false);
+  });
+
+  it('not read yet, or its positions failed: kept (never hidden on a guess)', () => {
+    expect(stillHeld(lv(), undefined)).toBe(true);
+    expect(stillHeld(lv(), pf([], [], { positions: { code: 'NETWORK', message: 'x' } }))).toBe(true);
   });
 });

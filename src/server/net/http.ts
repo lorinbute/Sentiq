@@ -95,7 +95,11 @@ export async function fetchText(url: string, opts: FetchTextOptions = {}): Promi
 }
 
 async function readCapped(res: Response, maxBytes: number): Promise<string> {
-  if (!res.body) return '';
+  return decodeBody(await readBytes(res, maxBytes), res.headers.get('content-type') ?? '');
+}
+
+async function readBytes(res: Response, maxBytes: number): Promise<Uint8Array> {
+  if (!res.body) return new Uint8Array(0);
   const reader = res.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -115,7 +119,7 @@ async function readCapped(res: Response, maxBytes: number): Promise<string> {
     buf.set(c, off);
     off += c.byteLength;
   }
-  return decodeBody(buf, res.headers.get('content-type') ?? '');
+  return buf;
 }
 
 function decodeBody(buf: Uint8Array, contentType: string): string {
@@ -138,6 +142,20 @@ export async function fetchJson<T = unknown>(url: string, opts: FetchTextOptions
     return JSON.parse(r.body) as T;
   } catch {
     throw new HttpError('BAD_JSON', 'JSON invalid', r.status);
+  }
+}
+
+/** FIX-LOGOBACKUP: a binary answer (a logo picture): its bytes, capped, and its type; network failures throw HttpError. */
+export async function httpBytes(url: string, opts: { headers?: Record<string, string>; timeoutMs?: number; maxBytes?: number } = {}): Promise<{ status: number; type: string; bytes: Uint8Array }> {
+  const { timeoutMs = 20_000, maxBytes = 1024 * 1024 } = opts;
+  try {
+    const res = await apiFetch(url, { headers: { 'User-Agent': USER_AGENT, ...opts.headers }, redirect: 'follow', signal: AbortSignal.timeout(timeoutMs) });
+    return { status: res.status, type: res.headers.get('content-type') ?? '', bytes: await readBytes(res, maxBytes) };
+  } catch (err) {
+    if (err instanceof HttpError) throw err;
+    const e = err as Error & { cause?: { code?: string } };
+    if (e.name === 'TimeoutError' || e.name === 'AbortError') throw new HttpError('TIMEOUT', `Niciun răspuns în ${Math.round(timeoutMs / 1000)} s`);
+    throw new HttpError('NETWORK', e.cause?.code ? `${e.message} (${e.cause.code})` : e.message);
   }
 }
 

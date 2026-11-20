@@ -24,6 +24,7 @@ import ccxt from 'ccxt';
 import { hashPassword } from './auth/passwords.ts';
 import { registerJobs } from './jobs/register.ts';
 import { TD_PLAN_EVERY_MS, TD_PLAN_JOB } from './market/stocks.ts';
+import { seedSources } from './news/sources.ts';
 
 // Every API route needs a signed-in user (FD-USERS): H / M carry the admin's session cookie, set in beforeEach.
 const H: Record<string, string> = { host: '127.0.0.1:4317' };
@@ -124,6 +125,7 @@ beforeEach(async () => {
     retryDelaysMs: [0, 0],
     db: await testDb(),
     ai: { http: { fetch: aiFetch, sleep: async () => {} } },
+    marketTape: null,
   });
   app = await buildApp(ctx);
   // FD-2FA: a session reaches the app only for an account with two-factor.
@@ -470,10 +472,17 @@ describe('watchlist & sources API', () => {
     await ctx.db.run("DELETE FROM news WHERE id = 'n-spx'");
   });
 
-  it('lists sources, protects built-ins and adds a tested custom feed', async () => {
+  it('lists sources, deletes a built-in for good and adds a tested custom feed', async () => {
     const sources = (await app.inject({ method: 'GET', url: '/api/sources', headers: H })).json();
     expect(sources.length).toBeGreaterThan(20);
-    expect((await app.inject({ method: 'DELETE', url: '/api/sources/coindesk', headers: M })).statusCode).toBe(409);
+    // FIX-SOURCEDELETE: a built-in deleted stays deleted, the start's seeding included.
+    expect((await app.inject({ method: 'DELETE', url: '/api/sources/cryptoslate', headers: M })).statusCode).toBe(200);
+    await seedSources(ctx.db);
+    expect(((await app.inject({ method: 'GET', url: '/api/sources', headers: H })).json() as { id: string }[]).some((x) => x.id === 'cryptoslate')).toBe(false);
+    expect((await app.inject({ method: 'DELETE', url: '/api/sources/cryptoslate', headers: M })).statusCode).toBe(404);
+    await ctx.db.run("DELETE FROM deleted_sources WHERE source_id = N'cryptoslate'");
+    await seedSources(ctx.db);
+    expect(((await app.inject({ method: 'GET', url: '/api/sources', headers: H })).json() as { id: string }[]).some((x) => x.id === 'cryptoslate')).toBe(true);
     expect((await app.inject({ method: 'PUT', url: '/api/sources/coindesk', headers: M, payload: { name: 'X' } })).statusCode).toBe(400);
     expect((await app.inject({ method: 'PUT', url: '/api/sources/coindesk', headers: M, payload: { enabled: false, weight: 0.5 } })).json()).toMatchObject({ enabled: 0, weight: 0.5 });
     setFetchImpl(async () => new Response('<rss><channel><item><title>Hello</title><link>https://x.com/1</link></item></channel></rss>', { status: 200 }));
@@ -698,6 +707,49 @@ describe('accounts & portfolio', () => {
     expect((await app.inject({ method: 'GET', url: '/api/portfolio/999', headers: H })).statusCode).toBe(404);
     expect((await app.inject({ method: 'DELETE', url: `/api/accounts/${acc.id}`, headers: M })).statusCode).toBe(200);
     expect((await ctx.db.get<{ n: number }>('SELECT count(*) AS n FROM cost_basis'))?.n).toBe(0);
+  });
+
+  it('FD-TRADESALL: „Toate”: the real accounts summed in USD, the virtual ones on request, the accounts in the user\'s order', async () => {
+    const add = async (payload: object, url = '/api/accounts') => {
+      const r = await app.inject({ method: 'POST', url, headers: M, payload });
+      expect(r.statusCode, r.body).toBe(200);
+      return r.json() as { id: number };
+    };
+    const ku = await add({ exchange: 'kucoin', label: 'Main', apiKey: 'key-123456789', secret: 'secret-123456789', password: 'pass' });
+    const kr = await add({ exchange: 'kraken', label: 'K', apiKey: 'key-123456789', secret: 'secret-123456789' });
+    const paper = await add({ label: 'Paper 1', kind: 'crypto', budget: 5000, commissionType: 'fixed', commissionValue: 1 }, '/api/accounts/paper');
+    const get = async (url: string) => (await app.inject({ method: 'GET', url, headers: H })).json();
+    const one = async (id: number) => get(`/api/portfolio/${id}`);
+    const free = (p: { cash: number | null; totals: { futuresAvailable: number | null } }) => (p.cash ?? 0) + (p.totals.futuresAvailable ?? 0);
+    // Off by default: the real money only, in the order the accounts were added.
+    const all = await get('/api/portfolio/all');
+    expect(all).toMatchObject({ currency: 'USD', virtual: false, left: [] });
+    expect(all.accounts.map((a: { accountId: number }) => a.accountId)).toEqual([ku.id, kr.id]);
+    const [pk, pr] = [await one(ku.id), await one(kr.id)];
+    expect(all.totals.spotValue).toBeCloseTo(pk.totals.spotValue + pr.totals.spotValue, 1);
+    expect(all.totals.available).toBeCloseTo(free(pk) + free(pr), 1);
+    expect(all.totals.unrealizedPnl).toBeCloseTo(pk.totals.unrealizedPnl + pr.totals.unrealizedPnl, 1);
+    // The results: KuCoin's (Kraken gives no closed history); the trades, each with its account.
+    expect(await get('/api/portfolio/all/stats?period=7d')).toMatchObject({ supported: true, wins: 2, losses: 1, breakeven: 1, successRate: 66.7, currency: 'USD', error: null });
+    const h = await get('/api/portfolio/all/history?period=7d');
+    const each = [(await get(`/api/portfolio/${ku.id}/history?period=7d`)).rows.length, (await get(`/api/portfolio/${kr.id}/history?period=7d`)).rows.length];
+    expect(h.rows.length).toBe(each[0] + each[1]);
+    expect(h.rows.every((r: { accountId: number }) => [ku.id, kr.id].includes(r.accountId))).toBe(true);
+    expect(new Set(h.rows.map((r: { key: string }) => r.key)).size).toBe(h.rows.length);
+    // The virtual accounts in, and the user's order: the menu's and „Toate”'s (those not named after).
+    const put = await app.inject({ method: 'PUT', url: '/api/settings', headers: M, payload: { trades: { allVirtual: true, accountOrder: [paper.id, kr.id] } } });
+    expect(put.statusCode, put.body).toBe(200);
+    expect(put.json().trades).toEqual({ allVirtual: true, accountOrder: [paper.id, kr.id] });
+    expect((await get('/api/accounts')).map((a: { id: number }) => a.id)).toEqual([paper.id, kr.id, ku.id]);
+    const withPaper = await get('/api/portfolio/all');
+    expect(withPaper.virtual).toBe(true);
+    expect(withPaper.accounts.map((a: { accountId: number }) => a.accountId)).toEqual([paper.id, kr.id, ku.id]);
+    expect(withPaper.totals.available).toBeCloseTo(all.totals.available + free(await one(paper.id)), 1);
+    // A wrong order is refused; „all” is not an account's id.
+    expect((await app.inject({ method: 'PUT', url: '/api/settings', headers: M, payload: { trades: { accountOrder: ['x'] } } })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'GET', url: '/api/portfolio/all/stats?period=1y', headers: H })).statusCode).toBe(400);
+    await app.inject({ method: 'PUT', url: '/api/settings', headers: M, payload: { trades: { allVirtual: false, accountOrder: [] } } });
+    for (const a of [ku, kr, paper]) expect((await app.inject({ method: 'DELETE', url: `/api/accounts/${a.id}`, headers: M })).statusCode).toBe(200);
   });
 
   it('keeps the last good section data (marked stale) when a refresh of that section fails', async () => {
@@ -1448,7 +1500,10 @@ describe('stock logos (FD-STOCKLOGOS)', () => {
     expect(msft.body.startsWith('<svg')).toBe(true);
     // Kept now: the notifications' extension gets it without a session.
     expect((await app.inject({ url: '/api/logo/s/MSFT', headers: anon })).body).toBe(msft.body);
-    expect((await app.inject({ url: '/api/logo/s/NOLOGO', headers: H })).statusCode).toBe(404);
+    const none = await app.inject({ url: '/api/logo/s/NOLOGO', headers: H });
+    expect(none.statusCode).toBe(404);
+    // FIX-LOGOBACKUP: none yet is asked again in 10 minutes (the browser's and the app's cache), not a day later.
+    expect(none.headers['cache-control']).toBe('private, max-age=600');
     expect((await app.inject({ url: '/api/logo/s/BTC%2FUSDT', headers: H })).statusCode).toBe(404);
     setFetchImpl(null);
   });
@@ -1484,7 +1539,7 @@ describe('web build serving (TD-STATIC)', () => {
     writeFileSync(path.join(web, 'index.html'), '<!doctype html><div id="root"></div>');
     writeFileSync(path.join(web, 'assets', 'old-1.js'), 'export const a = 1;');
     const config = { ...loadConfig({ KRYPTONIQ_DATA_DIR: dir } as NodeJS.ProcessEnv), webDist: web };
-    const c2 = await createContext(config, silentLogger, { nli: fakeNli, clientFactory: fakeClients(), box: new SecretBox(Buffer.alloc(32, 7)), retryDelaysMs: [0, 0], db: ctx.db });
+    const c2 = await createContext(config, silentLogger, { nli: fakeNli, clientFactory: fakeClients(), box: new SecretBox(Buffer.alloc(32, 7)), retryDelaysMs: [0, 0], db: ctx.db, marketTape: null });
     const a2 = await buildApp(c2);
     try {
       const old = await a2.inject({ url: '/assets/old-1.js', headers: { host: '127.0.0.1:4317' } });
@@ -1924,6 +1979,39 @@ describe('presence API (FD-KEYIDLE)', () => {
     await beat('tab-12345678', true);
     expect((await health()).sentiment).toMatchObject({ aiUsers: 1, aiActive: 1 });
     expect((await health()).twelveData).toMatchObject({ users: 1, active: 1 });
+  });
+
+  it('FD-FXCOMMODITIES: a forex pair and a commodity added to a list with the user\'s key, checked in Twelve Data\'s lists; without a key refused', async () => {
+    setFetchImpl((async (input: string | URL | Request) => {
+      const u = new URL(String(input));
+      if (u.pathname === '/forex_pairs') return new Response(JSON.stringify({ data: [{ symbol: 'EUR/USD', currency_group: 'Major', currency_base: 'Euro', currency_quote: 'US Dollar' }], status: 'ok' }));
+      if (u.pathname === '/commodities') return new Response(JSON.stringify({ data: [{ symbol: 'XAU/USD', name: 'Gold Spot', category: 'Precious Metal' }], status: 'ok' }));
+      if (u.pathname === '/api_usage') return new Response(JSON.stringify({ current_usage: 0, plan_limit: 55, plan_category: 'grow', timestamp: 'x' }));
+      throw new Error(`unexpected request ${u}`);
+    }) as typeof fetch);
+    const list = (await app.inject({ method: 'GET', url: '/api/watchlists', headers: H })).json().lists[0].id as number;
+    const add = (payload: object) => app.inject({ method: 'POST', url: `/api/watchlists/${list}/items`, headers: M, payload });
+    // Without a key: hidden, refused.
+    expect((await app.inject({ method: 'GET', url: '/api/fx/info', headers: H })).json()).toEqual({ available: false });
+    const noKey = await add({ kind: 'forex', coin: 'EUR/USD' });
+    expect(noKey.statusCode).toBe(400);
+    expect(noKey.body).toMatch(/cer cheia ta Twelve Data/);
+    await ctx.settings.setTwelveDataKey(1, 'a'.repeat(32));
+    expect((await app.inject({ method: 'GET', url: '/api/fx/info', headers: H })).json()).toEqual({ available: true });
+    expect((await app.inject({ method: 'GET', url: '/api/fx/search?kind=forex&q=eur', headers: H })).json()).toEqual([{ symbol: 'EUR/USD', name: 'Euro / US Dollar', group: 'Major' }]);
+    expect((await add({ kind: 'forex', coin: 'eur/usd' })).statusCode).toBe(200);
+    expect((await add({ kind: 'commodity', coin: 'XAU/USD' })).statusCode).toBe(200);
+    const unknown = await add({ kind: 'forex', coin: 'EUR/XYZ' });
+    expect(unknown.statusCode).toBe(400);
+    expect(unknown.body).toMatch(/Twelve Data nu are perechea EUR\/XYZ/);
+    const items = (await app.inject({ method: 'GET', url: '/api/watchlist', headers: H })).json() as { coin: string; kind: string; quote: string; name: string | null; aliases: string[] }[];
+    expect(items.find((i) => i.coin === 'EUR/USD')).toMatchObject({ kind: 'forex', quote: 'USD', name: 'Euro / US Dollar', aliases: ['EUR/USD', 'EURUSD'] });
+    expect(items.find((i) => i.coin === 'XAU/USD')).toMatchObject({ kind: 'commodity', quote: 'USD', name: 'Aur', aliases: ['gold', 'aur'] });
+    // Already there as a pair; removed by its address ("/" encoded).
+    expect((await add({ kind: 'forex', coin: 'EUR/USD' })).statusCode).toBe(409);
+    expect((await app.inject({ method: 'DELETE', url: '/api/watchlist/EUR%2FUSD', headers: M })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'DELETE', url: '/api/watchlist/XAU%2FUSD', headers: M })).statusCode).toBe(200);
+    expect(((await app.inject({ method: 'GET', url: '/api/watchlist', headers: H })).json() as { coin: string }[]).map((i) => i.coin)).not.toContain('EUR/USD');
   });
 
   it('the Twelve Data plan is read only for a user in the app, at most every 6 hours', async () => {

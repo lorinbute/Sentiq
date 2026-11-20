@@ -13,6 +13,7 @@ import { HISTORY } from '../exchange/trade-stats.ts';
 import { isPaperExchange } from '../../shared/providers.ts';
 import { BROKER_IDS } from '../exchange/brokers.ts';
 import { num, price as fmtPrice, signed } from '../bots/format.ts';
+import { fxSymbolOf } from '../../shared/fx.ts';
 import { Apns, type ApnsEnv } from './apns.ts';
 import { ValidationError } from '../settings.ts';
 
@@ -85,6 +86,7 @@ const shown = (symbol: string) => symbol.split(':')[0] ?? symbol;
 const baseOf = (symbol: string) => (shown(symbol).split('/')[0] ?? symbol).toUpperCase();
 /** The money of a pair (BTC/USDT → USDT); a share's: USD. */
 const quoteOf = (symbol: string) => shown(symbol).split('/')[1]?.toUpperCase() ?? 'USD';
+
 const sideWord = (s: string | null | undefined) => (s === 'short' || s === 'sell' ? 'SHORT' : 'LONG');
 const isBroker = (exchange: string) => (BROKER_IDS as readonly string[]).includes(exchange);
 
@@ -185,12 +187,18 @@ export class PushService {
       for (const e of opens) {
         const d = e.detail ?? {};
         const sym = e.symbol!;
-        const value = d.margin !== undefined && d.leverage !== undefined ? d.margin * d.leverage : d.qty !== undefined && d.price !== undefined ? d.qty * d.price : null;
+        // FIX-PUSHMARGIN (the user: „pe mine mă interesează la un trade ce sumă din bugetul meu e cheltuită, nu valoarea
+        // tranzacției… notificarea trebuie să pună valoarea din buget, suma folosită la trade și levierul”): the sum taken
+        // from the budget (the margin) and the leverage; never the position's value. Not the budget itself (the user: „nu
+        // e loc de ea”).
+        const lev = d.leverage !== undefined && d.leverage > 0 ? d.leverage : 1;
+        const used = d.margin !== undefined ? d.margin : d.qty !== undefined && d.price !== undefined ? (d.qty * d.price) / lev : null;
+        const cur = quoteOf(sym);
         const parts = [
           `${d.side ? `${sideWord(d.side)} ` : ''}${shown(sym)}`,
-          value !== null ? `valoare ${num(value, 2, 2)} ${quoteOf(sym)}` : null,
-          d.price !== undefined ? `la ${fmtPrice(d.price)}` : null,
-          d.leverage !== undefined && d.leverage > 1 ? `${num(d.leverage, 0)}×` : null,
+          used !== null ? `${num(used, 2, 2)} ${cur}` : null,
+          `levier ${num(lev, 0)}×`,
+          d.price !== undefined ? `la ${fmtPrice(d.price, fxSymbolOf(sym) !== null)}` : null,
         ];
         notes.push({ ...base, title: `${name} a deschis o poziție`, body: parts.filter(Boolean).join(' · '), logo: baseOf(sym) });
       }
@@ -404,7 +412,7 @@ export class PushService {
     }
     const title = `${kind === 'tp' ? 'Take profit' : kind === 'sl' ? 'Stop loss' : 'Lichidare'} · ${shown(w.symbol)}`;
     const body = [
-      `${sideWord(w.side)} închis${c.exit !== null ? ` la ${fmtPrice(c.exit)}` : ''}`,
+      `${sideWord(w.side)} închis${c.exit !== null ? ` la ${fmtPrice(c.exit, fxSymbolOf(w.symbol) !== null)}` : ''}`,
       c.pnl !== null ? `P&L ${signed(c.pnl)} ${c.currency}${c.pnlPct !== null ? ` (${pct(c.pnlPct)})` : ''}` : null,
     ];
     await this.end(w, 'done', { ...c, kind });

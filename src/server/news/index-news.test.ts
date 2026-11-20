@@ -312,3 +312,9 @@ describe('the stock news and score limited to indices', () => {
     expect((await day2())?.n).toBeGreaterThan(0);
   });
 });
+
+describe('FD-FXCOMMODITIES: the news of a pair or a commodity', () => {
+  it('a chip\'s symbol with its "/" is kept in the filter (it was dropped: every news shown)', () => {
+    expect(newsQuerySchema.parse({ coins: 'BTC,EUR/USD,xau/usd,^SPX,HG1,a b' }).coins).toEqual(['BTC', 'EUR/USD', 'XAU/USD', '^SPX', 'HG1']);
+  });
+});

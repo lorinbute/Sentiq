@@ -1,6 +1,6 @@
 // Type-only bridge: the web app imports server DTO types from here (erased at build time).
 export type { DaySentiment, HistoryPoint, TodayExplain } from '../server/sentiment/daily.ts';
-export type { Driver, IndexResult, ScoreWhy, SubIndex, Confidence } from '../server/sentiment/daily-index.ts';
+export type { Driver, IndexResult, MarketPart, ScoreWhy, SubIndex, Confidence } from '../server/sentiment/daily-index.ts';
 export type { NewsItemDto, NewsPage } from '../server/news/query.ts';
 export type { EconIndicator, EconomyView } from '../server/economy/service.ts';
 export type { StoredSummary, SummaryContent } from '../server/summary/service.ts';
@@ -31,7 +31,7 @@ export type { HistoryMarket, TradeHistory, TradeHistoryRow } from '../server/exc
 export type { SourceRow } from '../server/news/sources.ts';
 export type { JobStatus } from '../server/jobs/scheduler.ts';
 export type { ModelStatus } from '../server/sentiment/local.ts';
-export type { StockQuote, StockSearchHit, MarketStatus } from '../server/market/stocks.ts';
+export type { StockQuote, StockSearchHit, MarketStatus, FxEntry, FxQuote } from '../server/market/stocks.ts';
 export type { StockContext, StockFearGreed, IndexQuote } from '../server/market/stock-context.ts';
 
 export interface WatchItem {
@@ -39,8 +39,11 @@ export interface WatchItem {
   quote: string;
   position: number;
   aliases: string[];
-  /** FD-SENTIQ §4.1 (rows saved before it are crypto); an index (FD-INDICES) has its id as `coin` ("^SPX"). */
-  kind: 'crypto' | 'stock' | 'index';
+  /**
+   * FD-SENTIQ §4.1 (rows saved before it are crypto); an index (FD-INDICES) has its id as `coin` ("^SPX"); a forex pair
+   * or a commodity (FD-FXCOMMODITIES) its Twelve Data symbol ("EUR/USD", "XAU/USD").
+   */
+  kind: 'crypto' | 'stock' | 'index' | 'forex' | 'commodity';
   /** Company or index name; exchange (stocks only). */
   name: string | null;
   exchange: string | null;

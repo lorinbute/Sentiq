@@ -1,10 +1,11 @@
 // The trading bots' engine (FD-BOT §8, TD-BOT §4): every 30 s, on the instance that runs the jobs, each active bot of an
 // active user reads its prices, checks a real account against what it holds, exits (always), enters (only while it runs,
 // within its period), and saves what it did. One bot's failure never stops the others.
+import { fxCompact, fxKindOf } from '../../shared/fx.ts';
 import { randomUUID } from 'node:crypto';
 import { TRADING } from '../../shared/trading.ts';
-import { areaOf, botInputSchema, isUsdQuote, LIQ_SAFETY, liqDistance, liveOf, MIN_TRADE_PROFIT, perpetualOf, reached, transitionOf, type BotEndAction, type BotEventDetail, type BotEventKind, type BotInput, type BotLevelMove, type BotMarginMode, type BotScore, type BotSide, type BotStatus, type BotTradeReason, type DcaConfig, type GridConfig, type PositionsMode, type PremiumConfig } from '../../shared/bot.ts';
-import { htfCandleCount, runSlingshot, type SlingshotResult, type SlingshotSetup, type SlingshotSignal } from '../../shared/indicator/slingshot.ts';
+import { areaOf, botInputSchema, LIQ_SAFETY, liqDistance, liveOf, perpetualOf, reached, transitionOf, type BotEndAction, type BotEventDetail, type BotEventKind, type BotInput, type BotLevelMove, type BotMarginMode, type BotScore, type BotSide, type BotStatus, type BotTradeReason, type DcaConfig, type GridConfig, type PositionsMode, type PremiumConfig } from '../../shared/bot.ts';
+import { htfCandleCount, runSlingshot, type Candle, type SlingshotResult, type SlingshotSetup, type SlingshotSignal } from '../../shared/indicator/slingshot.ts';
 import { dayKey, tfSeconds, type Timeframe } from '../../shared/time.ts';
 import type { AiService } from '../ai/service.ts';
 import type { CalendarService } from '../calendar/service.ts';
@@ -22,7 +23,7 @@ import { afterClose, dcaOver, dcaStep, dealLevels, newDca } from './dca.ts';
 import { floorToStep, RealExec, type BotOrder, type Executor, type Fill } from './exec.ts';
 import { closeAllUnits, gridMoves, gridStopped, initGrid, netUnits, startMoves, triggered, type GridMove } from './grid.ts';
 import { askAi, highImpact, readMood, readSymbolNews, type MarketMood, type SymbolNews } from './inputs.ts';
-import { barEvents, exitAt, fitFunds, fundsFor, levelsFor, setupFate, withMargin, setupsOn, signalFate, sizeFor, type Sized } from './premium.ts';
+import { barEvents, exitAt, fitFunds, fundsFor, LATE_TOLERANCE, lateSignals, levelsFor, setupFate, withMargin, setupsOn, signalFate, sizeFor, type Sized } from './premium.ts';
 import { areaAgainst, favoured, limitOf, marketScore, passes } from './score.ts';
 import { money, num, price, qty, signed } from './format.ts';
 import { applyLevels, basisOf, closePnl, holdsPositions, openPnl, parseState, type BotPosition, type BotState, type ClosedTrade, type DcaDeal, type GridState, type PendingOrder, type PositionSetup, type PremiumState } from './state.ts';
@@ -93,7 +94,7 @@ type Purpose =
   | { kind: 'd_add'; ks: number[]; margin: number }
   | { kind: 'd_close'; reason: BotTradeReason };
 
-type Pending = PendingOrder & { purpose: Purpose; lev: number; price: number; sl?: number | null; mm?: BotMarginMode };
+type Pending = PendingOrder & { purpose: Purpose; lev: number; price: number; sl?: number | null; tp?: number | null; mm?: BotMarginMode };
 
 export interface BotEngineDeps {
   db: Db;
@@ -119,6 +120,8 @@ export interface BotEngineDeps {
 export const ACTIVE_BOTS = `SELECT b.* FROM bots b JOIN users u ON u.id = b.user_id WHERE b.status <> N'ended' AND b.execution = N'real' AND u.disabled_at IS NULL ORDER BY b.id`;
 
 export { readPrice, readQuote, type Quote } from '../market/quote.ts';
+/** FIX-BOTPRICE: how old a share's price a bot's look may take (its look is every 30 s). */
+export const BOT_STOCK_PRICE_MS = 25_000;
 import { readPrice, readQuote } from '../market/quote.ts';
 
 export function parseInput(row: Pick<BotRow, 'config'>): BotInput | null {
@@ -198,6 +201,8 @@ export interface Bar {
   closed: number;
   closedTime: number;
   close: number;
+  /** FIX-LATEENTRY: the candles Slingshot ran on (a late signal's entry: its confirming bar's close). */
+  candles?: readonly Candle[];
   /** FIX-BOTV1STOP: the closed bar's range (a setup's stop reached on it between two looks). */
   high?: number;
   low?: number;
@@ -247,6 +252,11 @@ class BotRun {
 
   private get d() {
     return this.e.deps;
+  }
+
+  /** FIX-DECIMALS: a bot on forex / commodities writes its rates with four decimals under 10 (EUR/USD 1,0845). */
+  private get fx(): boolean {
+    return this.config?.market === 'stock' && this.config.symbols.some((s) => fxKindOf(s) !== null);
   }
 
   /** FD-PUSH: what this look opened (its notes) and closed (its trades). */
@@ -369,6 +379,9 @@ class BotRun {
       this.st.day = day;
       this.st.dayRealized = 0;
     }
+
+    // FIX-ETOROPENDING: an eToro opening refused or cancelled goes also while the market is closed (no price needed).
+    if (input.exec === 'real' && input.strategy === 'premium') await this.dropVoidOpenings();
 
     if (!(await this.readPrices(input))) return;
 
@@ -557,8 +570,20 @@ class BotRun {
     return symbols.some((s) => this.fresh(s) !== null);
   }
 
-  private price(input: BotInput, sym: string): Promise<number | 'closed'> {
-    return readPrice(this.d, this.row.user_id, input.market, sym, true);
+  private async price(input: BotInput, sym: string): Promise<number | 'closed'> {
+    // FIX-BOT24 (the user: „botul rulează 24 din 24”; eToro trades 24/5, and a share may be of any exchange): a real bot
+    // on eToro runs at every hour, at eToro's own price of the instrument; eToro decides whether an order executes (one
+    // left pending is followed, FIX-ETOROPENDING). Without eToro's price: the last one known (Nasdaq), at any hour.
+    if (input.market === 'stock' && this.exec instanceof RealExec && this.exec.etoro) {
+      const p = await this.exec.platformPrice(sym).catch((err: unknown) => {
+        this.d.log.warn(`bot ${this.row.id} eToro price ${sym}: ${(err as Error).message}`);
+        return null;
+      });
+      if (p !== null && p > 0) return p;
+      return readPrice(this.d, this.row.user_id, input.market, sym, false, BOT_STOCK_PRICE_MS, 'bot');
+    }
+    // FIX-BOTPRICE: a share's price at most 25 s old (Nasdaq, free), so a stop loss or take profit is seen within a look.
+    return readPrice(this.d, this.row.user_id, input.market, sym, true, BOT_STOCK_PRICE_MS, 'bot');
   }
 
   /** This look's price of a symbol (null: none now). */
@@ -578,7 +603,7 @@ class BotRun {
     const ready =
       this.input?.exec === 'real'
         ? async (qty: number) => {
-            const pending: Pending = { key, symbol: o.symbol, side: o.side, qty, reduce: o.reduce, at: this.now, purpose, lev: o.lev, price: o.price, sl: o.sl ?? null, ...(o.mm ? { mm: o.mm } : {}) };
+            const pending: Pending = { key, symbol: o.symbol, side: o.side, qty, reduce: o.reduce, at: this.now, purpose, lev: o.lev, price: o.price, sl: o.sl ?? null, tp: o.tp ?? null, ...(o.mm ? { mm: o.mm } : {}) };
             this.st.pending = pending;
             await this.saveState();
           }
@@ -589,7 +614,7 @@ class BotRun {
   private async resend(p: Pending): Promise<void> {
     if (!this.exec) return;
     const price = this.fresh(p.symbol) ?? p.price;
-    const o: BotOrder = { symbol: p.symbol, side: p.side, qty: p.qty, reduce: p.reduce, lev: p.lev, price, sl: p.sl ?? null, at: p.at, ...(p.mm ? { mm: p.mm } : {}) };
+    const o: BotOrder = { symbol: p.symbol, side: p.side, qty: p.qty, reduce: p.reduce, lev: p.lev, price, sl: p.sl ?? null, tp: p.tp ?? null, at: p.at, ...(p.mm ? { mm: p.mm } : {}) };
     this.noteOnce(p.symbol, `resend:${p.key}`, 'order', `Ordinul de la ${new Date(p.at).toISOString().slice(11, 16)} UTC se trimite din nou, cu aceeași cheie.`);
     await this.finish(await this.exec.order(o, p.key, undefined, true), p.purpose, o);
   }
@@ -780,6 +805,11 @@ class BotRun {
     return input.market === 'futures' || this.paper;
   }
 
+  /** FIX-ETOROLEV: the leverage applies (where margin does, and at eToro: every position there opens with one). */
+  private leveraged(input: BotInput): boolean {
+    return this.margined(input) || this.separateGrids();
+  }
+
   /** The margin mode an opening goes with (FIX-BOTMARGIN), where there is one to choose. */
   private marginOf(input: BotInput): BotMarginMode | undefined {
     return this.margined(input) ? input.marginMode : undefined;
@@ -869,11 +899,12 @@ class BotRun {
       return sides(pf.positions.filter((p) => p.symbol === (input.market === 'futures' ? perpetualOf(sym) : sym)));
     }
     if (pf.errors.balances || pf.stale.balances) return null;
-    const asset = input.market === 'stock' ? sym : sym.split('/')[0];
+    // FD-FXCOMMODITIES: an account keeps a pair or a commodity in its compact form (EUR/USD → EURUSD, as eToro).
+    const asset = input.market === 'stock' ? fxCompact(sym) : sym.split('/')[0];
     const held = pf.balances.filter((b) => b.asset === asset).reduce((a, b) => a + b.total, 0);
     if (input.market === 'spot') return { long: held, short: 0 };
     if (pf.errors.positions || pf.stale.positions) return null;
-    const open = sides(pf.positions.filter((p) => p.symbol === `${sym}/USD`));
+    const open = sides(pf.positions.filter((p) => p.symbol === `${asset}/USD`));
     return { long: held + open.long, short: open.short };
   }
 
@@ -892,6 +923,26 @@ class BotRun {
     }
     const h = await this.holdings(input, sym);
     return h === null ? null : h[side];
+  }
+
+  /**
+   * FIX-ETOROPENDING: an opening eToro refused or cancelled never opened: the position the bot noted for it goes, without
+   * a result (no trade, no profit or loss). Asked at eToro, so also while the market is closed.
+   */
+  private async dropVoidOpenings(): Promise<void> {
+    const ps = this.st.premium;
+    if (!(this.exec instanceof RealExec && this.exec.etoro && ps)) return;
+    for (const sym of new Set(ps.positions.map((p) => p.symbol))) {
+      const o = await this.exec.opening(sym).catch((err: unknown) => {
+        this.d.log.warn(`bot ${this.row.id} eToro opening ${sym}: ${(err as Error).message}`);
+        return null;
+      });
+      if (o?.state !== 'void') continue;
+      const last = ps.positions.filter((p) => p.symbol === sym && p.side === o.side).reduce<(typeof ps.positions)[number] | null>((a, p) => (!a || p.openedAt > a.openedAt ? p : a), null);
+      if (!last) continue;
+      ps.positions.splice(ps.positions.indexOf(last), 1);
+      this.note('order', `eToro nu a deschis poziția ${o.side}${o.message ? ` (${o.message.replace(/\.$/, '')})` : ''}: botul a scos-o, fără profit sau pierdere.`, sym);
+    }
   }
 
   /** A position of the bot that is no longer on the account was closed outside it (FD-BOT §8). */
@@ -953,7 +1004,7 @@ class BotRun {
     const gone = qty - Math.max(0, left);
     this.closeTrade(sym, side, gone, entry, price, fees * (gone / qty), 0, openedAt, 'external', levels);
     update();
-    this.note('exit', `${left > 0 ? 'O parte din poziție' : 'Poziția'} ${side} nu mai e în cont (închisă din afara botului: de mână, de platformă sau lichidată). Socotită închisă la ${fmtP(price)}.`, sym);
+    this.note('exit', `${left > 0 ? 'O parte din poziție' : 'Poziția'} ${side} nu mai e în cont (închisă din afara botului: de mână, de platformă sau lichidată). Socotită închisă la ${fmtP(price, this.fx)}.`, sym);
   }
 
   /** A futures position on a symbol where the bot holds nothing (one-way: the bot would mix with it). */
@@ -1007,7 +1058,7 @@ class BotRun {
       if (await closeAll('grid_stop')) {
         this.setStatus('ending', null);
         this.st.endAction = 'close';
-        this.st.endReason = stopped === 'below' ? `Prețul a coborât la „Oprește sub” (${fmtP(cfg.stopBelow as number)}).` : `Prețul a urcat la „Oprește peste” (${fmtP(cfg.stopAbove as number)}).`;
+        this.st.endReason = stopped === 'below' ? `Prețul a coborât la „Oprește sub” (${fmtP(cfg.stopBelow as number, this.fx)}).` : `Prețul a urcat la „Oprește peste” (${fmtP(cfg.stopAbove as number, this.fx)}).`;
         this.note('exit', this.st.endReason, sym);
       }
       return;
@@ -1015,7 +1066,7 @@ class BotRun {
     if (g.waiting) {
       if (!triggered(g, p)) return;
       this.st.grid = g = await this.stepped(initGrid({ ...cfg, trigger: null }, input.maxAmount, input.leverage, p, p, this.marginOf(input)), sym);
-      this.note('info', `Prețul de pornire (${fmtP(cfg.trigger as number)}) a fost atins.`, sym);
+      this.note('info', `Prețul de pornire (${fmtP(cfg.trigger as number, this.fx)}) a fost atins.`, sym);
     }
     if (!g.started) {
       if (!entries) return;
@@ -1023,10 +1074,10 @@ class BotRun {
       const moves = startMoves(cfg.direction, g, p);
       if (!moves.length) {
         g.started = true;
-        this.note('info', `Grila a pornit la ${fmtP(p)}: ${g.slots.length} intervale, ${fmtQ(g.qty)} pe interval, nimic de cumpărat la pornire.`, sym);
+        this.note('info', `Grila a pornit la ${fmtP(p, this.fx)}: ${g.slots.length} intervale, ${fmtQ(g.qty)} pe interval, nimic de cumpărat la pornire.`, sym);
         return;
       }
-      if (await this.moveGrid(input, cfg, g, moves, p, true)) this.note('enter', `Grila a pornit la ${fmtP(p)}: ${moves.length} ${moves.length === 1 ? 'interval umplut' : 'intervale umplute'} la piață, ${fmtQ(g.qty)} pe interval.`, sym, { price: p, qty: g.qty * moves.length });
+      if (await this.moveGrid(input, cfg, g, moves, p, true)) this.note('enter', `Grila a pornit la ${fmtP(p, this.fx)}: ${moves.length} ${moves.length === 1 ? 'interval umplut' : 'intervale umplute'} la piață, ${fmtQ(g.qty)} pe interval.`, sym, { price: p, qty: g.qty * moves.length });
       return;
     }
     // In a pause, only the grids that empty move (FD-BOT §3).
@@ -1036,7 +1087,7 @@ class BotRun {
     const closes = moves.filter((m) => !m.open).length;
     const opens = moves.length - closes;
     const ok = units === 0 && !this.separateGrids() ? (this.apply({ kind: 'g_moves', moves, start: false }, { qty: 0, price: p, fee: 0 }), true) : await this.moveGrid(input, cfg, g, moves, p, false);
-    if (ok) this.note(closes ? 'exit' : 'enter', `Grila la ${fmtP(p)}: ${[opens ? `${opens} ${opens === 1 ? 'interval umplut' : 'intervale umplute'}` : '', closes ? `${closes} ${closes === 1 ? 'interval golit' : 'intervale golite'}` : ''].filter(Boolean).join(', ')}.`, sym, { price: p });
+    if (ok) this.note(closes ? 'exit' : 'enter', `Grila la ${fmtP(p, this.fx)}: ${[opens ? `${opens} ${opens === 1 ? 'interval umplut' : 'intervale umplute'}` : '', closes ? `${closes} ${closes === 1 ? 'interval golit' : 'intervale golite'}` : ''].filter(Boolean).join(', ')}.`, sym, { price: p });
   }
 
   /** eToro keeps every position apart: a grid's moves go as separate orders (opens, closes, each side), never netted. */
@@ -1061,7 +1112,10 @@ class BotRun {
       // At eToro a group is all opens or all closes of one side; netted elsewhere, a mixed order is no close.
       const reduce = this.separateGrids() && !group[0]?.open;
       const opensShort = !long && Boolean(group[0]?.open);
-      const ok = await this.send({ symbol: sym, side: units > 0 ? 'buy' : 'sell', qty: Math.abs(units) * g.qty, reduce, lev: g.lev, price: p, sl: opensShort ? cfg.stopAbove : null, ...(g.mm ? { mm: g.mm } : {}) }, { kind: 'g_moves', moves: group, start });
+      // FIX-ETOROLEV: a leveraged long's opening carries its stop loss too (eToro asks for one over 1×).
+      const opensLong = long && Boolean(group[0]?.open);
+      const sl = opensShort ? cfg.stopAbove : opensLong && g.lev > 1 ? cfg.stopBelow : null;
+      const ok = await this.send({ symbol: sym, side: units > 0 ? 'buy' : 'sell', qty: Math.abs(units) * g.qty, reduce, lev: g.lev, price: p, sl, ...(g.mm ? { mm: g.mm } : {}) }, { kind: 'g_moves', moves: group, start });
       all &&= ok;
     }
     return all;
@@ -1086,7 +1140,7 @@ class BotRun {
     const ds = (this.st.dca ??= newDca());
     // FD-BOTEDIT §2: an open cycle keeps its side and its leverage; a new one takes the settings'. FIX-BOTMARGIN: its margin
     // too (a cycle from before it: none, the pair's).
-    const lev = ds.deal?.lev ?? (this.margined(input) ? input.leverage : 1);
+    const lev = ds.deal?.lev ?? (this.leveraged(input) ? input.leverage : 1);
     const mm = ds.deal ? ds.deal.mm : this.marginOf(input);
     const withMm = mm ? { mm } : {};
     const side = ds.deal?.side ?? cfg.direction;
@@ -1108,18 +1162,19 @@ class BotRun {
     if (!action) return;
     if (action.kind === 'open') {
       if (await this.foreign(input, sym)) return this.noteOnce(sym, 'foreign', 'skip', `Există deja o poziție pe ${perpetualOf(sym)} care nu e a botului: ciclul nu pornește.`);
-      // A short's stop loss goes with it (eToro asks for one): the cycle's, from this base price.
-      const sl = cfg.direction === 'short' && cfg.stopLoss !== null ? p * (1 + cfg.stopLoss / 100) : null;
+      // A short's stop loss goes with it (eToro asks for one; FIX-ETOROLEV: and for a leverage over 1×): the cycle's, from
+      // this base price.
+      const sl = cfg.stopLoss === null ? null : cfg.direction === 'short' ? p * (1 + cfg.stopLoss / 100) : lev > 1 ? p * (1 - cfg.stopLoss / 100) : null;
       if (await this.send({ symbol: sym, side: buy, qty: (action.margin * lev) / p, reduce: false, lev, price: p, sl, ...withMm }, { kind: 'd_open', margin: action.margin, lev, ...withMm }))
-        this.note('enter', `Ciclul ${ds.cycle} a pornit: ordinul de bază la ${fmtP(p)}.`, sym, { side: cfg.direction, price: p });
+        this.note('enter', `Ciclul ${ds.cycle} a pornit: ordinul de bază la ${fmtP(p, this.fx)}.`, sym, { side: cfg.direction, price: p });
       return;
     }
     if (action.kind === 'add') {
       // A safety order the platform just refused waits like an entry.
       if (this.entryPaused(sym)) return;
-      const sl = ds.deal && side === 'short' ? dealLevels(cfg, ds.deal).sl : null;
+      const sl = ds.deal && (side === 'short' || lev > 1) ? dealLevels(cfg, ds.deal).sl : null;
       if (await this.send({ symbol: sym, side: buy, qty: (action.margin * lev) / p, reduce: false, lev, price: p, sl, ...withMm }, { kind: 'd_add', ks: action.ks, margin: action.margin }))
-        this.note('enter', `${action.ks.length === 1 ? `Ordinul de siguranță ${action.ks[0]}` : `Ordinele de siguranță ${action.ks.join(', ')}`} la ${fmtP(p)}.`, sym, { side, price: p });
+        this.note('enter', `${action.ks.length === 1 ? `Ordinul de siguranță ${action.ks[0]}` : `Ordinele de siguranță ${action.ks.join(', ')}`} la ${fmtP(p, this.fx)}.`, sym, { side, price: p });
       return;
     }
     const deal = ds.deal;
@@ -1128,7 +1183,7 @@ class BotRun {
     if (await this.send({ symbol: sym, side: sell, qty: deal.qty, reduce: true, lev, price: p, ...withMm }, { kind: 'd_close', reason: action.reason })) {
       const pnl = this.st.realized - pnlBefore;
       const stops = !this.switching && this.st.dca?.done && action.reason === 'sl' && cfg.slAction === 'stop';
-      this.note('exit', `${action.reason === 'tp' ? 'Take profit' : 'Stop loss'} la ${fmtP(p)}: ciclul ${ds.cycle} s-a închis cu ${fmtSigned(pnl)}.${stops ? ' Botul se oprește (acțiunea la stop loss).' : ''}`, sym, { side, price: p, pnl });
+      this.note('exit', `${action.reason === 'tp' ? 'Take profit' : 'Stop loss'} la ${fmtP(p, this.fx)}: ciclul ${ds.cycle} s-a închis cu ${fmtSigned(pnl)}.${stops ? ' Botul se oprește (acțiunea la stop loss).' : ''}`, sym, { side, price: p, pnl });
       if (this.st.dca?.done && !this.st.dca.deal && !this.switching) {
         this.setStatus('ending', null);
         this.st.endAction = 'close';
@@ -1148,7 +1203,7 @@ class BotRun {
       const ok = await this.send(closeOrder(pos, price), { kind: 'p_close', symbol: pos.symbol, side: pos.side, reason });
       if (ok) {
         const pnl = this.st.realized - before;
-        this.note('exit', `${why} Poziția ${pos.side} închisă la ${fmtP(price)} cu ${fmtSigned(pnl)}.`, pos.symbol, { side: pos.side, price, pnl });
+        this.note('exit', `${why} Poziția ${pos.side} închisă la ${fmtP(price, this.fx)} cu ${fmtSigned(pnl)}.`, pos.symbol, { side: pos.side, price, pnl });
       }
       return ok;
     };
@@ -1168,7 +1223,7 @@ class BotRun {
       const p = this.fresh(pos.symbol);
       if (p === null) continue;
       const hit = exitAt(pos, p);
-      if (hit) await close(pos, hit, p, hit === 'sl' ? `Stop loss atins (${fmtP(pos.sl as number)}).${atV1(pos)}` : `Take profit atins (${fmtP(pos.tp as number)}).`);
+      if (hit) await close(pos, hit, p, hit === 'sl' ? `Stop loss atins (${fmtP(pos.sl as number, this.fx)}).${atV1(pos)}` : `Take profit atins (${fmtP(pos.tp as number, this.fx)}).`);
       if (this.halted) return;
     }
 
@@ -1192,25 +1247,25 @@ class BotRun {
         continue;
       }
       const seen = ps.lastBar[sym];
-      if (seen === undefined) {
-        // The first look waits for the first bar that closes after the start (FD-BOT §9).
-        ps.lastBar[sym] = bar.closedTime;
-        ps.nextRead[sym] = bar.closedTime + 2 * tfMs + 5000;
-        continue;
-      }
-      if (bar.closedTime <= seen) {
-        ps.nextRead[sym] = this.now + Math.min(tfMs, input.market === 'stock' ? 15 * MIN : MIN);
+      // FIX-LATEENTRY (the user: „5 minute de așteptare pentru a verifica lumânările unui simbol e foarte mult. Mută la
+      // 1 minut”): every symbol read again each minute, whatever the timeframe; a bar Twelve Data has not published yet
+      // is caught a minute later, not a timeframe later.
+      ps.nextRead[sym] = this.now + MIN;
+      if (seen === undefined || bar.closedTime <= seen) {
+        // The first look (FD-BOT §9: no bar of before the start is taken as new) or no new bar: only a signal still
+        // active whose price is still good (FIX-LATEENTRY).
+        if (seen === undefined) ps.lastBar[sym] = bar.closedTime;
+        if (input.symbols.includes(sym)) await this.onBar(input, cfg, sym, bar, entries, close, true, false);
         continue;
       }
       ps.lastBar[sym] = bar.closedTime;
-      ps.nextRead[sym] = bar.closedTime + 2 * tfMs + 5000;
       if (bar.r.warnings.includes('INSUFFICIENT_HISTORY')) this.noteOnce(sym, 'history', 'info', 'Istoricul e prea scurt pentru Slingshot: semnalele pot lipsi.');
       await this.onBar(input, cfg, sym, bar, entries, close, input.symbols.includes(sym));
     }
     // What was kept for a symbol the bot no longer looks at.
     const kept = new Set(symbols);
     for (const marks of [ps.lastBar, ps.nextRead, this.st.noted, this.st.entryPause]) for (const sym of Object.keys(marks)) if (!kept.has(sym)) delete marks[sym];
-    for (const marks of [ps.aiNo, ps.setupTaken]) if (marks) for (const sym of Object.keys(marks)) if (!kept.has(sym)) delete marks[sym];
+    for (const marks of [ps.aiNo, ps.setupTaken, ps.signalTaken, ps.signalAiNo]) if (marks) for (const sym of Object.keys(marks)) if (!kept.has(sym)) delete marks[sym];
   }
 
   /** The platform refused the last entry on the symbol a moment ago. */
@@ -1235,15 +1290,24 @@ class BotRun {
     const count = (await this.d.source.forUser(this.row.user_id)).candles;
     let candles;
     let htf = null;
-    if (input.market === 'stock') {
+    if (input.market === 'stock' && fxKindOf(sym)) {
+      // FD-FXCOMMODITIES: a pair's or a commodity's candles from Twelve Data (the user's key), every timeframe it has.
+      const stocks = this.d.stocks;
+      if (!stocks) throw new Error('datele pentru acțiuni nu sunt disponibile');
+      // FIX-TDBOTS: the bot's reads come first in the user's Twelve Data credits.
+      candles = await stocks.fxCandles(sym, tf, count, this.row.user_id, false, 'bot');
+      if (msSec > chartSec && params.msTf) {
+        htf = (await stocks.fxCandles(sym, params.msTf as Timeframe, htfCandleCount(count, chartSec, msSec, params.msSwing), this.row.user_id, false, 'bot').catch(() => null))?.candles ?? null;
+      }
+    } else if (input.market === 'stock') {
       const stocks = this.d.stocks;
       if (!stocks) throw new Error('datele pentru acțiuni nu sunt disponibile');
       const allowed = await stocks.timeframesFor(sym, this.row.user_id);
       if (!allowed.includes(tf)) throw new Error(`timeframe-ul ${tf} cere cheia ta Twelve Data (Setări → Date acțiuni)`);
-      const c = await stocks.candles(sym, tf, count, this.row.user_id);
+      const c = await stocks.candles(sym, tf, count, this.row.user_id, false, 'bot');
       candles = c;
       if (msSec > chartSec && params.msTf && allowed.includes(params.msTf as Timeframe)) {
-        htf = (await stocks.candles(sym, params.msTf as Timeframe, htfCandleCount(count, chartSec, msSec, params.msSwing), this.row.user_id).catch(() => null))?.candles ?? null;
+        htf = (await stocks.candles(sym, params.msTf as Timeframe, htfCandleCount(count, chartSec, msSec, params.msSwing), this.row.user_id, false, 'bot').catch(() => null))?.candles ?? null;
       }
     } else {
       const exchange = await this.d.source.forSymbol(this.row.user_id, sym, tf);
@@ -1257,7 +1321,7 @@ class BotRun {
     const r = runSlingshot({ candles: candles.candles, htfCandles: htf, chartTfSec: chartSec, msTfSec: msSec, params, nowMs: this.now });
     const bar = candles.candles[closed];
     if (!bar) return null;
-    return { r, closed, closedTime: bar.t, close: bar.c, high: bar.h, low: bar.l };
+    return { r, closed, closedTime: bar.t, close: bar.c, high: bar.h, low: bar.l, candles: candles.candles };
   }
 
   private async onBar(
@@ -1268,10 +1332,18 @@ class BotRun {
     entries: boolean,
     close: (pos: BotPosition, reason: BotTradeReason, price: number, why: string) => Promise<boolean>,
     listed: boolean,
+    newBar = true,
   ): Promise<void> {
     const ps = this.premiumState();
     const ev = barEvents(bar.r, bar.closed);
     const p = this.fresh(sym) ?? bar.close;
+    // FIX-LATEENTRY: the signals of the open positions are taken (a late entry never takes them again).
+    for (const pos of ps.positions) if (pos.symbol === sym && pos.signalTime !== undefined) ((ps.signalTaken ??= {})[sym] ??= {})[pos.side] = pos.signalTime;
+    // FIX-LATEENTRY: a look without a new bar: only the late entries.
+    if (!newBar) {
+      if (listed && entries) await this.enter(input, cfg, sym, bar, p, entries, this.late(cfg, sym, bar, p, []));
+      return;
+    }
 
     // FIX-BOTSHORTS: the positions entered on a setup still forming: its confirmation brings the signal's levels, its
     // end without a signal closes them.
@@ -1310,6 +1382,23 @@ class BotRun {
         candidates.push({ side: x.side, sl: x.v1, tp: x.tp, time: x.v2Time, setup: x });
       }
     }
+    // FIX-LATEENTRY: a signal of a bar not looked at, still active, at a price still good (a side without one on the bar).
+    if (entries) candidates.push(...this.late(cfg, sym, bar, p, candidates));
+    await this.enter(input, cfg, sym, bar, p, entries, candidates);
+  }
+
+  /** FIX-LATEENTRY: the late signals as candidates: a side without one already, the bot's direction, not taken before. */
+  private late(cfg: PremiumConfig, sym: string, bar: Bar, p: number, already: Candidate[]): Candidate[] {
+    const ps = this.premiumState();
+    if (ps.positions.some((x) => x.symbol === sym)) return [];
+    return lateSignals(bar.r, bar.closed, bar.candles, p)
+      .filter((s) => !already.some((c) => c.side === s.side) && (cfg.direction === 'both' || cfg.direction === s.side) && ps.signalTaken?.[sym]?.[s.side] !== s.time)
+      .map((s) => ({ side: s.side, sl: s.sl, tp: s.tp, time: s.time, late: { at: s.at, confirmTime: s.confirmTime } }));
+  }
+
+  /** The candidates of a look: decided, the market's side first, the first one that passes entered. */
+  private async enter(input: BotInput & { strategy: 'premium' }, cfg: PremiumConfig, sym: string, bar: Bar, p: number, entries: boolean, candidates: Candidate[]): Promise<void> {
+    const ps = this.premiumState();
     if (!candidates.length) return;
     // Both sides on one bar: the rules first, for each; the side the market favours is tried first, and only it asks
     // the AI (one position per symbol).
@@ -1327,6 +1416,8 @@ class BotRun {
         const side = s.side.toUpperCase();
         // A setup is tried again at every bar it forms on: the same reason is said once (FIX-BOTSHORTS).
         if (s.setup) this.noteOnce(sym, `setup:${s.side}:${s.setup.startTime}:${d.skip.replace(/[\d.,]+/g, '#')}`, d.kind ?? 'skip', `${side} (în formare): ${d.skip}`, d.detail);
+        // FIX-LATEENTRY: a late signal is tried at every look while it stays good: the same reason is said once.
+        else if (s.late) this.noteOnce(sym, `late:${s.side}:${s.time}:${d.skip.replace(/[\d.,]+/g, '#')}`, d.kind ?? 'skip', `${side} (semnal de la ${hm(s.late.confirmTime)} UTC): ${d.skip}`, d.detail);
         else this.note(d.kind ?? 'skip', `${side}: ${d.skip}`, sym, d.detail);
         continue;
       }
@@ -1335,21 +1426,25 @@ class BotRun {
       const withMm = mm ? { mm } : {};
       const setup = s.setup ? { setup: { start: s.setup.startTime, sl: d.sl!, tp: d.tp!, v1: s.setup.v1 } } : {};
       const ok = await this.send(
-        { symbol: sym, side: s.side === 'long' ? 'buy' : 'sell', qty: sized.qty, reduce: false, lev: sized.lev, price: p, sl: d.sl, ...withMm },
+        { symbol: sym, side: s.side === 'long' ? 'buy' : 'sell', qty: sized.qty, reduce: false, lev: sized.lev, price: p, sl: d.sl, tp: d.tp, ...withMm },
         { kind: 'p_open', symbol: sym, side: s.side, sl: d.sl!, tp: d.tp!, lev: sized.lev, signalTime: s.time, ...withMm, ...setup },
       );
       if (ok) {
         entered = true;
+        // FIX-LATEENTRY: this signal is taken: never entered again, late.
+        if (!s.setup) ((ps.signalTaken ??= {})[sym] ??= {})[s.side] = s.time;
         if (input.exec === 'real') this.spent += fundsFor(sized, input.fee);
         // The leverage said on futures, and off them (a Paper Trading profile) when above 1×.
-        const lev = input.market === 'futures' || (this.margined(input) && sized.lev > 1) ? ` ${sized.lev}×` : '';
+        const lev = input.market === 'futures' || (this.leveraged(input) && sized.lev > 1) ? ` ${sized.lev}×` : '';
         const early = s.setup
           ? ` Intrare la setup (semnalul încă în formare)${cfg.levels === 'slingshot' ? `: stop loss-ul e la ${s.side === 'short' ? 'maximul' : 'minimul'} V1, unde Slingshot anulează setup-ul; la confirmare, SL / TP-ul se mută la cele ale semnalului` : ''}.`
-          : '';
+          : s.late
+            ? ` Intrare târzie: semnalul s-a confirmat la ${hm(s.late.confirmTime)} UTC, la ${fmtP(s.late.at, this.fx)}; prețul de acum e cel mult cu ${Math.round(LATE_TOLERANCE * 100)}% din drumul spre take profit mai rău.`
+            : '';
         // FIX-BOTBUDGET: the amount it took from the budget (and the position it makes with the leverage).
         const cur = this.currencyOf(input, sym);
         const amount = ` Suma: ${money(sized.margin, cur)} ${cur}${sized.lev > 1 ? `, poziția ${money(sized.notional, cur)} ${cur}` : ''}.`;
-        this.note('enter', `${s.side.toUpperCase()} la ${fmtP(p)}${lev}: SL ${fmtP(d.sl!)}, TP ${fmtP(d.tp!)}, scor ${fmtN(d.score!.score)}.${early}${amount}${sized.notes.length ? ` ${sized.notes.join(' ')}` : ''}`, sym, { ...d.detail, qty: sized.qty, leverage: sized.lev, margin: sized.margin });
+        this.note('enter', `${s.side.toUpperCase()} la ${fmtP(p, this.fx)}${lev}: SL ${fmtP(d.sl!, this.fx)}, TP ${fmtP(d.tp!, this.fx)}, scor ${fmtN(d.score!.score)}.${early}${amount}${sized.notes.length ? ` ${sized.notes.join(' ')}` : ''}`, sym, { ...d.detail, qty: sized.qty, leverage: sized.lev, margin: sized.margin });
       }
     }
   }
@@ -1380,7 +1475,7 @@ class BotRun {
       // FIX-BOTV1STOP: its stop reached on the bar between two looks (the V1: the setup ended by it): out by the stop.
       const extreme = pos.side === 'short' ? bar.high : bar.low;
       if (pos.sl !== null && extreme !== undefined && reached(extreme, pos.sl, pos.side === 'short')) {
-        await close(pos, 'sl', p, `Stop loss-ul (${fmtLevel(pos.sl)}) a fost atins pe lumânare.${atV1(pos)}`);
+        await close(pos, 'sl', p, `Stop loss-ul (${fmtLevel(pos.sl, this.fx)}) a fost atins pe lumânare.${atV1(pos)}`);
         return;
       }
       // An exit the platform refused keeps the setup: the next bar tries it again.
@@ -1405,13 +1500,13 @@ class BotRun {
     else kept.push('SL-ul');
     if (pos.tp === setup.tp) pos.tp = s.tp;
     else kept.push('TP-ul');
-    const moved = [was.sl !== pos.sl ? `SL ${fmtLevel(was.sl)} → ${fmtLevel(pos.sl)}` : '', was.tp !== pos.tp ? `TP ${fmtLevel(was.tp)} → ${fmtLevel(pos.tp)}` : ''].filter(Boolean);
+    const moved = [was.sl !== pos.sl ? `SL ${fmtLevel(was.sl, this.fx)} → ${fmtLevel(pos.sl, this.fx)}` : '', was.tp !== pos.tp ? `TP ${fmtLevel(was.tp, this.fx)} → ${fmtLevel(pos.tp, this.fx)}` : ''].filter(Boolean);
     const yours = kept.length ? ` ${kept.join(' și ')} ${kept.length > 1 ? 'mutate de tine rămân' : 'mutat de tine rămâne'}.` : '';
     // The levels as they are (no R:R); a stop the liquidation would come before is said.
-    const liq = this.margined(input) && pos.lev > 1 && pos.sl !== null && Math.abs(pos.entry - pos.sl) / pos.entry >= LIQ_SAFETY * liqDistance(pos.lev) ? ` Stop loss-ul e dincolo de distanța sigură față de lichidare (levier ${pos.lev}×).` : '';
+    const liq = this.leveraged(input) && pos.lev > 1 && pos.sl !== null && Math.abs(pos.entry - pos.sl) / pos.entry >= LIQ_SAFETY * liqDistance(pos.lev) ? ` Stop loss-ul e dincolo de distanța sigură față de lichidare (levier ${pos.lev}×).` : '';
     this.note('info', `Semnalul ${side} s-a confirmat: ${moved.length ? moved.join(', ') : 'SL / TP-ul sunt aceleași'}.${yours}${liq}`, pos.symbol, { side: pos.side, ...(pos.sl !== null ? { sl: pos.sl } : {}), ...(pos.tp !== null ? { tp: pos.tp } : {}) });
     const hit = exitAt(pos, p);
-    if (hit) await close(pos, hit, p, hit === 'sl' ? `Prețul a trecut deja de stop loss-ul semnalului (${fmtLevel(pos.sl)}).` : `Prețul a trecut deja de take profit-ul semnalului (${fmtLevel(pos.tp)}).`);
+    if (hit) await close(pos, hit, p, hit === 'sl' ? `Prețul a trecut deja de stop loss-ul semnalului (${fmtLevel(pos.sl, this.fx)}).` : `Prețul a trecut deja de take profit-ul semnalului (${fmtLevel(pos.tp, this.fx)}).`);
   }
 
   /** The checks of FD-BOT §6, in their order; the first one that says no stops the entry. */
@@ -1438,7 +1533,7 @@ class BotRun {
       const first = events[0];
       if (first) return { skip: `eveniment cu impact mare ${first.ts > this.now ? `peste ${Math.max(1, Math.round((first.ts - this.now) / MIN))} min` : 'chiar acum'}: ${first.title}.`, detail };
     }
-    const mood = await this.mood(areaOf(input.market));
+    const mood = this.areaFor(input, sym, await this.mood(areaOf(input.market)));
     if (cfg.areaVeto && areaAgainst(s.side, mood.area)) return { skip: `aria ${input.market === 'stock' ? 'Acțiuni' : 'Crypto'} e ${s.side === 'long' ? 'negativă' : 'pozitivă'} (${Math.round(mood.area!.index)}).`, detail };
     const coin = input.market === 'stock' ? sym : (sym.split('/')[0] as string);
     const news = await readSymbolNews(this.d.daily, this.row.user_id, coin, this.now);
@@ -1454,12 +1549,9 @@ class BotRun {
     if (ps.positions.length >= room) return { skip: `sunt deja ${ps.positions.length} tranzacții deschise (cel mult ${room}).`, detail, score };
     if (this.now < ps.cooldownUntil) return { skip: `pauză după o pierdere, până la ${new Date(ps.cooldownUntil).toISOString().slice(11, 16)} UTC.`, detail, score };
     const committed = ps.positions.reduce((a, x) => a + x.margin, 0);
-    // FIX-BOTBUDGET: the free budget shared among the trades still to open, at most the maximum a trade, at least what
-    // brings the minimum profit at the take profit.
-    const currency = this.currencyOf(input, sym);
-    const minProfit = await this.minProfit(currency);
-    if (minProfit === null) return { skip: `nu am prețul în dolari al ${currency}: nu pot verifica dacă tranzacția aduce cel puțin ${MIN_TRADE_PROFIT} USD la take profit.`, detail, score };
-    const sized = sizeFor({ cfg, futures: this.margined(input), budget: input.maxAmount, committed, slots: room - ps.positions.length, leverage: input.leverage, price, sl: lv.sl, tp: lv.tp, feePct: input.fee, minProfit, currency });
+    // FIX-BOTBUDGET: the free budget shared among the trades still to open, at most the maximum a trade (FIX-NOMINPROFIT:
+    // no least profit at the take profit).
+    const sized = sizeFor({ cfg, futures: this.leveraged(input), budget: input.maxAmount, committed, slots: room - ps.positions.length, leverage: input.leverage, price, sl: lv.sl, tp: lv.tp, feePct: input.fee });
     if ('error' in sized) return { skip: sized.error, detail, score };
     return { detail, score, sl: lv.sl, tp: lv.tp, sized, news };
   }
@@ -1467,13 +1559,6 @@ class BotRun {
   /** The currency a bot's symbol counts in: a pair's quote (USDT), USD for a share. */
   private currencyOf(input: BotInput, sym: string): string {
     return input.market === 'stock' ? 'USD' : (sym.split('/')[1]?.split(':')[0] ?? 'USDT');
-  }
-
-  /** FIX-BOTBUDGET: the minimum profit (MIN_TRADE_PROFIT dollars) in a currency: as it is in dollars, else at its USDT price (null: none). */
-  private async minProfit(currency: string): Promise<number | null> {
-    if (isUsdQuote(currency)) return MIN_TRADE_PROFIT;
-    const p = await readPrice(this.d, this.row.user_id, 'spot', `${currency}/USDT`, false).catch(() => null);
-    return typeof p === 'number' && p > 0 ? MIN_TRADE_PROFIT / p : null;
   }
 
   /**
@@ -1492,8 +1577,7 @@ class BotRun {
         const c = this.currencyOf(input, sym);
         const cur = ` ${c}`;
         const left = money(Math.max(0, free), c);
-        // FIX-BOTBUDGET: never a trade too small to bring the minimum profit.
-        if (!fit) return { ...d, skip: free > 0 ? `în cont sunt disponibili doar ${left}${cur}: prea puțin pentru o tranzacție care să aducă cel puțin ${MIN_TRADE_PROFIT} USD la take profit.` : 'în cont nu e nimic disponibil.' };
+        if (!fit) return { ...d, skip: 'în cont nu e nimic disponibil.' };
         // The AI chooses within what the account has.
         d = { ...d, sized: { ...fit, upper: fit.margin, notes: [...fit.notes, `Suma a fost micșorată la cât e disponibil în cont (${left}${cur}).`] } };
       }
@@ -1504,7 +1588,9 @@ class BotRun {
     // The AI can only stop an entry the rules approved.
     if (cfg.ai === 'confirm' && score) {
       if (s.setup && ps.aiNo?.[sym]?.[s.side] === s.setup.startTime) return { ...d, skip: 'AI-ul a spus deja nu pentru acest setup: e întrebat din nou la confirmare.' };
-      const mood = await this.mood(areaOf(input.market));
+      // FIX-LATEENTRY: a signal the AI refused is not asked about again at the next looks.
+      if (!s.setup && ps.signalAiNo?.[sym]?.[s.side] === s.time) return { ...d, skip: 'AI-ul a spus deja nu pentru acest semnal.' };
+      const mood = this.areaFor(input, sym, await this.mood(areaOf(input.market)));
       const news = d.news ?? (await readSymbolNews(this.d.daily, this.row.user_id, input.market === 'stock' ? sym : (sym.split('/')[0] as string), this.now));
       const day = new Date(this.now).toISOString().slice(0, 10);
       if (ps.ai.day !== day) ps.ai = { day, n: 0 };
@@ -1523,12 +1609,13 @@ class BotRun {
             side: s.side,
             tf: input.tf,
             stage: s.setup ? 'setup' : 'signal',
+            ...(s.late ? { late: s.late } : {}),
             price,
             sl: lv.sl,
             tp: lv.tp,
             levels: cfg.levels,
             trend: bar.r.uptrend[bar.closed] ? 'up' : 'down',
-            structure: `${structure === 'msBullish' ? 'ultima rupere în sus' : structure === 'msBearish' ? 'ultima rupere în jos' : 'fără rupere'}${ms?.upper ? `, rezistență ${fmtP(ms.upper.price)}` : ''}${ms?.lower ? `, suport ${fmtP(ms.lower.price)}` : ''}`,
+            structure: `${structure === 'msBullish' ? 'ultima rupere în sus' : structure === 'msBearish' ? 'ultima rupere în jos' : 'fără rupere'}${ms?.upper ? `, rezistență ${fmtP(ms.upper.price, this.fx)}` : ''}${ms?.lower ? `, suport ${fmtP(ms.lower.price, this.fx)}` : ''}`,
             score,
             mood,
             news,
@@ -1536,7 +1623,7 @@ class BotRun {
             recent: ps.recent ?? [],
             // FIX-BOTBUDGET: how much it may take, the bot's proposal, what is free and how many trades it is shared by.
             ...(d.sized
-              ? { alloc: { min: d.sized.lower, max: d.sized.upper, suggested: d.sized.margin, free: input.maxAmount - ps.positions.reduce((a, x) => a + x.margin, 0), slots: Math.max(1, Math.min(cfg.maxOpen, input.symbols.length) - ps.positions.length), lev: d.sized.lev, currency: this.currencyOf(input, sym) } }
+              ? { alloc: { max: d.sized.upper, suggested: d.sized.margin, free: input.maxAmount - ps.positions.reduce((a, x) => a + x.margin, 0), slots: Math.max(1, Math.min(cfg.maxOpen, input.symbols.length) - ps.positions.length), lev: d.sized.lev, currency: this.currencyOf(input, sym) } }
               : {}),
           },
           this.now,
@@ -1549,6 +1636,7 @@ class BotRun {
         detail.ai = verdict.verdict;
         if (verdict.verdict.decision === 'skip') {
           if (s.setup) ((ps.aiNo ??= {})[sym] ??= {})[s.side] = s.setup.startTime;
+          else ((ps.signalAiNo ??= {})[sym] ??= {})[s.side] = s.time;
           return { ...d, skip: `AI-ul a spus nu (${verdict.verdict.confidence}%): ${verdict.verdict.reason}` };
         }
         // FIX-BOTBUDGET: the AI's amount, within the bounds.
@@ -1559,6 +1647,14 @@ class BotRun {
       }
     }
     return d;
+  }
+
+  /**
+   * FD-FXCOMMODITIES (the user: no area filter): a pair or a commodity has no area (Crypto or Acțiuni): it neither stops
+   * an entry nor counts in the score (its part "fără date").
+   */
+  private areaFor(input: BotInput, sym: string, mood: MarketMood): MarketMood {
+    return input.market === 'stock' && fxKindOf(sym) ? { ...mood, area: null } : mood;
   }
 
   private mood(area: 'crypto' | 'stocks'): Promise<MarketMood> {
@@ -1627,7 +1723,14 @@ interface Levels {
 }
 
 /** FIX-BOTSHORTS: what an entry is tried on: a confirmed signal, or a setup still forming (its levels on the bar). */
-type Candidate = Pick<SlingshotSignal, 'side' | 'sl' | 'tp' | 'time'> & { setup?: SlingshotSetup };
+type Candidate = Pick<SlingshotSignal, 'side' | 'sl' | 'tp' | 'time'> & {
+  setup?: SlingshotSetup;
+  /** FIX-LATEENTRY: a signal of an earlier bar: its entry then and when it was confirmed. */
+  late?: { at: number; confirmTime: number };
+};
+
+/** "20:05" (UTC) of a moment. */
+const hm = (t: number): string => new Date(t).toISOString().slice(11, 16);
 
 /** A signal checked: why it is not taken (`skip`), or its levels and size. */
 interface Decision {
@@ -1649,7 +1752,7 @@ const SWITCHING = 'botul aplică setările noi: întâi se termină pozițiile d
 
 const fmtN = (v: number, d = 1) => num(v, d);
 const fmtP = price;
-const fmtLevel = (v: number | null) => (v === null ? '—' : fmtP(v));
+const fmtLevel = (v: number | null, fx: boolean) => (v === null ? '—' : fmtP(v, fx));
 /** FIX-BOTV1STOP: a setup's stop at its V1 (not moved on the chart, not the user's percent): reaching it ends the setup. */
 const atV1 = (pos: BotPosition): string => (pos.setup?.v1 !== undefined && pos.sl === pos.setup.v1 ? ` E ${pos.side === 'short' ? 'maximul' : 'minimul'} V1: setup-ul ${pos.side.toUpperCase()} s-a invalidat.` : '');
 const fmtQ = qty;

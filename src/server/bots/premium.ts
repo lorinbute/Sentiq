@@ -1,8 +1,7 @@
 // Slingshot Premium (FD-BOT §6): what the bar that just closed says (a confirmed signal, a take profit signal, what
 // became of the signal a position entered on), the levels and the size of a trade, and its exit at the price now.
-import { isUsdQuote, liqDistance, LIQ_SAFETY, MIN_TRADE_PROFIT, reached, type BotSide, type PremiumConfig } from '../../shared/bot.ts';
+import { liqDistance, LIQ_SAFETY, reached, type BotSide, type PremiumConfig } from '../../shared/bot.ts';
 import type { SlingshotResult, SlingshotSetup, SlingshotSignal } from '../../shared/indicator/slingshot.ts';
-import { money } from './format.ts';
 import type { BotPosition } from './state.ts';
 
 export interface BarEvents {
@@ -35,6 +34,43 @@ export function signalFate(r: SlingshotResult, side: BotSide, time: number, clos
   if (s.outcome === 'sl') return 'sl';
   if (s.outcome === 'tp') return s.outcomeReason === 'takeProfitSignal' ? 'tp_signal' : 'tp';
   return s.outcomeReason === 'trendFlip' ? 'flip' : null;
+}
+
+/**
+ * FIX-LATEENTRY: how much worse than the signal's entry (its confirming bar's close) the price may be for a late entry:
+ * this part of the way from that close to the take profit (the user: „puțin mai rău, până la 10% din drum”).
+ */
+export const LATE_TOLERANCE = 0.1;
+
+/** FIX-LATEENTRY: a signal the bot did not catch on its confirming bar, still good to enter: `at`, its entry price then. */
+export type LateSignal = SlingshotSignal & { at: number };
+
+/**
+ * FIX-LATEENTRY (the user: „dacă pornește și vede totuși că există un semnal și suntem aproape de prețul de intrare, de
+ * ce nu ar intra?”): the signals confirmed before the closed bar (on a bar the bot did not look at: stopped, or two bars
+ * between two looks) that Slingshot keeps active (no SL, no TP, not invalidated), the latest of each side, while
+ * `price` is between their stop loss and take profit and at most `LATE_TOLERANCE` of the way to the take profit worse
+ * than the close of their confirming bar. Whatever their age.
+ */
+export function lateSignals(r: SlingshotResult, closed: number, candles: readonly { c: number }[] | undefined, price: number): LateSignal[] {
+  if (!candles || !(price > 0)) return [];
+  const out: LateSignal[] = [];
+  const sides = new Set<BotSide>();
+  for (let i = r.signals.length - 1; i >= 0; i--) {
+    const s = r.signals[i] as SlingshotSignal;
+    if (s.provisional || s.confirmBar >= closed || s.outcome !== 'active' || sides.has(s.side)) continue;
+    sides.add(s.side);
+    const at = candles[s.confirmBar]?.c;
+    if (at === undefined || !(at > 0)) continue;
+    const way = Math.abs(s.tp - at);
+    // How far the price went towards the take profit since the entry (negative: better than the entry).
+    const worse = s.side === 'short' ? at - price : price - at;
+    if (!(way > 0) || worse > LATE_TOLERANCE * way * (1 + 1e-9)) continue;
+    const inside = s.side === 'short' ? price < s.sl && price > s.tp : price > s.sl && price < s.tp;
+    if (!inside) continue;
+    out.push({ ...s, at });
+  }
+  return out;
 }
 
 /** FIX-BOTSHORTS: the setups forming on the closed bar (never one on the forming bar). */
@@ -82,9 +118,6 @@ export interface SizeIn {
   tp: number;
   /** The commission of one execution, in percent. */
   feePct: number;
-  /** FIX-BOTBUDGET: the least a trade must bring at the take profit, in the bot's currency (MIN_TRADE_PROFIT dollars). */
-  minProfit: number;
-  currency: string;
 }
 
 export interface Sized {
@@ -94,7 +127,7 @@ export interface Sized {
   notional: number;
   /** Said in the journal: the leverage lowered for the liquidation. */
   notes: string[];
-  /** FIX-BOTBUDGET: the least margin that brings the minimum profit at the take profit, and the most allowed. */
+  /** FIX-BOTBUDGET: the margin's bounds (FIX-NOMINPROFIT: no least any more, 0) and the most allowed. */
   lower: number;
   upper: number;
 }
@@ -104,9 +137,9 @@ export const clampMargin = (v: number, lower: number, upper: number): number => 
 
 /**
  * The size of a trade (FD-BOT §6, FIX-BOTBUDGET): at the bot's leverage (lowered until the stop loss comes well before
- * the liquidation), the bot's free budget shared among the trades it may still open, at most its maximum a trade and
- * at least what brings MIN_TRADE_PROFIT at the take profit after the commissions in and out. Refused when even the
- * most allowed would bring less.
+ * the liquidation), the bot's free budget shared among the trades it may still open, at most its maximum a trade.
+ * FIX-NOMINPROFIT (the user: „elimină minimul de 10 dolari profit pe tranzacție”): no least profit at the take profit
+ * any more; only a take profit that does not even pay the commissions in and out is refused.
  */
 export function sizeFor(x: SizeIn): Sized | { error: string } {
   const free = x.budget - x.committed;
@@ -124,11 +157,7 @@ export function sizeFor(x: SizeIn): Sized | { error: string } {
   // What a unit of margin brings at the take profit, the commissions in and out taken.
   const edge = lev * (Math.abs(x.tp - x.price) / x.price - (2 * x.feePct) / 100);
   if (!(edge > 0)) return { error: 'take profit-ul e prea aproape: nu acoperă comisioanele de intrare și de ieșire.' };
-  const lower = x.minProfit / edge;
-  if (lower > upper * (1 + 1e-9)) {
-    const c = x.currency;
-    return { error: `cu cel mult ${money(upper, c)} ${c} disponibili pentru tranzacție, ea ar aduce la take profit ${money(upper * edge, c)} ${c}: sub minimul de ${MIN_TRADE_PROFIT} USD${isUsdQuote(c) ? '' : ` (${money(x.minProfit, c)} ${c})`}.` };
-  }
+  const lower = 0;
   const margin = clampMargin(free / Math.max(1, x.slots), lower, upper);
   return { qty: (margin * lev) / x.price, margin, lev, notional: margin * lev, notes, lower, upper };
 }
@@ -137,12 +166,11 @@ const LIQ_NOTE = 'Levierul a fost coborât: stop loss-ul trebuie atins cu mult �
 
 /**
  * FIX-BOTSHORTS: a trade cut to what the account has free, at the same leverage: the platform takes the margin and the
- * opening fee (KuCoin's order cost: the value × (1 / leverage + the fee)). FIX-BOTBUDGET: never under its least
- * (`lower`): null when the account has less than that.
+ * opening fee (KuCoin's order cost: the value × (1 / leverage + the fee)). Null when the account has nothing.
  */
 export function fitFunds(x: Sized, free: number, feePct: number, price: number): Sized | null {
   const margin = free / (1 + (x.lev * feePct) / 100);
-  if (!(margin > 0) || !(price > 0) || margin < x.lower * (1 - 1e-9)) return null;
+  if (!(margin > 0) || !(price > 0)) return null;
   const notional = margin * x.lev;
   return { ...x, qty: notional / price, margin, notional };
 }

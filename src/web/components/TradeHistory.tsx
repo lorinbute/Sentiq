@@ -8,6 +8,7 @@ import { History } from 'lucide-react';
 import type { AccountView, HistoryMarket, StatsPeriod, TradeHistory, TradeHistoryRow } from '../../shared/api-types.ts';
 import { providerById } from '../../shared/providers.ts';
 import { api, ApiError, qs } from '../api.ts';
+import { isFxRate } from '../../shared/fx.ts';
 import { amountIn, autoDigits, fmtDateTime, fmtNum, fmtPrice, fmtWeekday } from '../format.ts';
 import { useTz } from '../hooks.ts';
 import { codeRo, SHOW_RAW, tradesRo } from './account-text.ts';
@@ -89,7 +90,7 @@ function rowView(r: TradeHistoryRow, stocks: boolean) {
   // Shares in cents (as on their chart); coins with the finer steps they need.
   const share = stocks && r.market !== 'crypto';
   const ref = r.entry ?? r.exit ?? r.sl ?? r.tp ?? 1;
-  const d = share ? (Math.abs(ref) < 1 ? 4 : 2) : autoDigits(ref);
+  const d = isFxRate(r.symbol) ? autoDigits(ref, true) : share ? (Math.abs(ref) < 1 ? 4 : 2) : autoDigits(ref);
   const base = r.symbol.split('/')[0] ?? r.symbol;
   const to = chartOf(r, share);
   const name = (

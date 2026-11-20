@@ -1,12 +1,14 @@
 // ⌘K / Ctrl+K search (FD-REDESIGN): jump to a page, to a coin's chart (favourites or any pair on the
 // exchange), to a stock's chart (FD-SENTIQ §4.3) or search the news. A modal dialog with a combobox + listbox, fully usable from the keyboard.
+import type { FxEntry } from '../../shared/api-types.ts';
+import { FX_READY } from '../fx.ts';
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
 import { clsx } from 'clsx';
 import { CornerDownLeft, FileText, Newspaper, Search, type LucideIcon } from 'lucide-react';
 import type { StockSearchHit, SymbolInfo } from '../../shared/api-types.ts';
-import { chartPathOf, indexChartPath, stockChartPath } from '../chart/paths.ts';
+import { chartPathOf, indexChartPath, stockChartPath, fxChartPath } from '../chart/paths.ts';
 import { plainSymbol, searchIndices } from '../../shared/indices.ts';
 import { api, qs } from '../api.ts';
 import { useMarketSource, useWatchlist } from '../hooks.ts';
@@ -22,7 +24,7 @@ export interface PaletteLink {
 
 interface Item {
   id: string;
-  group: 'Pagini' | 'Urmărite' | 'Perechi' | 'Acțiuni' | 'Indici' | 'Știri';
+  group: 'Pagini' | 'Urmărite' | 'Perechi' | 'Acțiuni' | 'Indici' | 'Forex' | 'Mărfuri' | 'Știri';
   label: string;
   hint?: string;
   to: string;
@@ -30,6 +32,8 @@ interface Item {
   icon?: LucideIcon;
   coin?: string;
   stock?: boolean;
+  /** FD-FXCOMMODITIES: a pair's or a commodity's mark. */
+  fx?: 'forex' | 'commodity';
 }
 
 /** Lower case without diacritics, so "stiri" finds "Știri". */
@@ -72,6 +76,17 @@ export function CommandPalette({ open, onClose, pages }: { open: boolean; onClos
     staleTime: 10 * 60_000,
     retry: false,
   });
+  // FD-FXCOMMODITIES: Twelve Data's pairs and commodities (none without the user's key; hidden until all of it is there).
+  const fxSearch = useQuery({
+    queryKey: ['fx', 'palette', q],
+    queryFn: async () => {
+      const [f, m] = await Promise.all([api.get<FxEntry[]>(`/api/fx/search${qs({ kind: 'forex', q })}`), api.get<FxEntry[]>(`/api/fx/search${qs({ kind: 'commodity', q })}`)]);
+      return { forex: f, commodity: m };
+    },
+    enabled: open && FX_READY && q.length >= 2,
+    staleTime: 10 * 60_000,
+    retry: false,
+  });
 
   const items = useMemo<Item[]>(() => {
     const f = fold(q);
@@ -84,7 +99,16 @@ export function CommandPalette({ open, onClose, pages }: { open: boolean; onClos
       const sym = w.kind === 'crypto' ? `${w.coin}/${w.quote}` : plainSymbol(w.coin);
       favs.add(w.kind === 'crypto' ? sym : `${w.kind}:${w.coin}`);
       if (!f || fold(sym).includes(f) || w.aliases.some((a) => fold(a).includes(f)) || (w.name !== null && fold(w.name).includes(f)))
-        out.push({ id: `w:${w.kind}:${sym}`, group: 'Urmărite', label: sym, hint: w.kind === 'crypto' ? 'grafic' : (w.name ?? (stock ? 'acțiune' : 'indice')), to: chartPathOf(w), coin: w.coin, stock });
+        out.push({
+          id: `w:${w.kind}:${sym}`,
+          group: 'Urmărite',
+          label: sym,
+          hint: w.kind === 'crypto' ? 'grafic' : (w.name ?? (stock ? 'acțiune' : w.kind === 'forex' ? 'forex' : w.kind === 'commodity' ? 'marfă' : 'indice')),
+          to: chartPathOf(w),
+          coin: w.coin,
+          stock,
+          ...(w.kind === 'forex' || w.kind === 'commodity' ? { fx: w.kind } : {}),
+        });
     }
     if (q.length >= 2)
       for (const s of (symbols.data ?? []).filter((s) => !favs.has(s.symbol)).slice(0, 6))
@@ -95,9 +119,13 @@ export function CommandPalette({ open, onClose, pages }: { open: boolean; onClos
     if (q.length >= 2)
       for (const i of searchIndices(q).filter((i) => !favs.has(`index:${i.id}`)))
         out.push({ id: `i:${i.id}`, group: 'Indici', label: i.symbol, hint: i.name, to: indexChartPath(i.id), coin: i.id });
+    if (q.length >= 2)
+      for (const kind of ['forex', 'commodity'] as const)
+        for (const h of (fxSearch.data?.[kind] ?? []).filter((h) => !favs.has(`${kind}:${h.symbol}`)).slice(0, 6))
+          out.push({ id: `${kind}:${h.symbol}`, group: kind === 'forex' ? 'Forex' : 'Mărfuri', label: h.symbol, hint: h.name, to: fxChartPath(kind, h.symbol), coin: h.symbol, fx: kind });
     if (q) out.push({ id: 'n:search', group: 'Știri', label: `Caută în știri „${q}”`, to: `/news${qs({ q })}`, icon: Newspaper });
     return out;
-  }, [q, pages, watchlist.data, symbols.data, stocks.data]);
+  }, [q, pages, watchlist.data, symbols.data, stocks.data, fxSearch.data]);
 
   // A new query starts at the first result; the list never points past its end.
   useEffect(() => setActive(0), [q]);
@@ -199,7 +227,7 @@ export function CommandPalette({ open, onClose, pages }: { open: boolean; onClos
                   className={clsx('flex cursor-pointer items-center gap-3 rounded-[10px] px-3 py-2.5 text-[14px]', i === current ? 'bg-hover text-text' : 'text-muted')}
                 >
                   {it.coin ? (
-                    <CoinLogo coin={it.coin} size={18} badge={it.stock} square={it.stock} />
+                    <CoinLogo coin={it.coin} size={18} badge={it.stock} square={it.stock} fx={it.fx} />
                   ) : it.icon ? (
                     <it.icon size={16} className={clsx('shrink-0', i === current ? 'text-accent' : 'text-faint')} aria-hidden />
                   ) : null}

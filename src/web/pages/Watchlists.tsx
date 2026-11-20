@@ -554,13 +554,15 @@ export default function WatchlistsPage() {
                                   </td>
                                   <td className="font-semibold">
                                     <div className="flex min-w-0 items-center gap-2">
-                                      <CoinLogo coin={w.coin} size={18} badge={w.kind === 'stock'} square={w.kind === 'stock'} />
+                                      <CoinLogo coin={w.coin} size={18} badge={w.kind === 'stock'} square={w.kind === 'stock'} fx={w.kind === 'forex' || w.kind === 'commodity' ? w.kind : undefined} />
                                       {shown}
                                       {w.name && <span className="max-w-[200px] truncate font-normal text-faint">{w.name}</span>}
                                     </div>
                                   </td>
-                                  <td className="text-muted">{w.kind === 'stock' ? 'Acțiune' : w.kind === 'index' ? 'Indice' : 'Crypto'}</td>
-                                  <td className="whitespace-nowrap text-muted">{w.kind === 'stock' ? (w.exchange ?? 'SUA') : w.kind === 'index' ? 'indice SUA' : `${w.coin}/${w.quote}`}</td>
+                                  <td className="text-muted">{w.kind === 'stock' ? 'Acțiune' : w.kind === 'index' ? 'Indice' : w.kind === 'forex' ? 'Forex' : w.kind === 'commodity' ? 'Marfă' : 'Crypto'}</td>
+                                  <td className="whitespace-nowrap text-muted">
+                                    {w.kind === 'stock' ? (w.exchange ?? 'SUA') : w.kind === 'index' ? 'indice SUA' : w.kind === 'forex' || w.kind === 'commodity' ? `Twelve Data · ${w.quote}` : `${w.coin}/${w.quote}`}
+                                  </td>
                                   <td className="num text-right whitespace-nowrap" title={r.error ?? undefined}>
                                     {r.last !== null ? fmtPrice(r.last, r.precision) : r.error ? '—' : '…'}
                                   </td>

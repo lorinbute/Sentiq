@@ -1,6 +1,7 @@
 // FIX-BOTLEVELS: the stop losses / take profits a real bot keeps for the positions it holds, as lines on the chart. The
 // bot closes the position itself at them (they are no orders at the platform): drawn dashed, no ×; FIX-BOTDRAG: dragged
 // as an order's, the bot gets the new level.
+import { etoroInverseOf, fxCompact } from '../../shared/fx.ts';
 import type { BotLevel } from '../../shared/bot.ts';
 import { pnlAtLevel, PNL_COLORS, type PnlPalette, type TradeLine } from './pnl.ts';
 
@@ -24,10 +25,37 @@ const shortName = (name: string) => (name.length > BOT_NAME_MAX ? `${name.slice(
 
 /** Whether a bot's position is on the chart's asset: a share by its ticker, a coin by its base (spot: and its quote). */
 export function onChart(l: Pick<BotLevel, 'market' | 'symbol'>, input: Pick<BotLinesInput, 'base' | 'quote' | 'stock'>): boolean {
-  if (input.stock) return l.market === 'stock' && l.symbol === input.base;
+  // FD-FXCOMMODITIES: a pair's bot (EUR/USD) on its chart, whose base is the accounts' compact form (EURUSD).
+  if (input.stock) return l.market === 'stock' && fxCompact(l.symbol) === input.base;
   if (l.market === 'stock') return false;
   const [base, quote] = l.symbol.split('/');
   return base === input.base && (l.market === 'futures' || quote === input.quote);
+}
+
+/** What `stillHeld` reads of an account's portfolio. */
+export interface HeldRead {
+  positions: readonly { symbol: string; side: string }[];
+  balances: readonly { asset: string; total: number }[];
+  errors?: Partial<Record<string, unknown>>;
+}
+
+/**
+ * FIX-BOTLEVELGONE (the user: a trade closed from the chart, its SL and TP stayed until long after): a bot's level is
+ * drawn while the account still holds what it is for: a position of its side on the asset (futures, a short, a
+ * broker's CFD), or for a long on spot or a share also a holding of it. The bot drops its position only at its next
+ * look and the levels are read once a minute; the account's portfolio is read at once after a trading action. An
+ * account not read yet, or whose positions failed: unknown, kept.
+ */
+export function stillHeld(l: Pick<BotLevel, 'market' | 'symbol' | 'side'>, p: HeldRead | undefined): boolean {
+  if (!p || p.errors?.positions || p.errors?.balances) return true;
+  const base = l.market === 'stock' ? fxCompact(l.symbol) : (l.symbol.split('/')[0] ?? l.symbol);
+  const baseOf = (s: string) => s.split('/')[0] ?? s;
+  const short = l.side === 'short';
+  // FIX-ETOROFX: a bot's JPY/USD is a position on USDJPY at eToro, of the other side.
+  const via = l.market === 'stock' ? etoroInverseOf(l.symbol) : null;
+  if (p.positions.some((x) => (baseOf(x.symbol) === base && (x.side === 'short') === short) || (via !== null && baseOf(x.symbol) === via && (x.side === 'short') !== short))) return true;
+  if (short || l.market === 'futures') return false;
+  return p.balances.some((b) => b.asset === base && b.total > 0);
 }
 
 /**
@@ -46,7 +74,7 @@ export function botLinesOf(levels: readonly BotLevel[], input: BotLinesInput, co
     const n = seen.get(key) ?? 0;
     seen.set(key, n + 1);
     const group = n ? `${key}#${n}` : key;
-    const basis = { long: l.side === 'long', entry: l.entry, qty: l.qty, quote };
+    const basis = { long: l.side === 'long', entry: l.entry, qty: l.qty, quote, used: l.margin ?? null };
     // "bot", "bot <name>" among several bots; "… oprit" while it has a problem (its levels do not fire).
     const tag = `bot${named ? ` ${shortName(l.bot.name)}` : ''}${l.active ? '' : ' oprit'}`;
     for (const [role, price] of [

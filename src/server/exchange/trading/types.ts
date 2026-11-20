@@ -58,6 +58,12 @@ export interface Trader {
   /** Sends exactly what `normalize` returned; never retried. */
   place(preview: OrderPreview): Promise<OrderResult>;
   cancel(input: CancelInput): Promise<OrderResult>;
+  /** FIX-BOT24: an instrument's price now at the platform (eToro: its rate, at any hour); null: none. */
+  price?(symbol: string): Promise<number | null>;
+  /** FIX-ETOROLIMIT: whether the platform has a symbol, with as few requests as it can (eToro: its instrument kept). */
+  known?(symbol: string): Promise<void>;
+  /** FIX-ETOROPENDING: an order's state now (eToro: its lookup), with the platform's reason when refused. */
+  lookup?(orderId: string): Promise<{ status: OrderResult['status']; message: string | null }>;
   /** FD-ORDEREDIT: reads the orders / position again, rounds and checks the changes, and decides how each goes out. */
   normalizeModify(ticket: ModifyTicket): Promise<ModifyPlan>;
   /** Sends exactly what `normalizeModify` planned, step by step; never retried. */

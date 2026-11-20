@@ -1,5 +1,6 @@
 // What the user's AI reads to summarise their day (FD-SUMMARY §4, TD-SUMMARY §2), and the chart series it may choose
 // from. Only Sentiq's own data about today: nothing is fetched from the internet here.
+import { commodityName } from '../../shared/fx.ts';
 import { stockScopeFor, stockScopeSql } from '../news/stock-scope.ts';
 import { indexById, plainSymbol } from '../../shared/indices.ts';
 import { dayBounds, dayKey } from '../../shared/time.ts';
@@ -104,12 +105,18 @@ export async function buildDayContext(deps: DayContextDeps, userId: number, now 
   const today = await deps.daily.today(tz, now, scope);
   const history = await deps.daily.history(7, tz, now, scope);
   const counts = today.counts;
-  add('Sentimentul zilei (0–100, 50 = neutru; calculat din toate știrile)', [
+  const markets = [today.market, today.crypto].filter((m) => m !== null && m !== undefined);
+  add('Sentimentul zilei (0–100, 50 = neutru; din toate știrile, iar la acțiuni și crypto și din reacția pieței)', [
     `Index: ${today.index} (${today.confidence === 'high' ? 'încredere ridicată' : today.confidence === 'medium' ? 'încredere medie' : 'încredere scăzută'}); știri: ${counts.positive} pozitive, ${counts.neutral} neutre, ${counts.negative} negative, ${counts.pending} în analiză.`,
     `Pe categorii: ${Object.entries(today.breakdown)
       .filter(([, b]) => b.count > 0)
       .map(([k, b]) => `${k} ${b.index} (${b.count} știri)`)
       .join(', ')}.`,
+    // FD-MARKETMOVE: what the stocks and crypto parts hold besides their news.
+    ...markets.map(
+      (mk) =>
+        `Reacția pieței ${mk.area === 'crypto' ? 'crypto (ultimele 24 de ore)' : `de acțiuni (${mk.live ? 'ședința în curs' : `ședința din ${mk.day}, închisă`})`}: ${mk.indices.map((i) => `${i.name} ${r2(i.changePct)}% (o zi obișnuită ±${r2(i.typicalPct)}%)`).join(', ')}; scorul reacției ${Math.round(mk.value * 10) / 10}, cu ${Math.round(mk.share * 100)}% din partea ${mk.area === 'crypto' ? 'Crypto' : 'Acțiuni'} (din știri singure ar fi ${mk.news}) și ${Math.round(mk.dayShare * 100)}% din indexul zilei.`,
+    ),
     `Pe ore: ${today.intraday.map((p) => `${clock(p.t, tz)} ${p.index}`).join(', ')}.`,
     `Ultimele zile: ${history.map((h) => `${h.day} ${h.index}`).join(', ')}.`,
     'Știrile care trag cel mai mult în sus:',
@@ -226,7 +233,7 @@ export async function buildDayContext(deps: DayContextDeps, userId: number, now 
     `Favoritele utilizatorului (scanner Slingshot, timeframe ${s.scanner.tf})`,
     rows.map(
       (row) =>
-        `- ${plainSymbol(row.coin)}${row.kind === 'stock' ? ' (acțiune)' : row.kind === 'index' ? ` (indice: ${indexById(row.coin)?.name ?? plainSymbol(row.coin)})` : ''}: preț ${row.price ?? 'n/a'}, 24h ${row.change24h === null || row.change24h === undefined ? 'n/a' : `${r2(row.change24h)}%`}, ${row.uptrend ? 'trend ascendent' : 'fără trend ascendent'}${row.liveSignal ? ', semnal LONG în formare' : ''}${row.liveShortSignal ? ', semnal SHORT în formare' : ''}${row.lastSignal ? `; ultimul semnal ${row.lastSignal.side === 'short' ? 'SHORT' : 'LONG'} ${row.lastSignal.outcome}` : ''}`,
+        `- ${plainSymbol(row.coin)}${row.kind === 'stock' ? ' (acțiune)' : row.kind === 'index' ? ` (indice: ${indexById(row.coin)?.name ?? plainSymbol(row.coin)})` : row.kind === 'forex' ? ' (pereche forex)' : row.kind === 'commodity' ? ` (marfă: ${commodityName(row.coin)})` : ''}: preț ${row.price ?? 'n/a'}, 24h ${row.change24h === null || row.change24h === undefined ? 'n/a' : `${r2(row.change24h)}%`}, ${row.uptrend ? 'trend ascendent' : 'fără trend ascendent'}${row.liveSignal ? ', semnal LONG în formare' : ''}${row.liveShortSignal ? ', semnal SHORT în formare' : ''}${row.lastSignal ? `; ultimul semnal ${row.lastSignal.side === 'short' ? 'SHORT' : 'LONG'} ${row.lastSignal.outcome}` : ''}`,
     ),
   );
   const movers = rows.filter((row) => typeof row.change24h === 'number');

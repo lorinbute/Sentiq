@@ -138,7 +138,8 @@ export function useStockSet(): ReadonlySet<string> {
 
 /** Stock data: the timeframes the source has, whether the Twelve Data key is set, the US market state. */
 export function useStocksInfo(enabled = true) {
-  return useQuery({ queryKey: ['stocks', 'info'], queryFn: () => api.get<StocksInfo>('/api/stocks/info'), staleTime: 60_000, refetchInterval: 5 * 60_000, enabled });
+  // FIX-SESSIONOPEN: every minute, so a page open before the session follows the open (and the close) of the market.
+  return useQuery({ queryKey: ['stocks', 'info'], queryFn: () => api.get<StocksInfo>('/api/stocks/info'), staleTime: 30_000, refetchInterval: 60_000, enabled });
 }
 
 /** Re-renders every `ms` milliseconds (clocks, countdowns, "x min ago"). */

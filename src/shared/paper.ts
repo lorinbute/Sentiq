@@ -1,5 +1,6 @@
 // FD-PAPER: Paper Trading profiles: their settings, how a commission is charged, what a profile trades. Shared by the
 // server (validation, the engine) and the pages.
+import { maxDecimals } from './decimals.ts';
 import { z } from 'zod';
 import type { TradeMarket } from './trading.ts';
 
@@ -63,7 +64,8 @@ export interface PaperProfile {
 /** The commission of one execution: a percent of its value, or a fixed sum (USD) whatever its size. */
 export const commissionOf = (type: CommissionType, value: number, notional: number): number => (type === 'percent' ? (Math.abs(notional) * value) / 100 : value);
 
-const fmt = (v: number) => new Intl.NumberFormat('ro-RO', { maximumFractionDigits: 4 }).format(v);
+// FIX-DECIMALS: at most four decimals under 1 (0,075%), two from 1 on.
+const fmt = (v: number) => new Intl.NumberFormat('ro-RO', { maximumFractionDigits: Math.min(4, maxDecimals(v)) }).format(v);
 
 /** „0,1% pe execuție”, „1 USD pe execuție”, „fără comision”. */
 export function commissionText(type: CommissionType, value: number): string {

@@ -7,6 +7,7 @@ import { ConflictError, NotFoundError } from '../http/errors.ts';
 import { defaultStockAliases } from '../market/stocks.ts';
 import { ValidationError } from '../settings.ts';
 import { indexById, plainSymbol } from '../../shared/indices.ts';
+import { fxAliases, fxQuote } from '../../shared/fx.ts';
 import type { WatchItem } from '../../shared/api-types.ts';
 
 /** Different symbols in all of a user's lists together (FD-WATCHLISTS §6): the scanner's and the feeds' budget. */
@@ -20,7 +21,10 @@ export const FIRST_LIST_NAME = 'Favorite';
 export type WatchAdd =
   | { kind: 'crypto'; coin: string; quote: string; aliases: string[] }
   | { kind: 'stock'; coin: string; name?: string; exchange?: string; aliases?: string[] }
-  | { kind: 'index'; coin: string; aliases?: string[] };
+  | { kind: 'index'; coin: string; aliases?: string[] }
+  /** FD-FXCOMMODITIES: a Twelve Data pair or commodity ("EUR/USD", "XAU/USD"), its name from Twelve Data's list. */
+  | { kind: 'forex'; coin: string; name?: string; aliases?: string[] }
+  | { kind: 'commodity'; coin: string; name?: string; aliases?: string[] };
 
 export interface WatchListView {
   id: number;
@@ -53,8 +57,8 @@ export interface BulkResult {
 
 type RegisterRow = { coin: string; quote: string; position: number; aliases: string; kind: string; name: string | null; exchange: string | null; added_at: number };
 
-const kindOf = (kind: string): WatchItem['kind'] => (kind === 'stock' || kind === 'index' ? kind : 'crypto');
-const kindLabel = (kind: string) => (kind === 'stock' ? 'acțiune' : kind === 'index' ? 'indice' : 'monedă');
+const kindOf = (kind: string): WatchItem['kind'] => (kind === 'stock' || kind === 'index' || kind === 'forex' || kind === 'commodity' ? kind : 'crypto');
+const kindLabel = (kind: string) => (kind === 'stock' ? 'acțiune' : kind === 'index' ? 'indice' : kind === 'forex' ? 'pereche forex' : kind === 'commodity' ? 'marfă' : 'monedă');
 const fold = (s: string) => s.trim().toLocaleLowerCase('ro');
 
 export function toWatchItem(w: RegisterRow): WatchItem {
@@ -281,6 +285,18 @@ export class WatchlistService {
         const now = this.now();
         if (w.kind === 'crypto') {
           await this.db.run("INSERT INTO watchlist(user_id, coin, quote, position, aliases, added_at, kind) VALUES (?, ?, ?, ?, ?, ?, N'crypto')", [userId, w.coin, w.quote, n, JSON.stringify(w.aliases), now]);
+        } else if (w.kind === 'forex' || w.kind === 'commodity') {
+          // FD-FXCOMMODITIES: priced in the currency after "/" (USD for copper's "HG1").
+          await this.db.run('INSERT INTO watchlist(user_id, coin, quote, position, aliases, added_at, kind, name, exchange) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)', [
+            userId,
+            w.coin,
+            fxQuote(w.coin),
+            n,
+            JSON.stringify(w.aliases ?? fxAliases(w.kind, w.coin)),
+            now,
+            w.kind,
+            w.name ?? null,
+          ]);
         } else if (w.kind === 'index') {
           const info = indexById(w.coin);
           await this.db.run("INSERT INTO watchlist(user_id, coin, quote, position, aliases, added_at, kind, name, exchange) VALUES (?, ?, N'USD', ?, ?, ?, N'index', ?, NULL)", [

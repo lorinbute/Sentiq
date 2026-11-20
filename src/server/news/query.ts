@@ -1,4 +1,5 @@
 // News listing with filters (FD §2.2). Filters affect only what is shown, never the daily sentiment.
+import { FX_SYMBOL_RE } from '../../shared/fx.ts';
 import { stocksOf, type SymbolKinds } from './symbol-kinds.ts';
 import type { FilterIndexId } from '../../shared/stock-indices.ts';
 import { stockScopeSql, type StockScope } from './stock-scope.ts';
@@ -12,7 +13,8 @@ export const newsQuerySchema = z.object({
   coins: z
     .string()
     .optional()
-    .transform((s) => (s ? s.split(',').map((c) => c.trim().toUpperCase()).filter((c) => /^\^?[A-Z0-9][A-Z0-9.-]{0,14}$/.test(c)) : [])),
+    // FD-FXCOMMODITIES: a pair's or a commodity's symbol too ("EUR/USD").
+    .transform((s) => (s ? s.split(',').map((c) => c.trim().toUpperCase()).filter((c) => /^\^?[A-Z0-9][A-Z0-9.-]{0,14}$/.test(c) || FX_SYMBOL_RE.test(c)) : [])),
   favorites: z
     .enum(['0', '1', 'true', 'false'])
     .optional()

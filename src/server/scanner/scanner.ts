@@ -1,6 +1,7 @@
 // Runs the Slingshot port on every watchlist coin (FD §5.4).
 import { htfCandleCount, runSlingshot, type SignalSide, type SlingshotResult } from '../../shared/indicator/slingshot.ts';
 import { tfSeconds, type Timeframe } from '../../shared/time.ts';
+import { fxOpen } from '../../shared/fx.ts';
 import type { Db } from '../db/database.ts';
 import type { Logger } from '../log.ts';
 import type { MarketData } from '../market/market.ts';
@@ -11,11 +12,19 @@ import type { SettingsService } from '../settings.ts';
 
 /** Stocks are re-scanned at most this often, to stay inside the free Twelve Data plan of each key (FD-SENTIQ §4.6). */
 const STOCK_SCAN_EVERY_MS = 30 * 60_000;
+/**
+ * FIX-TDBOTS (the user: „dacă nu mă uit la view-ul de azi nu vreau să mai consume credite”): a user's shares are read
+ * with their Twelve Data key only while their Today page is open, i.e. it asked for the scan in this long (it asks each
+ * minute).
+ */
+export const TODAY_VIEW_MS = 3 * 60_000;
+/** FIX-TDBOTS: shares read with a user's key in one run (each 1–2 credits), the rest in the next ones: no burst. */
+export const SCAN_KEY_READS = 8;
 
 export interface ScanRow {
   coin: string;
   /** A coin (crypto), a share (stock) or a US index (FD-INDICES). */
-  kind?: 'crypto' | 'stock' | 'index';
+  kind?: 'crypto' | 'stock' | 'index' | 'forex' | 'commodity';
   symbol: string;
   tf: Timeframe;
   ok: boolean;
@@ -97,6 +106,8 @@ export class Scanner {
   private readonly stockRows = new Map<string, { row: ScanRow; at: number; closed: boolean; tf: Timeframe }>();
   /** FD-KEYIDLE: the users using Sentiq now (only for them a share is read with their key); absent, everyone (tests). */
   private readonly present: (() => Promise<Set<number>>) | null;
+  /** FIX-TDBOTS: when each user's Today page last asked for the scan. */
+  private readonly views = new Map<number, number>();
 
   constructor(
     db: Db,
@@ -121,35 +132,54 @@ export class Scanner {
    * otherwise reused. A share's timeframes and candles depend on the user's own Twelve Data key (FD-TDKEYS); read with
    * it only while the user uses Sentiq (`here`, FD-KEYIDLE): else the last row, however old, or none (null).
    */
-  private async stockRow(userId: number, coin: string, kind: 'stock' | 'index', tfWanted: Timeframe, s: Settings, count: number, here: boolean, signal?: AbortSignal): Promise<ScanRow | null> {
+  private async stockRow(
+    userId: number,
+    coin: string,
+    kind: 'stock' | 'index' | 'forex' | 'commodity',
+    tfWanted: Timeframe,
+    s: Settings,
+    count: number,
+    here: boolean,
+    keyReads: { left: number },
+    signal?: AbortSignal,
+  ): Promise<ScanRow | null> {
     const stocks = this.stocks;
-    const symbol = `${coin}/USD`;
+    // FD-FXCOMMODITIES: a pair or a commodity is its Twelve Data symbol ("EUR/USD"), read with the user's key only.
+    const fx = kind === 'forex' || kind === 'commodity';
+    const symbol = fx ? coin : `${coin}/USD`;
     if (!stocks) return { coin, kind, symbol, tf: tfWanted, ok: false, error: 'datele pentru acțiuni nu sunt disponibile' };
-    const allowed = await stocks.timeframesFor(coin, userId);
+    if (fx && !(await stocks.hasKey(userId))) return { coin, kind, symbol, tf: tfWanted, ok: false, error: 'Forex și mărfurile cer cheia ta Twelve Data' };
+    const allowed = fx ? await stocks.timeframes(userId) : await stocks.timeframesFor(coin, userId);
     const tf = allowed.includes(tfWanted) ? tfWanted : '1d';
-    const status = await stocks.confirmedStatus();
-    const closed = status?.state === 'closed';
+    // Their own week (24/5), not the US stock market's hours.
+    const closed = fx ? !fxOpen(Date.now()) : (await stocks.confirmedStatus())?.state === 'closed';
     const p = s.indicator;
     // Keyed by the settings too: two users with different indicator settings get their own rows, and new settings
     // or history length recompute at once, even with the market closed. A share read with a user's Twelve Data key
     // is that user's row; Nasdaq's and the indices' are shared.
-    const own = kind === 'stock' && (await stocks.hasKey(userId)) ? userId : null;
+    const own = (kind === 'stock' || fx) && (await stocks.hasKey(userId)) ? userId : null;
     const key = JSON.stringify([coin, p, count, own]);
     const prev = this.stockRows.get(key);
     const now = Date.now();
     if (prev && prev.tf === tf && (closed ? prev.closed : now - prev.at < STOCK_SCAN_EVERY_MS)) return prev.row;
-    // Not read with the key of somebody who is not using Sentiq; nothing kept, so it is read when they come back.
+    // Not read with the key of somebody who is not using Sentiq (FIX-TDBOTS: not looking at Today); nothing kept, so it
+    // is read when they come back. FIX-TDBOTS: a few a run; the others keep their last row until the next run.
     if (own !== null && !here) return prev?.row ?? null;
+    if (own !== null) {
+      if (keyReads.left <= 0) return prev?.row ?? null;
+      keyReads.left--;
+    }
     if (signal?.aborted) return prev?.row ?? { coin, kind, symbol, tf, ok: false, error: 'scanare întreruptă' };
     const chartSec = tfSeconds(tf);
     const msSec = p.msTf ? tfSeconds(p.msTf) : chartSec;
     let row: ScanRow;
     try {
-      const c = await stocks.candles(coin, tf, count, userId);
+      const read = (t: Timeframe, n: number) => (fx ? stocks.fxCandles(coin, t, n, userId) : stocks.candles(coin, t, n, userId));
+      const c = await read(tf, count);
       let htf = null;
       if (msSec > chartSec && p.msTf && allowed.includes(p.msTf as Timeframe)) {
         try {
-          htf = (await stocks.candles(coin, p.msTf as Timeframe, htfCandleCount(count, chartSec, msSec, p.msSwing), userId)).candles;
+          htf = (await read(p.msTf as Timeframe, htfCandleCount(count, chartSec, msSec, p.msSwing))).candles;
         } catch (err) {
           this.log.warn(`scanner HTF ${coin}: ${(err as Error).message}`);
         }
@@ -166,6 +196,22 @@ export class Scanner {
     return row;
   }
 
+  /**
+   * FIX-TDBOTS: the user's Today page asked for the scan (it is open). True when it was not open before: the caller
+   * starts a run at once, so the shares are read now and not at the next one.
+   */
+  viewed(userId: number): boolean {
+    const now = Date.now();
+    const back = now - (this.views.get(userId) ?? 0) >= TODAY_VIEW_MS;
+    this.views.set(userId, now);
+    return back;
+  }
+
+  /** FIX-TDBOTS: the user's Today page is open (it asked for the scan lately). */
+  private viewing(userId: number): boolean {
+    return Date.now() - (this.views.get(userId) ?? 0) < TODAY_VIEW_MS;
+  }
+
   /** A user's last scan, or null before the first one finished. */
   result(userId: number): ScanResult | null {
     return this.latest.get(userId) ?? null;
@@ -179,7 +225,8 @@ export class Scanner {
     const memo = new Map<string, ScanRow>();
     for (const userId of users) {
       if (signal?.aborted) break;
-      const result = await this.runFor(userId, memo, present === null || present.has(userId), signal);
+      // FIX-TDBOTS: their key only while they look at Today (without presence, tests: always).
+      const result = await this.runFor(userId, memo, present === null || (present.has(userId) && this.viewing(userId)), signal);
       // An interrupted run (shutdown / timeout) keeps the previous complete result.
       if (result) this.latest.set(userId, result);
     }
@@ -202,10 +249,14 @@ export class Scanner {
     const count = src.candles;
     const coins = await this.db.all<{ coin: string; quote: string; kind: string }>('SELECT coin, quote, kind FROM watchlist WHERE user_id = ? ORDER BY position, coin', [userId]);
     const rows: ScanRow[] = [];
+    // FIX-TDBOTS: at most this many shares read with the user's key in this run.
+    const keyReads = { left: SCAN_KEY_READS };
     for (const w of coins) {
       if (signal?.aborted) return null;
+      // FIX-TDBOTS: pairs and commodities are not on Today any more: not scanned (their candles cost credits).
+      if (w.kind === 'forex' || w.kind === 'commodity') continue;
       if (w.kind === 'stock' || w.kind === 'index') {
-        const row = await this.stockRow(userId, w.coin, w.kind, tf, s, count, here, signal);
+        const row = await this.stockRow(userId, w.coin, w.kind, tf, s, count, here, keyReads, signal);
         if (row) rows.push(row);
         continue;
       }

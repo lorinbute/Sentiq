@@ -114,7 +114,8 @@ export class CoinRegistry {
       } catch {
         list = [];
       }
-      const into = w.kind === 'stock' ? stocks : w.kind === 'index' ? indices : aliases;
+      // FD-FXCOMMODITIES: a pair's or a commodity's words („EUR/USD”, „Gold”, „Brent”) as an index's: proper nouns.
+      const into = w.kind === 'stock' ? stocks : w.kind === 'index' || w.kind === 'forex' || w.kind === 'commodity' ? indices : aliases;
       into[w.coin] = [...new Set([...(into[w.coin] ?? []), ...list])];
     }
     if (adminOnly || !this.members) return new CoinDetector(entries, aliases, stocks, indices);

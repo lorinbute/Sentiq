@@ -62,10 +62,10 @@ describe('FD-TRADES: the history panel', () => {
     expect(t).toContain('Futures 3×');
     expect(t).toContain('Short');
     expect(t).toContain('299,61');
-    expect(t).toContain('51,0700');
-    expect(t).toContain('52,1122');
-    expect(t).toContain('50,5678');
-    expect(t).toContain('50,4900');
+    expect(t).toContain('51,07');
+    expect(t).toContain('52,11');
+    expect(t).toContain('50,57');
+    expect(t).toContain('50,49');
     expect(t).toContain('take profit');
     expect(t).toContain('+8,42 USDT');
     expect(t).toContain('+2,81%');
@@ -103,9 +103,9 @@ describe('FD-TRADES: the history panel', () => {
     expect(html.match(/<li /g)).toHaveLength(2);
     for (const label of ['Intrare', 'Ieșire', 'SL', 'TP', 'Intrat', 'Ieșit', 'Sumă', 'Făcută de']) expect(html).toContain(`<dt class="text-[11.5px] text-faint">${label}</dt>`);
     expect(t).toContain('Short · Futures 3×');
-    expect(t).toContain('51,0700');
-    expect(t).toContain('52,1122');
-    expect(t).toContain('50,5678');
+    expect(t).toContain('51,07');
+    expect(t).toContain('52,11');
+    expect(t).toContain('50,57');
     expect(t).toContain('take profit');
     expect(t).toContain('+8,42 USDT');
     expect(t).toContain('Bot Crypto');
@@ -121,7 +121,7 @@ describe('FD-TRADES: the history panel', () => {
     // Only what came from the journal: the platform's SL says nothing of it.
     const tpOnly = render([row({ key: 'a|3', source: 'account', bot: null, fromJournal: ['tp'] })]);
     expect(tpOnly.split(`title="${FROM_JOURNAL}"`)).toHaveLength(2);
-    expect(tpOnly).toContain(`<span class="text-bull" title="${FROM_JOURNAL}">50,5678</span>`);
+    expect(tpOnly).toContain(`<span class="text-bull" title="${FROM_JOURNAL}">50,57</span>`);
     expect(render([row({ key: 'a|2', source: 'account', bot: null })])).not.toContain(FROM_JOURNAL);
   });
 

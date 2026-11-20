@@ -7,11 +7,13 @@ import { ChevronDown, ChevronRight, Copy, Pause, Pencil, Play, Square, Trash2 } 
 import { END_ACTION_RO, TRADE_REASON_RO, WEIGHT_RO, type BotDetail, type BotEndAction, type BotEventRow } from '../../../shared/bot.ts';
 import { api, errorMessage } from '../../api.ts';
 import { autoDigits, fmtDateTime, fmtNum, fmtPrice } from '../../format.ts';
+import { isFxRate } from '../../../shared/fx.ts';
 import { useTz } from '../../hooks.ts';
 import { BotTags, Pnl, StatusMark } from './bot-ui.tsx';
 import { BOTS_KEY } from './BotFormView.tsx';
 
-const price = (v: number | null) => (v === null ? '—' : fmtPrice(v, autoDigits(v)));
+// FIX-DECIMALS: at most two decimals from 1 on, four under 1; a forex / commodity rate four under 10.
+const price = (v: number | null, symbol = '') => (v === null ? '—' : fmtPrice(v, autoDigits(v, isFxRate(symbol))));
 const qty = (v: number) => fmtNum(v, 8);
 
 export function BotDetailView({ bot, onEdit, onCopy, onDeleted }: { bot: BotDetail; onEdit: () => void; onCopy: () => void; onDeleted: () => void }) {
@@ -171,10 +173,10 @@ export function BotDetailView({ bot, onEdit, onCopy, onDeleted }: { bot: BotDeta
                       {p.leverage > 1 ? ` ${p.leverage}×` : ''}
                     </td>
                     <td className="num text-right">{qty(p.qty)}</td>
-                    <td className="num text-right">{price(p.entry)}</td>
-                    <td className="num text-right">{price(p.price)}</td>
+                    <td className="num text-right">{price(p.entry, p.symbol)}</td>
+                    <td className="num text-right">{price(p.price, p.symbol)}</td>
                     <td className="num text-right">
-                      {price(p.sl)} / {price(p.tp)}
+                      {price(p.sl, p.symbol)} / {price(p.tp, p.symbol)}
                     </td>
                     <td className="text-right">
                       <Pnl value={p.unrealized} currency={cur} />
@@ -271,8 +273,8 @@ export function BotDetailView({ bot, onEdit, onCopy, onDeleted }: { bot: BotDeta
                     <td className="whitespace-nowrap">{fmtDateTime(t.closedAt, tz)}</td>
                     <td className="num">{t.symbol}</td>
                     <td className={t.side === 'long' ? 'text-bull' : 'text-bear'}>{t.side}</td>
-                    <td className="num text-right">{price(t.entry)}</td>
-                    <td className="num text-right">{price(t.exit)}</td>
+                    <td className="num text-right">{price(t.entry, t.symbol)}</td>
+                    <td className="num text-right">{price(t.exit, t.symbol)}</td>
                     <td className="text-right">
                       <Pnl value={t.pnl} currency={cur} />
                     </td>

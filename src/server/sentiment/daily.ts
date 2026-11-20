@@ -9,14 +9,16 @@ import type { AiService } from '../ai/service.ts';
 import { MAX_ITEM_AGE_MS } from '../news/normalize.ts';
 import { computeIndex, DEFAULT_INDEX_PARAMS, effects, explainIndex, INDEX_RULES, intradaySeries, type Driver, type ExplainItem, type IndexExplain, type IndexItem, type IndexParams, type IndexResult, type ScoreWhy } from './daily-index.ts';
 import { stockScopeSql, usersWithStockScope, type StockScope } from '../news/stock-scope.ts';
+import { CRYPTO_COINS, MARKET_INDICES, type MarketTape } from './market-move.ts';
 
 export const MAX_FINALIZE_DAYS = 120;
 /**
  * Version of the way the index weighs news. A higher one than the history was built with recomputes it once
  * (`upgradeHistory`). 2 = FD-IMPACT: Claude's importance, geopolitics at 0.8. 3 = FD-MACRORULES: macro by the user's
- * rules, the other news moved to their subject. 4 = FIX-SENTWEIGHT: energy and AI stories × 1.5.
+ * rules, the other news moved to their subject. 4 = FIX-SENTWEIGHT: energy and AI stories × 1.5. 5 = FD-MARKETMOVE: the
+ * stock market's reaction in the stocks part. 6 = the same for crypto (BTC and ETH over 24 hours).
  */
-export const INDEX_VERSION = 4;
+export const INDEX_VERSION = 6;
 export const DAILY_JOB = 'sentiment.daily';
 /** Job data of the maintenance job: the latest retention threshold applied (news older than it are gone). */
 export const MAINTENANCE_JOB = 'maintenance';
@@ -119,12 +121,40 @@ export class DailySentimentService {
 
   /** FD-INDEXNEWS: a user's stock news filter (null: all). */
   private readonly stockScopeOf: (userId: number) => Promise<StockScope | null>;
+  /**
+   * FD-MARKETMOVE: the indices' data for the market's reaction (it gives null when none could be read). Without a source
+   * (null: tests, tools) the index is the news' alone and the days are frozen as before.
+   */
+  private readonly market: (() => Promise<MarketTape | null>) | null;
 
-  constructor(db: Db, settings: SettingsService, ai: AiService | null = null, stockScopeOf: (userId: number) => Promise<StockScope | null> = async () => null) {
+  constructor(
+    db: Db,
+    settings: SettingsService,
+    ai: AiService | null = null,
+    stockScopeOf: (userId: number) => Promise<StockScope | null> = async () => null,
+    market: (() => Promise<MarketTape | null>) | null = null,
+  ) {
     this.db = db;
     this.settings = settings;
     this.ai = ai;
     this.stockScopeOf = stockScopeOf;
+    this.market = market;
+  }
+
+  /** The indices' data; a failure is the same as none (the index without the market's reaction, never frozen). */
+  private async tape(): Promise<MarketTape | null> {
+    if (!this.market) return null;
+    try {
+      return await this.market();
+    } catch {
+      return null;
+    }
+  }
+
+  /** The days can be frozen: without a source of market data, or with every index's and every coin's data. */
+  private settledWith(tape: MarketTape | null): boolean {
+    if (this.market === null) return true;
+    return tape !== null && MARKET_INDICES.every((ix) => tape.series.some((x) => x.id === ix.id)) && CRYPTO_COINS.every((c) => (tape.crypto ?? []).some((x) => x.id === c.id));
   }
 
   /** The index a user sees: their own when their AI scores the news or their stock news are limited, the common one otherwise. */
@@ -185,16 +215,17 @@ export class DailySentimentService {
     return rows.map(toItem);
   }
 
-  async computeDay(day: string, tz: string, now: number, withIntraday = true, scope: IndexScope = null): Promise<DaySentiment> {
+  /** `tape`: the indices' data when the caller already read it (`undefined`: read here). */
+  async computeDay(day: string, tz: string, now: number, withIntraday = true, scope: IndexScope = null, tape?: MarketTape | null): Promise<DaySentiment> {
     const window = dayBounds(day, tz);
-    return this.dayFrom(await this.loadItems(window.start, window.end, scope), day, tz, now, withIntraday);
+    return this.dayFrom(await this.loadItems(window.start, window.end, scope), day, tz, now, withIntraday, tape === undefined ? await this.tape() : tape);
   }
 
-  /** The day from its items (loaded once by the caller). */
-  private async dayFrom(items: IndexItem[], day: string, tz: string, now: number, withIntraday: boolean): Promise<DaySentiment> {
+  /** The day from its items (loaded once by the caller), with the market's reaction from `tape`. */
+  private async dayFrom(items: IndexItem[], day: string, tz: string, now: number, withIntraday: boolean, tape: MarketTape | null): Promise<DaySentiment> {
     const window = dayBounds(day, tz);
     const asOf = Math.min(now, window.end);
-    const res = computeIndex(items, window, asOf, DEFAULT_INDEX_PARAMS);
+    const res = computeIndex(items, window, asOf, DEFAULT_INDEX_PARAMS, tape);
     await this.attachCoins([...res.drivers.positive, ...res.drivers.negative]);
     return {
       ...res,
@@ -202,7 +233,7 @@ export class DailySentimentService {
       tz,
       asOf,
       final: now >= window.end,
-      intraday: withIntraday ? intradaySeries(items, window, asOf, DEFAULT_INDEX_PARAMS) : [],
+      intraday: withIntraday ? intradaySeries(items, window, asOf, DEFAULT_INDEX_PARAMS, tape) : [],
     };
   }
 
@@ -220,16 +251,17 @@ export class DailySentimentService {
    * FD-SCOREWHY: what gave each driver its score, as the News page tells it: the same score the index used (the user's
    * AI's where it gave one, else the common one). For the day as served; never stored with the snapshot.
    */
-  async explainDrivers(day: DaySentiment, scope: IndexScope = null, loaded?: IndexItem[]): Promise<void> {
+  async explainDrivers(day: DaySentiment, scope: IndexScope = null, loaded?: IndexItem[], tape?: MarketTape | null): Promise<void> {
     const drivers = [...day.drivers.positive, ...day.drivers.negative];
     if (drivers.length === 0) return;
     const ids = drivers.map((d) => d.id);
     const why = await this.whyOf(ids, scope);
-    // FD-WHYPLAIN: the same items, window and moment as the day: why each weighs, and how much it moved the index.
+    // FD-WHYPLAIN: the same items, window, moment and market as the day: why each weighs, and how much it moved the index.
     const window = dayBounds(day.day, day.tz);
     const items = loaded ?? (await this.loadItems(window.start, window.end, scope));
-    const terms = new Map(explainIndex(items, window, day.asOf, DEFAULT_INDEX_PARAMS).items.map((it) => [it.id, it]));
-    const moved = effects(items, window, day.asOf, ids, DEFAULT_INDEX_PARAMS);
+    const market = tape === undefined ? await this.tape() : tape;
+    const terms = new Map(explainIndex(items, window, day.asOf, DEFAULT_INDEX_PARAMS, market).items.map((it) => [it.id, it]));
+    const moved = effects(items, window, day.asOf, ids, DEFAULT_INDEX_PARAMS, market);
     for (const d of drivers) {
       const w = why.get(d.id);
       if (w) d.why = w;
@@ -286,11 +318,12 @@ export class DailySentimentService {
     const window = dayBounds(day, tz);
     const asOf = Math.min(now, window.end);
     const items = await this.loadItems(window.start, window.end, scope);
-    const e = explainIndex(items, window, asOf, DEFAULT_INDEX_PARAMS);
+    const tape = await this.tape();
+    const e = explainIndex(items, window, asOf, DEFAULT_INDEX_PARAMS, tape);
     const shown = e.items.slice(0, EXPLAIN_ITEMS);
     const rest = e.items.slice(EXPLAIN_ITEMS);
     const why = await this.whyOf(shown.map((it) => it.id), scope);
-    const moved = effects(items, window, asOf, shown.map((it) => it.id), DEFAULT_INDEX_PARAMS);
+    const moved = effects(items, window, asOf, shown.map((it) => it.id), DEFAULT_INDEX_PARAMS, tape);
     return {
       ...e,
       day,
@@ -304,9 +337,9 @@ export class DailySentimentService {
   }
 
   /** Today in `tz` (every user sees the day of their own time zone, FD-USERS §2), in the common index or a user's. */
-  async today(tz: string, now = Date.now(), scope: IndexScope = null): Promise<DaySentiment> {
+  async today(tz: string, now = Date.now(), scope: IndexScope = null, tape?: MarketTape | null): Promise<DaySentiment> {
     const day = dayKey(now, tz);
-    const res = await this.computeDay(day, tz, now, true, scope);
+    const res = await this.computeDay(day, tz, now, true, scope, tape);
     await this.save(res, false, scope);
     return res;
   }
@@ -319,9 +352,10 @@ export class DailySentimentService {
     const day = dayKey(now, tz);
     const window = dayBounds(day, tz);
     const items = await this.loadItems(window.start, window.end, scope);
-    const res = await this.dayFrom(items, day, tz, now, true);
+    const tape = await this.tape();
+    const res = await this.dayFrom(items, day, tz, now, true, tape);
     await this.save(res, false, scope);
-    await this.explainDrivers(res, scope, items);
+    await this.explainDrivers(res, scope, items, tape);
     return res;
   }
 
@@ -369,11 +403,14 @@ export class DailySentimentService {
 
   /**
    * Recomputes today and freezes every elapsed day that has news but no final snapshot yet — after the
-   * grace period and once its news are all scored (days older than 3 days are frozen regardless).
+   * grace period and once its news are all scored (days older than 3 days are frozen regardless). FD-MARKETMOVE: only
+   * with every index's data, so that no day is frozen without the market's reaction.
    */
   async refreshZone(tz: string, now = Date.now(), scope: IndexScope = null): Promise<{ today: DaySentiment; finalized: string[] }> {
     const todayKey = dayKey(now, tz);
     const finalized: string[] = [];
+    const tape = await this.tape();
+    const complete = this.settledWith(tape);
     // Days before Sentiq started collecting only hold the few items the feeds still carried (backlog):
     // they would enter the history as if complete, so history starts on the first collection day. A user's own index
     // starts on the first day their AI scored: before it, theirs would be the common one again.
@@ -407,14 +444,14 @@ export class DailySentimentService {
       for (; day < todayKey; day = addDays(day, 1)) {
         const empty = `${scope ?? ''}|${tz}|${day}`;
         if (finals.has(day) || this.emptyDays.has(empty)) continue;
-        const r = await this.computeDay(day, tz, now, false, scope);
+        const r = await this.computeDay(day, tz, now, false, scope, tape);
         if (r.counts.positive + r.counts.neutral + r.counts.negative === 0 && r.counts.pending === 0) {
           if (day < settledBefore) this.emptyDays.add(empty);
           continue;
         }
         const settled = day < settledBefore;
         const ready = now >= dayBounds(day, tz).end + FINALIZE_GRACE_MS && r.counts.pending === 0;
-        if (!ready && !settled) {
+        if ((!ready && !settled) || !complete) {
           await this.save(r, false, scope); // provisional: still visible in the history, recomputed on the next refresh
           continue;
         }
@@ -422,7 +459,7 @@ export class DailySentimentService {
         if (scope === null) finalized.push(day);
       }
     }
-    return { today: await this.today(tz, now, scope), finalized };
+    return { today: await this.today(tz, now, scope, tape), finalized };
   }
 
   /** The days of the common index, or of a user's own where they have one (the common one fills the days before). */
@@ -475,6 +512,8 @@ export class DailySentimentService {
   async upgradeHistory(now = Date.now()): Promise<boolean> {
     const state = await readJobData(this.db, DAILY_JOB, { indexVersion: 1 });
     if (state.indexVersion >= INDEX_VERSION) return false;
+    // FD-MARKETMOVE: the history is rebuilt with the market's reaction; without the indices' data, on a later run.
+    if (!this.settledWith(await this.tape())) return false;
     await this.recomputeHistory(now);
     await writeJobData(this.db, DAILY_JOB, { ...state, indexVersion: INDEX_VERSION });
     return true;

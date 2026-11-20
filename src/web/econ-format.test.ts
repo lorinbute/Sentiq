@@ -5,9 +5,10 @@ describe('Economy page formatting (TD-ECON §6)', () => {
   it('writes values with their scale and unit', () => {
     expect(fmtEconValue(3.8, '%', null)).toBe('3,8%');
     expect(fmtEconValue(197, null, 'K')).toBe('197 mii');
-    expect(fmtEconValue(1.275, null, 'M')).toBe('1,275 mil.');
+    // FIX-DECIMALS: at most two decimals from 1 on.
+    expect(fmtEconValue(1.275, null, 'M')).toBe('1,28 mil.');
     expect(fmtEconValue(14.2, '€', 'B')).toBe('14,2 mld. €');
-    expect(fmtEconValue(6.748, '$', 'T')).toBe('6,748 tril. $');
+    expect(fmtEconValue(6.748, '$', 'T')).toBe('6,75 tril. $');
     expect(fmtEconValue(-1105.6, '¥', 'B')).toBe('-1.105,6 mld. ¥');
     expect(fmtEconValue(54.5, null, null)).toBe('54,5');
     expect(fmtEconValue(null, '%', null)).toBe('—');

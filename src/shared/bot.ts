@@ -1,6 +1,7 @@
 // Trading bots (FD-BOT, TD-BOT §2): their settings (the same rules on the page and on the server), the plans the form and
 // the engine both compute (a grid's lines and quantity, a DCA's orders), and what the API returns.
 import { z } from 'zod';
+import { fxKindOf, isUsdFx } from './fx.ts';
 import { TIMEFRAMES, type Timeframe } from './time.ts';
 
 export const BOT_STRATEGIES = ['grid', 'dca', 'premium'] as const;
@@ -26,7 +27,10 @@ export const MARGIN_HINT_PAPER_RO: Record<BotMarginMode, string> = { isolated: M
 
 /** Bots a user may have that have not ended (FD-BOT §3). */
 export const MAX_ACTIVE_BOTS = 10;
-export const MAX_BOT_SYMBOLS = 10;
+/** FIX-BOT20 (the user: „numărul de simboluri trebuie să crească la 20”): the symbols one bot watches. */
+export const MAX_BOT_SYMBOLS = 20;
+/** The trades a bot holds at once (the user: „numărul de tranzacții poate să rămână maxim 10”). */
+export const MAX_BOT_OPEN = 10;
 /** How often the engine looks (FD-BOT §8). */
 export const BOT_TICK_MS = 30_000;
 /** The maintenance margin taken for the liquidation distance (FD-BOT §6). */
@@ -137,10 +141,7 @@ const upgradePremium = (v: unknown): unknown => {
   return o;
 };
 
-/** FIX-BOTBUDGET: what a trade must bring at its take profit, after the commissions, for the bot to open it (USD). */
-export const MIN_TRADE_PROFIT = 10;
-
-/** The currencies counted as dollars: the minimum profit read in them as it is (in another, at its USDT price). */
+/** The currencies counted as dollars (a sum in them written with two decimals). */
 const USD_QUOTES = new Set(['USD', 'USDT', 'USDC', 'FDUSD', 'TUSD', 'BUSD', 'DAI', 'USDE', 'USDP', 'PYUSD', 'USD1', 'USDD']);
 export const isUsdQuote = (c: string): boolean => USD_QUOTES.has(c.toUpperCase());
 
@@ -178,7 +179,7 @@ export const premiumSchema = z.preprocess(
       .strict(),
     ai: z.enum(['off', 'confirm']),
     aiFallback: z.enum(['skip', 'rules']),
-    maxOpen: whole('Tranzacțiile deschise odată', 1, MAX_BOT_SYMBOLS),
+    maxOpen: whole('Tranzacțiile deschise odată', 1, MAX_BOT_OPEN),
     cooldownMin: whole('Pauza după o pierdere', 0, 10_080),
   })
   .strict(),
@@ -217,7 +218,8 @@ export const areaOf = (market: BotMarket): BotArea => (market === 'stock' ? 'sto
 
 /** FIX-PAPERLEV: on a real account's spot (a Paper Trading profile shorts and leverages everything). Said by the check. */
 export const SPOT_LONG = 'Pe spot nu se poate short: doar Long (short pe futures, pe acțiuni sau pe un profil Paper Trading).';
-export const LEVERAGE_FUTURES = 'Levierul se aplică doar pe futures (pe spot și pe acțiuni, doar pe un profil Paper Trading).';
+/** FIX-ETOROLEV: eToro opens every position with its leverage (its app, its virtual portfolio): a bot's on eToro too. */
+export const LEVERAGE_FUTURES = 'Levierul se aplică pe futures, la eToro și pe un profil Paper Trading (pe spot, nu).';
 export const MARGIN_FUTURES = 'Marja se alege doar pe futures (pe spot și pe acțiuni, doar pe un profil Paper Trading).';
 
 /** The side a bot's settings may open short on (FD-BOT §3–§6): a grid not only long, a short DCA, a Slingshot not only long. */
@@ -233,7 +235,11 @@ function checkBot(b: BotInputBase & { grid?: GridConfig; dca?: DcaConfig; premiu
   const area = areaOf(b.market);
   const seen = new Set<string>();
   b.symbols.forEach((s, i) => {
-    if (area === 'stocks' ? !STOCK_TICKER_RE.test(s) : !CRYPTO_PAIR_RE.test(s)) fail(['symbols', i], area === 'stocks' ? `„${s}” nu e simbolul unei acțiuni (AAPL)` : `„${s}” nu e o pereche crypto (BTC/USDT)`);
+    // FD-FXCOMMODITIES: on the stocks market also a forex pair or a commodity, in USD only (the bot's sums are in USD).
+    const fx = area === 'stocks' && fxKindOf(s) !== null;
+    if (fx && !isUsdFx(s)) fail(['symbols', i], `„${s}” nu e cotat în USD: boții tranzacționează forex și mărfuri doar în USD (EUR/USD, XAU/USD)`);
+    else if (!fx && (area === 'stocks' ? !STOCK_TICKER_RE.test(s) : !CRYPTO_PAIR_RE.test(s)))
+      fail(['symbols', i], area === 'stocks' ? `„${s}” nu e simbolul unei acțiuni (AAPL) sau al unei perechi forex / mărfi în USD (EUR/USD)` : `„${s}” nu e o pereche crypto (BTC/USDT)`);
     if (seen.has(s)) fail(['symbols', i], `„${s}” apare de două ori`);
     seen.add(s);
   });
@@ -543,6 +549,8 @@ export interface BotPositionView {
   leverage: number;
   margin: number;
   openedAt: number;
+  /** FIX-ETOROPENDING: sent to eToro, not open there yet (its order waits): its state is „în așteptare”. */
+  pending?: boolean;
 }
 
 /**
@@ -564,6 +572,8 @@ export interface BotLevel {
   tp: number | null;
   /** FIX-BOTDRAG: when the position opened (a grid: its first open interval); with the symbol and side, which one it is. */
   openedAt: number;
+  /** FIX-DECIMALS: the money the position took from the account (its margin), the chart's box. */
+  margin?: number;
 }
 
 export interface BotTradeRow {

@@ -212,7 +212,12 @@ describe('a share read with the user’s Twelve Data key, only while they use Se
     await scanner.run();
     expect(asked).toEqual([]);
     expect(scanner.result(1)?.rows).toEqual([]);
+    // FIX-TDBOTS: in Sentiq, but not on Today: nothing read with the key either.
     here.add(1);
+    await scanner.run();
+    expect(asked).toEqual([]);
+    expect(scanner.viewed(1)).toBe(true);
+    expect(scanner.viewed(1)).toBe(false);
     await scanner.run();
     expect(asked).toEqual(['1h']);
     const row = scanner.result(1)?.rows[0];
@@ -224,6 +229,10 @@ describe('a share read with the user’s Twelve Data key, only while they use Se
     expect(asked).toEqual(['1h']);
     expect(scanner.result(1)?.rows[0]).toBe(row);
     here.add(1);
+    // Back in Sentiq, Today not opened again for over 3 minutes: still nothing; Today opened: read.
+    await scanner.run();
+    expect(asked).toEqual(['1h']);
+    expect(scanner.viewed(1)).toBe(true);
     await scanner.run();
     expect(asked).toEqual(['1h', '1h']);
   });

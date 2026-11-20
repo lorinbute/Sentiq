@@ -7,7 +7,8 @@ import { Loader2 } from 'lucide-react';
 import type { AccountView } from '../../shared/api-types.ts';
 import type { ModifyResult, ReversePreview, ReverseTicket } from '../../shared/trading.ts';
 import { api, ApiError, errorMessage } from '../api.ts';
-import { fmtNum } from '../format.ts';
+import { autoDigits, fmtNum, fmtPrice } from '../format.ts';
+import { isFxRate } from '../../shared/fx.ts';
 import { Modal } from './Modal.tsx';
 import { ModifyOutcome } from './ModifyTicket.tsx';
 import { DemoBadge, TRADING_KEY, TRADING_LOG_KEY, uuid } from './OrderTicket.tsx';
@@ -93,7 +94,7 @@ export function ReverseDialog({ account, symbol, side, onClose, onDone }: { acco
               {p.last !== null && (
                 <>
                   <dt className="text-faint">Prețul de acum</dt>
-                  <dd className="num">{fmtNum(p.last, 8)}</dd>
+                  <dd className="num">{fmtPrice(p.last, autoDigits(p.last ?? 1, isFxRate(symbol)))}</dd>
                 </>
               )}
             </dl>

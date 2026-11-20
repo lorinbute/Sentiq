@@ -31,7 +31,7 @@ describe('positionSeed', () => {
       // The TP closes 2 of the 5 contracts.
       ['tp', 'o2', 8.36, 2],
     ]);
-    expect(seed.basis).toEqual({ long: true, entry: 7.62, qty: 5, quote: 'USDT' });
+    expect(seed.basis).toEqual({ long: true, entry: 7.62, qty: 5, quote: 'USDT', used: 7.62 });
   });
 
   it('none without trading on that market, or with nothing to change where nothing can be added', () => {

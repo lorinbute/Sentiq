@@ -1,5 +1,6 @@
 // "Sentiment of the day" (TD §6.4). Pure: the same input always gives the same index.
 import type { SourceCategory } from '../news/sources.ts';
+import { cryptoAt, MARKET_RULES, marketAt, type MarketPoint, type MarketTape } from './market-move.ts';
 
 export interface IndexItem {
   id: string;
@@ -74,14 +75,33 @@ export interface SubIndex {
   count: number;
 }
 
+/**
+ * FD-MARKETMOVE: a market's reaction as it entered the index: one more item of its part (stocks: the S&P 500 and the
+ * Nasdaq 100; crypto: BTC and ETH), weighing `share` of it (at least as much as `shrinkK` of news when the part has
+ * fewer), and through it of the day.
+ */
+export interface MarketPart extends MarketPoint {
+  /** The part from its news alone. */
+  news: number;
+  /** The reaction's weight: share ÷ (1 − share) × the stocks news' weight (at least `shrinkK`). */
+  weight: number;
+  /** Its part of the day's weight. */
+  dayShare: number;
+}
+
 export interface IndexResult {
   index: number;
   raw: number;
   weight: number;
   confidence: Confidence;
   counts: { positive: number; neutral: number; negative: number; pending: number; excluded: number };
+  /** `stocks` with the market's reaction in it (FD-MARKETMOVE); its `count` is its news'. */
   breakdown: Record<SourceCategory, SubIndex>;
   drivers: { positive: Driver[]; negative: Driver[] };
+  /** FD-MARKETMOVE: null without index data, without stock news, or when the reaction weighs nothing. */
+  market: MarketPart | null;
+  /** FD-MARKETMOVE: BTC and ETH's reaction in the crypto part, the same way. */
+  crypto: MarketPart | null;
 }
 
 const LABEL_T = 0.2;
@@ -222,9 +242,9 @@ function select(allItems: IndexItem[], window: { start: number; end: number }, a
   return { counts, eligible };
 }
 
-function breakdownOf(weighted: Weighted[], p: IndexParams): Record<SourceCategory, SubIndex> {
+function breakdownOf(weighted: Weighted[], p: IndexParams, cats: readonly SourceCategory[] = ['crypto', 'macro', 'geopolitics', 'stocks']): Record<SourceCategory, SubIndex> {
   const breakdown = {} as Record<SourceCategory, SubIndex>;
-  for (const cat of ['crypto', 'macro', 'geopolitics', 'stocks'] as const) {
+  for (const cat of cats) {
     const sub = aggregate(
       weighted.filter((r) => r.item.category === cat),
       p,
@@ -234,12 +254,63 @@ function breakdownOf(weighted: Weighted[], p: IndexParams): Record<SourceCategor
   return breakdown;
 }
 
-export function computeIndex(allItems: IndexItem[], window: { start: number; end: number }, asOf: number, p: IndexParams = DEFAULT_INDEX_PARAMS): IndexResult {
+/** A weighted mean with one more item (`s` weighing `w`). */
+const plus = (m: { raw: number; weight: number }, s: number, w: number) => ({ raw: m.weight + w > 0 ? (m.raw * m.weight + s * w) / (m.weight + w) : 0, weight: m.weight + w });
+
+/** The markets' reactions at a moment: the US stock market's, and crypto's (FD-MARKETMOVE). */
+interface Points {
+  stocks: MarketPoint | null;
+  crypto: MarketPoint | null;
+}
+
+const pointsAt = (tape: MarketTape | null, t: number, p: IndexParams): Points => ({ stocks: marketAt(tape, t, p), crypto: cryptoAt(tape, t, p) });
+
+/**
+ * FD-MARKETMOVE: each market's reaction into its part (stocks, crypto) and the day. It needs a news item of the part
+ * (before the first one, after midnight, the part waits for it); its weight makes it `share` of the part's (at least as
+ * much as `shrinkK` of news).
+ */
+function mixMarkets(
+  total: { raw: number; weight: number },
+  breakdown: Record<SourceCategory, SubIndex>,
+  points: Points,
+  p: IndexParams,
+): { total: { raw: number; weight: number }; breakdown: Record<SourceCategory, SubIndex>; market: MarketPart | null; crypto: MarketPart | null } {
+  let day = total;
+  const parts = { ...breakdown };
+  const out: Record<'stocks' | 'crypto', MarketPart | null> = { stocks: null, crypto: null };
+  for (const area of ['stocks', 'crypto'] as const) {
+    const point = points[area];
+    const sub = parts[area];
+    if (!point || !(point.share > 0) || !sub || sub.count === 0) continue;
+    const weight = (point.share / (1 - point.share)) * Math.max(sub.weight, p.shrinkK);
+    const mixed = plus(sub, point.sentiment, weight);
+    day = plus(day, point.sentiment, weight);
+    parts[area] = { index: toIndex(mixed.raw, mixed.weight, p), raw: mixed.raw, weight: mixed.weight, count: sub.count };
+    out[area] = { ...point, news: sub.index, weight, dayShare: 0 };
+  }
+  for (const m of [out.stocks, out.crypto]) if (m) m.dayShare = day.weight > 0 ? m.weight / day.weight : 0;
+  return { total: day, breakdown: parts, market: out.stocks, crypto: out.crypto };
+}
+
+/**
+ * The index of the items (news alone) and with the markets' reactions at `asOf`. `partsOnly`: of the parts only those
+ * a reaction needs (`effects`, a hundred times over).
+ */
+function evaluate(allItems: IndexItem[], window: { start: number; end: number }, asOf: number, p: IndexParams, points: Points, partsOnly = false) {
   const { counts, eligible } = select(allItems, window, asOf);
   const weighted = weigh(eligible, asOf, p);
-  const total = aggregate(weighted, p);
-  const breakdown = breakdownOf(weighted, p);
+  const news = aggregate(weighted, p);
+  const cats = (['stocks', 'crypto'] as const).filter((c) => points[c] !== null);
+  const parts = partsOnly ? breakdownOf(weighted, p, cats) : breakdownOf(weighted, p);
+  const mixed = mixMarkets({ raw: news.raw, weight: news.weight }, parts, points, p);
+  return { counts, eligible, news, ...mixed };
+}
 
+export function computeIndex(allItems: IndexItem[], window: { start: number; end: number }, asOf: number, p: IndexParams = DEFAULT_INDEX_PARAMS, tape: MarketTape | null = null): IndexResult {
+  const { counts, news: total, total: mixed, breakdown, market, crypto } = evaluate(allItems, window, asOf, p, pointsAt(tape, asOf, p));
+
+  // The news' contributions to their own mean (the drivers): the market's reaction is not one of them.
   const contributions = total.rows
     .filter((r) => r.w > 0 && r.s !== 0)
     .map((r) => ({
@@ -262,18 +333,20 @@ export function computeIndex(allItems: IndexItem[], window: { start: number; end
     .slice(0, 5);
 
   return {
-    index: toIndex(total.raw, total.weight, p),
-    raw: total.raw,
-    weight: total.weight,
-    confidence: confidenceFor(total.weight),
+    index: toIndex(mixed.raw, mixed.weight, p),
+    raw: mixed.raw,
+    weight: mixed.weight,
+    confidence: confidenceFor(mixed.weight),
     counts,
     breakdown,
     drivers: { positive, negative },
+    market,
+    crypto,
   };
 }
 
 /** The rules besides `IndexParams` (FD-INDEXWHY: shown with the explanation). */
-export const INDEX_RULES = { labelT: LABEL_T, confidence: CONFIDENCE, spec: SPEC, theme: THEME_FACTOR } as const;
+export const INDEX_RULES = { labelT: LABEL_T, confidence: CONFIDENCE, spec: SPEC, theme: THEME_FACTOR, market: MARKET_RULES } as const;
 
 export interface ExplainItem {
   id: string;
@@ -304,9 +377,14 @@ export interface ExplainItem {
 
 export interface IndexExplain {
   counts: Counts;
-  /** `value`: the index before rounding. */
+  /** The news alone: their weighted mean and weight (step 3); `items` are shares and contributions of it. */
+  news: { raw: number; weight: number };
+  /** With the market's reaction (FD-MARKETMOVE; the news' when it has none). `value`: the index before rounding. */
   total: { raw: number; weight: number; shrunk: number; index: number; value: number; confidence: Confidence };
   breakdown: Record<SourceCategory, SubIndex>;
+  /** FD-MARKETMOVE: the markets' reactions, as in `IndexResult`. */
+  market: MarketPart | null;
+  crypto: MarketPart | null;
   /** Each source with items today: their weight before (`base`) and after the cap; heaviest first. */
   sources: { id: string; name: string; sourceWeight: number; count: number; base: number; weight: number }[];
   /** At least 4 sources weigh: the cap applies (it may still touch none). */
@@ -316,12 +394,10 @@ export interface IndexExplain {
 }
 
 /** FD-INDEXWHY: `computeIndex` step by step, from the same selection, weighing and cap (the same numbers). */
-export function explainIndex(allItems: IndexItem[], window: { start: number; end: number }, asOf: number, p: IndexParams = DEFAULT_INDEX_PARAMS): IndexExplain {
-  const { counts, eligible } = select(allItems, window, asOf);
-  const weighted = weigh(eligible, asOf, p);
-  const total = aggregate(weighted, p);
+export function explainIndex(allItems: IndexItem[], window: { start: number; end: number }, asOf: number, p: IndexParams = DEFAULT_INDEX_PARAMS, tape: MarketTape | null = null): IndexExplain {
+  const { counts, eligible, news: total, total: mixed, breakdown, market, crypto } = evaluate(allItems, window, asOf, p, pointsAt(tape, asOf, p));
   const W = total.weight;
-  const shrunk = W > 0 ? (total.raw * W) / (W + p.shrinkK) : 0;
+  const shrunk = mixed.weight > 0 ? (mixed.raw * mixed.weight) / (mixed.weight + p.shrinkK) : 0;
   const names = new Map(eligible.map((it) => [it.sourceId, it.sourceName]));
   const sourceWeights = new Map(eligible.map((it) => [it.sourceId, it.sourceWeight]));
   const sourceCount = new Map<string, number>();
@@ -355,8 +431,11 @@ export function explainIndex(allItems: IndexItem[], window: { start: number; end
     .sort((a, b) => b.weight - a.weight || b.publishedAt - a.publishedAt || a.id.localeCompare(b.id));
   return {
     counts,
-    total: { raw: total.raw, weight: W, shrunk, index: toIndex(total.raw, W, p), value: indexValue(total.raw, W, p), confidence: confidenceFor(W) },
-    breakdown: breakdownOf(weighted, p),
+    news: { raw: total.raw, weight: W },
+    total: { raw: mixed.raw, weight: mixed.weight, shrunk, index: toIndex(mixed.raw, mixed.weight, p), value: indexValue(mixed.raw, mixed.weight, p), confidence: confidenceFor(mixed.weight) },
+    breakdown,
+    market,
+    crypto,
     sources,
     capActive: [...total.bySource.values()].filter((w) => w > 0).length >= 4,
     items,
@@ -365,11 +444,12 @@ export function explainIndex(allItems: IndexItem[], window: { start: number; end
 
 /**
  * FD-WHYPLAIN: how much each of these items moved the index: the index computed again without it (the same selection,
- * weighing, cap and pull towards neutral), unrounded. `effect` = the index − `without`.
+ * weighing, cap, market reaction and pull towards neutral), unrounded. `effect` = the index − `without`.
  */
-export function effects(allItems: IndexItem[], window: { start: number; end: number }, asOf: number, ids: string[], p: IndexParams = DEFAULT_INDEX_PARAMS): Map<string, { without: number; effect: number }> {
+export function effects(allItems: IndexItem[], window: { start: number; end: number }, asOf: number, ids: string[], p: IndexParams = DEFAULT_INDEX_PARAMS, tape: MarketTape | null = null): Map<string, { without: number; effect: number }> {
+  const points = pointsAt(tape, asOf, p);
   const valueOf = (items: IndexItem[]) => {
-    const t = aggregate(weigh(select(items, window, asOf).eligible, asOf, p), p);
+    const t = evaluate(items, window, asOf, p, points, true).total;
     return indexValue(t.raw, t.weight, p);
   };
   const full = valueOf(allItems);
@@ -381,16 +461,16 @@ export function effects(allItems: IndexItem[], window: { start: number; end: num
   return out;
 }
 
-/** Index at the end of each elapsed hour of the window (plus `asOf` for a partial last hour). */
-export function intradaySeries(items: IndexItem[], window: { start: number; end: number }, asOf: number, p: IndexParams = DEFAULT_INDEX_PARAMS): { t: number; index: number; count: number }[] {
+/** Index at the end of each elapsed hour of the window (plus `asOf` for a partial last hour), each with the market's reaction of that hour. */
+export function intradaySeries(items: IndexItem[], window: { start: number; end: number }, asOf: number, p: IndexParams = DEFAULT_INDEX_PARAMS, tape: MarketTape | null = null): { t: number; index: number; count: number }[] {
   const out: { t: number; index: number; count: number }[] = [];
   const last = Math.min(asOf, window.end);
   for (let t = window.start + 3_600_000; t <= last; t += 3_600_000) {
-    const r = computeIndex(items, window, t, p);
+    const r = computeIndex(items, window, t, p, tape);
     out.push({ t, index: r.index, count: r.counts.positive + r.counts.neutral + r.counts.negative });
   }
   if (out.length === 0 || (out.at(-1) as { t: number }).t < last) {
-    const r = computeIndex(items, window, last, p);
+    const r = computeIndex(items, window, last, p, tape);
     out.push({ t: last, index: r.index, count: r.counts.positive + r.counts.neutral + r.counts.negative });
   }
   return out;

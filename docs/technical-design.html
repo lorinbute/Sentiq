@@ -10117,4 +10117,221 @@ Hash-ul e hex, deci fără caractere speciale pentru <code>LIKE</code>. O sesiun
 <ul>
 <li><code>EventIcon</code> primește <code>symbol</code> (moneda evenimentului; la <code>source === 'earn'</code> e simbolul companiei) și desenează <code>CoinLogo square</code>. Toate cele cinci locuri îl dau. <code>CoinLogo</code>: <code>style</code> cu lățimea și înălțimea, pentru că <code>height: auto</code> din stilul de bază lăsa un rând flex să întindă imaginea.</li>
 </ul>
+
+<h3>TD-ETOROLEV</h3>
+<ul>
+<li><code>shared/bot.ts</code>: <code>LEVERAGE_FUTURES</code> spune acum „pe futures, la eToro și pe un profil Paper Trading”.</li>
+<li><code>BotService.check</code>: <code>onEtoro</code> (contul ales are <code>TRADING[exchange].etoro</code>), <code>leveraged = margined || onEtoro</code>. Levierul e refuzat doar unde nu e <code>leveraged</code>, iar <code>lev</code> (planurile grilei și DCA) e cel ales. La eToro cu levier peste 1×: DCA fără <code>stopLoss</code> → eroare; grilă care nu e doar short, fără <code>stopBelow</code> → eroare; plus avertismentul despre stop loss-ul trimis la eToro și levierele instrumentului. Avertismentul de la peste 10× se aplică pe <code>leveraged</code>.</li>
+<li><code>BotRun.leveraged()</code> = <code>margined() || separateGrids()</code> (eToro). Îl folosesc dimensionarea Slingshot (<code>sizeFor({ futures: leveraged })</code>: levierul și verificarea distanței stop loss / pierderea marjei), levierul unui ciclu DCA nou, jurnalul și avertismentul de lichidare. <code>marginOf</code> și <code>oneWay</code> rămân pe <code>margined</code> (eToro nu are marjă de ales, iar pozițiile rămân separate).</li>
+<li>Stop loss-ul la deschidere: DCA long cu levier, <code>p × (1 − stopLoss%)</code> la ordinul de bază, <code>dealLevels(...).sl</code> la ordinele de siguranță; grila, <code>stopBelow</code> la deschiderile long cu levier. <code>sl</code>-ul unui ordin se folosește doar pe ruta eToro.</li>
+<li><code>RealExec.etoroOrder</code>: <code>lev = round(o.lev)</code> (1–125). <code>needsSl = short || lev &gt; 1</code>: fără stop loss, ordinul e refuzat de bot cu motivul; altfel <code>place({ ..., leverage: lev &gt; 1 ? lev : –, stopLoss: needsSl ? o.sl : – })</code>. Adaptorul eToro trimitea deja <code>leverage</code> și <code>stopLossRate</code>.</li>
+<li>Formularul de bot pe site (<code>BotFormView</code>, <code>toInput(f, now, margined, leveraged)</code>) și în aplicație (<code>BotForm</code>: <code>onEtoro</code>; levierul rămas la schimbarea pieței sau a contului doar unde se aplică): „Levierul” la eToro, fără „Marja”.</li>
+<li>Teste: <code>engine.test.ts</code> („FIX-ETOROLEV”, două cazuri: verificarea, Slingshot 2× cu <code>leverage: 2</code>, <code>stopLoss: 190</code> și cantitate dublă; DCA long 2× cu stop loss-ul ciclului).</li>
+</ul>
+
+<h3>TD-STOCKCOUNTDOWN</h3>
+<ul>
+<li><code>chart/countdown.ts</code>: <code>barLeft(lastOpen, stepMs, cap, now)</code>. <code>CurrentPriceData.bar</code> (<code>{ open, step, cap }</code>) în locul unui <code>closesAt</code> fix: <code>CurrentPriceView.update</code> calculează cronometrul la fiecare desenare. Teste: <code>countdown.test.ts</code>.</li>
+</ul>
+
+<h3>TD-NOHISTWARN</h3>
+<ul>
+<li><code>Charts.tsx</code>: <code>&lt;Warning&gt;</code> pentru <code>INSUFFICIENT_HISTORY</code> scos. Calculul (<code>slingshot.ts</code>) și jurnalul botului (<code>engine.ts</code>) rămân. Aplicația iOS nu îl afișa.</li>
+</ul>
+
+<h3>TD-STOCKLIVE</h3>
+<ul>
+<li><code>StockData.fresh</code>: 25 s (în loc de 60 s) până la 1h. <code>Charts.tsx</code>: <code>refetchInterval</code> 30 s la acțiuni. Aplicația: <code>startLoops</code> 30 s la acțiuni (indicii rămân la 60 s); <code>CandlesResult.notice</code> și <code>fetchedAt</code>; <code>NativeChartEngine.staleNote</code> afișat jos, pe panoul principal. Test: <code>stocks.test.ts</code> („FIX-STOCKLIVE”).</li>
+</ul>
+
+<h3>TD-STOCKLIVE (2)</h3>
+<ul>
+<li><code>TwelveDataClient.price</code>; <code>StockData.candles(..., live)</code> (ruta graficului trimite <code>true</code>; cererea în curs e separată); <code>liveCandles</code> (barele după ultima bară Twelve Data, în <code>liveBars</code> pe cheia cache-ului) și <code>livePrice</code> (25 s pe utilizator și simbol). <code>fresh</code> înapoi la 60 s. Teste: <code>stocks.test.ts</code> („FIX-STOCKLIVE”: construire, urmărire, înlocuire, credite, fără <code>live</code> nimic; în afara sesiunii nimic), piața 68 / 68, <code>server.test.ts</code> 72 / 72.</li>
+</ul>
+
+<h3>TD-STOCKLIVE (3)</h3>
+<ul>
+<li><code>liveCandles</code> întoarce <code>{ forming, bars }</code>: dacă ultima lumânare Twelve Data e încă în perioada ei, <code>forming</code> e ea cu prețul live aplicat; <code>load</code> o pune în locul ei. Test: „moves the forming candle Twelve Data gives on 5m”. Piața 69 / 69.</li>
+</ul>
+
+<h3>TD-BOTPRICE</h3>
+<ul><li><code>StockData.quote(sym, maxAge = 60_000)</code>; <code>readQuote</code> / <code>readPrice(..., stockMaxAge?)</code>; <code>BotEngine.price</code> trimite <code>BOT_STOCK_PRICE_MS = 25_000</code>. Test: „FIX-BOTPRICE” în <code>stocks.test.ts</code> (piața 70 / 70); testul boților de acțiuni (DCA pe profil) trece.</li></ul>
+
+<h3>TD-ETOROLEV3 · TD-ETOROTP · TD-ETOROPENDING</h3>
+<ul>
+<li><code>shared/trading.ts</code>: <code>ETORO_LEVERAGES</code>, <code>isEtoroLeverage</code>, <code>snapEtoroLeverage</code>, <code>ETORO_LEVERAGE_TEXT</code>; <code>EtoroTrader.normalize</code>, <code>BotService.check</code>, <code>RealExec.etoroOrder</code>; site: <code>BotFormView</code>, <code>OrderTicket</code> (un select).</li>
+<li><code>BotOrder.tp</code>, <code>Pending.tp</code>; intrarea Slingshot trimite <code>tp: d.tp</code>; <code>etoroOrder</code> trimite <code>stopLoss</code> + <code>takeProfit</code> când are take profit.</li>
+<li><code>Trader.lookup?</code> (<code>EtoroTrader.lookup</code>, <code>stateOf</code>), <code>TradingService.orderState</code>, <code>TradingService.openingSince</code>; <code>RefsWait.orderId</code>; <code>RealExec.opening(symbol)</code>; <code>BotEngine.reconcile</code> scoate poziția unei deschideri refuzate sau anulate; <code>BotPositionView.pending</code> (<code>exposure</code>). Teste: „FIX-ETOROPENDING” (3), „FIX-ETOROLEV3”, „FIX-ETOROLEV” cu <code>takeProfit</code>.</li>
+<li>iOS: <code>BotDetail.Position.pending</code>, <code>BotPositionRoute(botId:bot:)</code>, <code>PendingBotPosition</code>, citirea din nou la 30 s.</li>
+</ul>
+
+<h3>TD-BOT24</h3>
+<ul><li><code>Trader.price?</code> (<code>EtoroTrader.price</code>: id-ul instrumentului ținut minte, <code>rate</code>), <code>TradingService.price</code>, <code>RealExec.platformPrice</code>; <code>BotEngine.price</code> pe eToro: prețul eToro, altfel <code>readPrice(..., open=false)</code>; <code>dropVoidOpenings</code> înaintea <code>readPrices</code>. Test: „FIX-BOT24” (bursa închisă: intrare și ieșire la TP); <code>marketClosed</code> în bursa falsă.</li></ul>
+
+<h2 id="td-fxcommodities">TD-FXCOMMODITIES — planul (în lucru)</h2>
+<ol>
+<li><b>Identitate</b>: un simbol forex sau o marfă se ține sub simbolul Twelve Data, în <code>watchlist.coin</code> („EUR/USD”, „XAU/USD”, „HG1”), cu <code>kind</code> <code>'forex'</code> / <code>'commodity'</code>; <code>quote</code> = partea de după „/” (altfel USD). „/” nu apare la monede sau acțiuni, deci nicio coliziune; afișarea folosește simbolul întreg, nu <code>coin/quote</code>.</li>
+<li><b>Catalogul</b>: <code>/forex_pairs</code> și <code>/commodities</code> de la Twelve Data, citite cu cheia utilizatorului (gratuit, fără credite), ținute 24 h pe server; căutarea (Majorele întâi), numele românești pentru mărfurile principale (aur, argint, petrol…).</li>
+<li><b>Date</b>: <code>StockData</code> cu <code>asset</code> forex/commodity: doar Twelve Data (fără cheie: categoriile ascunse, ruta refuză); sesiunea 24/5 (duminică 22:00 – vineri 22:00 UTC) în locul celei a bursei SUA; lumânarea care se formează (FIX-STOCKLIVE) și prețul live la fel.</li>
+<li><b>Rute</b>: <code>/api/market/candles?asset=forex|commodity</code>, cotații în <code>/api/stocks/quotes</code> sau rută proprie, catalogul și căutarea, adăugarea în liste (<code>kind</code> nou, validat în catalog).</li>
+<li><b>Site</b>: <code>AddSymbol</code> (Forex, Mărfuri), <code>chart/paths</code> (<code>/charts/f/EUR-USD</code>, <code>/charts/m/XAU-USD</code>), Grafice, Liste, Azi, banda de prețuri, Știri, ⌘K, insignele.</li>
+<li><b>iOS</b>: <code>WatchSheets</code>, <code>WatchModel</code>, Grafice (sursa și timeframe-urile), căutarea globală, Știri, Azi.</li>
+<li><b>Știri, Claude, Rezumat</b>: aliasurile (Gold, Brent, EUR/USD…), <code>get_watchlist</code> / <code>get_chart</code>, contextul Rezumatului.</li>
+<li><b>Scanerul</b>: semnalele Slingshot pe simbolurile noi (Twelve Data).</li>
+<li><b>Boți și ordine</b>: piața botului „forex” / „commodity” pe eToro (și profilul Paper?), prețul și lumânările din Twelve Data, sesiunea 24/5, ordinele eToro cu simbolul lui (de verificat: EURUSD, GOLD, OIL…; o citire unică din Azure, cu acordul utilizatorului), levierele permise de eToro pentru ele.</li>
+</ol>
+
+<h3>TD-FXCOMMODITIES — implementarea (20 nov. 2026)</h3>
+<h4>1. Identitatea unui simbol</h4>
+<ul>
+<li><code>src/shared/fx.ts</code>: simbolul Twelve Data („EUR/USD”, „XAU/USD”, „HG1”) e forma graficelor, a listelor, a știrilor și a boților. <code>fxKindOf</code> îl recunoaște după formă, strict: o marfă după baza ei (lista COMMODITY_RO, plus HG1), o pereche doar dacă ambele părți sunt monede ISO 4217 (plus CNH). „AAPL/USD” (o acțiune afișată cu moneda ei) și „BTC/USD” nu sunt forex.</li>
+<li>Forma de cont, compactă (<code>fxCompact</code>: EUR/USD → EURUSD, XAU/USD → XAUUSD): cea a eToro, păstrată și de Paper Trading. Pozițiile apar deci ca „EURUSD/USD”, ca orice acțiune. Drumul invers e <code>fxFromCompact</code> (ultimele trei litere sunt moneda), iar <code>fxSymbolOf</code> acceptă oricare formă.</li>
+<li><code>isUsdFx</code>: doar acestea la boți. Tot aici: <code>fxTradable(account, kind)</code> (eToro: forex; un profil Paper de acțiuni: ambele) și textele comune: <code>ETORO_COMMODITY_TEXT</code>, <code>FX_ACCOUNT_TEXT</code>, <code>FX_KEY_TEXT</code>.</li>
+</ul>
+<h4>2. Prețul</h4>
+<ul>
+<li><code>readQuote</code> (<code>market/quote.ts</code>), folosit de boți, de Paper și de prețul de rezervă al ordinelor: pe piața „stock”, un simbol forex (în oricare formă) ia <code>StockData.fxQuote(userId, sym, maxAge)</code> (Twelve Data <code>/quote</code>). <code>open</code> se ia din săptămâna 24/5 a cotației. Boții cer <code>BOT_STOCK_PRICE_MS</code> = 25 s (alegerea utilizatorului: cel mult ~2,4 credite pe minut pe simbol).</li>
+<li><b>FIX-ETOROSTALE</b>: <code>EtoroTrader.rateAt</code> citește și ora cursului (<code>date</code>). <code>price()</code> (botul, FIX-BOT24) dă null peste <code>ETORO_RATE_MAX_AGE_MS</code> = 60 s, iar motorul ia atunci <code>readPrice</code>, ca înainte. <code>lastOf()</code> (fereastra de ordin: <code>instrument().last</code> și <code>normalize</code>) ia, în locul unui curs vechi, prețul de rezervă primit de la <code>TradingService</code> (<code>PriceFallback</code> = <code>readPrice(quotes, userId, 'stock', sym, false)</code>: Nasdaq sau Twelve Data). <code>held.rate</code> (cursul din portofoliul eToro, fără oră) nu mai e folosit.</li>
+</ul>
+<h4>3. Ordinele</h4>
+<ul>
+<li><code>etoroSymbolOf</code>: perechea graficului → simbolul eToro (EURUSD); o marfă a graficului (XAU/USD, HG1, XAUUSD) → <code>TradingError INVALID</code> cu <code>ETORO_COMMODITY_TEXT</code>. Un simbol eToro propriu („GOLD/USD” din Tranzacții) rămâne un simbol oarecare, deci poziția se poate închide. Folosit de <code>resolve</code> și de <code>price</code>.</li>
+<li><code>TradingService.rules</code>: un simbol forex doar pe un cont de acțiuni care e eToro sau un profil Paper; altfel <code>FX_ACCOUNT_TEXT</code>.</li>
+<li>Paper: <code>ownSymbol</code> păstrează perechea compactă (EURUSD), iar <code>symbolCheck</code> o acceptă ca pe o acțiune. Prețul vine prin <code>readQuote</code> → <code>fxSymbolOf</code>.</li>
+</ul>
+<h4>4. Boții</h4>
+<ul>
+<li><code>shared/bot.ts</code> <code>checkBot</code>: pe piața „stock”, o acțiune sau un simbol forex în USD; altă monedă e refuzată („nu e cotat în USD”).</li>
+<li><code>BotService.check</code>: cheia Twelve Data, simbolul din catalogul Twelve Data (<code>fxEntry</code>), eToro fără mărfuri, nici Alpaca, nici Trading 212.</li>
+<li><code>BotEngine</code>:
+<ul>
+<li>lumânările prin <code>stocks.fxCandles</code> (și cele ale timeframe-ului mare);</li>
+<li><code>areaFor()</code> scoate aria pentru forex: nici filtrul, nici partea din scor (alegerea utilizatorului);</li>
+<li>reconcilierea caută deținerea și poziția sub forma compactă.</li>
+</ul></li>
+<li>Comportamentul eToro rămâne cel al acțiunilor: non-stop, SL și TP trimise, levier 1/2/5.</li>
+</ul>
+<h4>5. Site și aplicație</h4>
+<ul>
+<li>Graficul forex:
+<ul>
+<li>„Tranzacționează” apare când există un cont <code>fxTradable</code>;</li>
+<li>fereastra de ordin primește <code>seed.fx</code> și oferă doar acele conturi;</li>
+<li>liniile pozițiilor și sunetul caută forma compactă; <code>onChart</code> / <code>stillHeld</code> compactează simbolul botului.</li>
+</ul></li>
+<li>Formularul botului (site): sugestiile din liste includ perechile și mărfurile în USD ale contului.</li>
+<li>iOS:
+<ul>
+<li><code>TicketSeed.fx</code> și <code>TradeAccount.fxTradable</code>;</li>
+<li><code>TradingCapsRow.exchange</code> pentru „Tranzacționează”;</li>
+<li><code>BotSymbolSheet(fxKinds:)</code> (lista și căutarea <code>/api/fx/search</code>, doar USD);</li>
+<li>ChartCore.js reconstruit (forma compactă).</li>
+</ul></li>
+<li>Totul rămâne ascuns în spatele <code>FX_READY</code> / <code>FxFeature.ready</code> până la final.</li>
+</ul>
+<h4>6. Teste</h4>
+<ul>
+<li><code>fx.test.ts</code>: felul strict, forma compactă, USD.</li>
+<li><code>bot.test.ts</code>: validarea.</li>
+<li><code>brokers.test.ts</code>: FIX-ETOROSTALE la bot și la fereastra de ordin, traducerea și refuzul mărfurilor.</li>
+<li><code>engine.test.ts</code> „FD-FXCOMMODITIES”: verificarea, un bot Paper pe EUR/USD (fără arie, weekendul, SL), ordinul eToro.</li>
+<li><code>bot-lines.test.ts</code>: liniile pe forex.</li>
+<li>iOS: <code>FxCommoditiesTests.trading</code>.</li>
+</ul>
+
+<h4>7. Ce a găsit review-ul (runda 360) și cum s-a reparat</h4>
+<ul>
+<li><code>newsQuerySchema</code>: <code>coins</code> acceptă și <code>FX_SYMBOL_RE</code>.</li>
+<li><code>StockData.load</code>: <code>pricePrecision</code> la <code>mode === 'fx'</code> = 4 sub 10, altfel 2 (ca <code>fxPrecision</code>).</li>
+<li><code>EtoroTrader.resolve</code> întoarce <code>marketData</code> (clasa <code>Forex</code>, sau <code>Stocks</code>/<code>ETF</code> pe Nasdaq / NYSE); <code>lastOf</code> cere prețul de rezervă doar atunci.</li>
+<li><code>FIAT</code> cuprinde și codurile înlocuite (VEF, ZMK…), ca o pereche veche să nu fie luată drept acțiune pe Paper.</li>
+<li>Site:
+<ul>
+<li><code>AddSymbol</code> citește <code>settings.twelveDataKeySet</code>, nu <code>/api/fx/info</code> (nimic nu se mișcă);</li>
+<li><code>countdown</code> pe forex = <code>fxWeekOpen</code>;</li>
+<li>textul filtrului de arie spune că forex-ul n-are arie.</li>
+</ul></li>
+<li>iOS:
+<ul>
+<li><code>openTicket</code> și <code>botSeed</code> tratau graficul forex drept crypto;</li>
+<li>logo-ul din bară și din linia de stare primește <code>fx</code>;</li>
+<li>graficul implicit (primul din listă) pentru forex;</li>
+<li><code>CandlesResult.hasVolume</code> e calculat la decodare (în afara firului principal);</li>
+<li><code>StatusLine.fx</code>, <code>hasVolume</code>, starea 24/5, numărătoarea;</li>
+<li>foaia de adăugare citește <code>twelveDataKeySet</code> din <code>SettingsStore</code>.</li>
+</ul></li>
+</ul>
+<h4>8. Verificarea vizuală</h4>
+<p>Pe serverul de audit (o schemă de test, ștearsă la final), cu Twelve Data simulat prin <code>setFetchImpl</code> și o cheie falsă pe utilizatorul de test, niciodată a ta. Ce s-a verificat:</p>
+<ul>
+<li>site: Liste (comutatorul, Forex, Mărfuri), graficul EUR/USD pe desktop și fereastra lui de ordin, graficul aurului pe telefon, Azi;</li>
+<li>la 390 px nu depășește nimic pe orizontală;</li>
+<li>iOS: foaia de adăugare (Forex, Mărfuri), graficul EUR/USD.</li>
+</ul>
+
+<h2 id="td-marketmove">TD-MARKETMOVE — implementează FD-MARKETMOVE</h2>
+<ul>
+<li><strong><code>sentiment/market-move.ts</code> (nou):</strong><ul>
+<li><code>MARKET_INDICES</code> (<code>^SPX</code>, <code>^NDX</code>), <code>MARKET_RULES</code> (<code>sessions: 60</code>, <code>minSessions: 20</code>, <code>scale: 4</code>, <code>strength: 1.5</code>);</li>
+<li><code>sessionsOf(daily)</code>: ședințele (ziua New York, 9:30 / 16:00, închiderea anterioară, deschiderea, închiderea, <code>typical</code> = mediana |Δ| din cele 60 dinainte);</li>
+<li><code>marketAt(tape, t, p)</code> (pură): ultima ședință deschisă până la <code>t</code>, doar indicii ei; prețul în ședință din bara de 30 min încheiată până la <code>t</code>, după ultima bară prețul live, înainte de prima deschiderea; <code>move</code>, <code>sentiment = tanh(m / scale)</code>, <code>value</code> (0–100, cu <code>gamma</code>), <code>strength = |m| / (|m| + strength)</code>, <code>decay = 0,5^(vârstă / halfLifeH)</code>, <code>share</code>;</li>
+<li><code>MarketMoves</code>: citește <code>IndexData.history</code>, <code>intraday(&#39;30m&#39;, 78)</code> (doar barele încheiate) și <code>quote</code>, cel mult o dată la 20 s (<code>TAPE_TTL_MS</code>), o singură citire odată. Ședința de azi lipsă din istoric se ia din cotație când <code>last − change</code> e ultima închidere (±0,02%) și e după 9:30; închiderea ședinței de azi = cotația. O citire eșuată folosește ultimele date bune ale indicelui: istoricul cel mult 15 minute (<code>KEEP_HISTORY_MS</code>), lumânările de 30 de minute oricât; apoi indicele e lăsat deoparte; niciunul: <code>null</code>.</li>
+</ul></li>
+<li><strong><code>sentiment/daily-index.ts</code>:</strong><ul>
+<li><code>MarketPart</code> (<code>MarketPoint</code> + <code>news</code>, <code>weight</code>, <code>dayShare</code>); <code>IndexResult.market</code>; <code>IndexExplain.news</code> (media știrilor) și <code>.market</code>;</li>
+<li><code>mixMarket</code>: cu cel puțin o știre de acțiuni, <code>w = share ÷ (1 − share) × max(W_acțiuni, shrinkK)</code>; partea Acțiuni și totalul primesc itemul (<code>sentiment</code>, <code>w</code>);</li>
+<li><code>evaluate</code>, folosită de <code>computeIndex</code>, <code>explainIndex</code> și <code>effects</code> (aceleași numere); <code>intradaySeries</code> cu reacția fiecărei ore; parametrul <code>tape</code> (implicit <code>null</code>: <code>readSymbolNews</code> rămâne doar din știri);</li>
+<li><code>INDEX_RULES.market</code>.</li>
+</ul></li>
+<li><strong><code>sentiment/daily.ts</code>:</strong> al cincilea parametru, <code>market</code> (sursa; <code>null</code> = fără, ca înainte). <code>computeDay</code>, <code>today</code>, <code>todayExplained</code>, <code>explainDrivers</code>, <code>explainToday</code> citesc banda o dată și o dau mai departe. <code>refreshZone</code> îngheață o zi doar cu <code>settledWith(tape)</code> (fără sursă, sau cu ambii indici); <code>upgradeHistory</code> așteaptă la fel. <code>INDEX_VERSION = 5</code>.</li>
+<li><strong><code>context.ts</code>:</strong> <code>MarketMoves</code> din <code>stocks.indices</code>; <code>daily</code> creat după <code>stocks</code>; <code>ContextOverrides.marketTape</code> (testele: <code>null</code>).</li>
+<li><strong><code>summary/context.ts</code>:</strong> rândul reacției în secțiunea sentimentului.</li>
+<li><strong>Web:</strong> <code>market-text.ts</code> (nou: <code>marketLine</code>, <code>marketWhen</code>, <code>marketMoves</code>, <code>marketRarity</code>, <code>sharePct</code>, <code>signedPct</code>, <code>marketShown</code>); <code>Today.tsx</code> (rândul de sub părți); <code>IndexExplain.tsx</code> (Pe scurt, pasul 4, pașii renumerotați, categoriile, parametrii); <code>api-types.ts</code> exportă <code>MarketPart</code>.</li>
+<li><strong>iOS:</strong> <code>SentimentModels.swift</code> (<code>MarketIndexMove</code>, <code>MarketPart</code>, <code>DaySentiment.market</code>, <code>TodayExplain.news / .market</code>, <code>IndexRules.Market</code>, toate opționale pentru un server mai vechi); <code>MarketText.swift</code> (nou, ca <code>market-text.ts</code>); <code>TodayView.swift</code> (<code>SentimentDetailView.marketLine</code>, iPhone și iPad); <code>ExplainSheet.swift</code> (Pe scurt, <code>marketStep</code>, categoriile, parametrii).</li>
+<li><strong>Teste:</strong> <code>market-move.test.ts</code> (ședințele, zilele obișnuite, reperul utilizatorului, oglinda, barele, stingerea, un indice în urmă, amestecul în index, explicația și efectele, orele, banda din date, nicio zi înghețată fără piață, istoricul); <code>market-text.test.ts</code>; iOS <code>MarketTextTests</code> (decodarea, textul). Contextele de test au <code>marketTape: null</code>.</li>
+</ul>
+
+<h3 id="td-marketmove-crypto">TD-MARKETMOVE · Crypto</h3>
+<ul>
+<li><strong><code>market-move.ts</code>:</strong> <code>CRYPTO_COINS</code> (BTC/USDT, ETH/USDT); <code>CryptoSeries</code> (<code>hours</code>, <code>days</code>); <code>MarketTape.crypto</code>; <code>MarketPoint.area</code> (<code>stocks</code> / <code>crypto</code>); <code>pointOf</code> (comun); <code>cryptoAt(tape, t, p)</code>: <code>coinPriceAt</code> (lumânarea care se formează, altfel închiderea ultimei încheiate, cel mult 2 h veche), <code>coinTypical</code> (mediana din 60 de zile UTC încheiate, cel puțin 20), mișcarea pe 24 h, <code>decay</code> 1; <code>MarketDeps.crypto(symbol, tf, count)</code>; <code>MarketMoves.coins</code> (1h × 2400, 1d × 200; ultimele bune 15 minute).</li>
+<li><strong><code>daily-index.ts</code>:</strong> <code>pointsAt</code>, <code>mixMarkets</code> (Acțiuni, apoi Crypto; <code>dayShare</code> după ambele); <code>evaluate(…, points, partsOnly)</code>; <code>IndexResult.crypto</code>, <code>IndexExplain.crypto</code>.</li>
+<li><strong><code>daily.ts</code>:</strong> <code>settledWith</code> cere și monedele; <code>INDEX_VERSION = 6</code>.</li>
+<li><strong><code>context.ts</code>:</strong> <code>crypto</code> din <code>market.candles</code>, cu bursa din <code>settings.get().marketData.exchange</code>.</li>
+<li><strong><code>summary/context.ts</code>:</strong> un rând pe piață.</li>
+<li><strong>Web:</strong> <code>market-text.ts</code> (<code>partOf</code>, <code>marketWhen</code> pentru crypto, „Reacția pieței”); <code>Today.tsx</code> (rândurile Crypto și Acțiuni); <code>IndexExplain.tsx</code> (Pe scurt pe piețe, pasul 4 „Reacția piețelor” cu „De ce” și <code>MarketBlock</code>, categoriile, parametrii).</li>
+<li><strong>iOS:</strong> <code>MarketPart.area</code>, <code>DaySentiment.crypto</code>, <code>TodayExplain.crypto</code>; <code>MarketText</code> (crypto); <code>SentimentDetailView.marketLine</code> (ambele); <code>ExplainSheet</code> (<code>marketsStep</code>, <code>marketBlock</code>).</li>
+<li><strong>Teste:</strong> <code>market-move.test.ts</code> (crypto: 24 h în zile obișnuite, o oră trecută, date vechi, prea puține zile, în partea Crypto și în zi alături de Acțiuni, creșterea, banda din bursă, înghețarea cere monedele), <code>market-text.test.ts</code>, iOS <code>MarketTextTests.crypto</code>.</li>
+</ul>
+
+<h2 id="td-tdbots">TD-TDBOTS — implementează FIX-TDBOTS</h2>
+<ul>
+<li><strong><code>market/stocks.ts</code>:</strong> <code>TdWho</code> (<code>bot</code> / <code>app</code>); <code>CreditBudget.noteBot(what)</code>, <code>reserve()</code> (cele citite de boți în <code>BOT_RESERVE_WINDOW_MS</code> = 15 min, cel mult <code>perMinute − max(1, ⌈perMinute/4⌉)</code>), <code>take(n, who)</code> (restul nu intră în rezervă); <code>TwelveDataClient.get/timeSeries/fxQuote/price(…, who)</code>; <code>StockData.candles/fxCandles(…, live, who)</code> și <code>fxQuote(…, maxAge, who)</code> notează citirile boților și au propria cerere în zbor (<code>|bot</code>); <code>CANDLE_CACHE_MAX = 400</code>.</li>
+<li><strong><code>market/quote.ts</code>:</strong> <code>readQuote/readPrice(…, who)</code>.</li>
+<li><strong><code>bots/engine.ts</code>:</strong> lumânările (și timeframe-ul mare) și prețul cu <code>'bot'</code>.</li>
+<li><strong><code>scanner/scanner.ts</code>:</strong> <code>viewed(userId)</code>, <code>viewing</code> (<code>TODAY_VIEW_MS</code> = 3 min); cu prezență, cheia doar cu Azi deschis; <code>SCAN_KEY_READS</code> = 8 pe rundă; forex și mărfuri sărite.</li>
+<li><strong><code>http/routes.ts</code>:</strong> <code>GET /api/scanner</code> notează vederea; la revenire, pe instanța care rulează joburile, <code>nudge(&#39;scanner&#39;, 0)</code>.</li>
+<li><strong>Web:</strong> <code>Today.tsx</code> (<code>CoinsTile</code>) și <code>MarketStrip.tsx</code> fără forex și mărfuri; <code>FxTicker</code> și <code>useFxSparks</code> scoase.</li>
+<li><strong>iOS:</strong> <code>TodayView</code> (lista și rândul fără forex), <code>TodayData.loadPrices</code> fără cotațiile și liniile forex.</li>
+<li><strong>Teste:</strong> <code>stocks.test.ts</code> (rezerva, sfertul rămas, prin lumânări), <code>scanner.test.ts</code> (8 pe rundă, forex sărit), <code>presence.test.ts</code> (cheia doar cu Azi deschis).</li>
+</ul>
+
+<h3 id="td-nominprofit">TD-NOMINPROFIT</h3>
+<ul>
+<li><strong><code>shared/bot.ts</code>:</strong> <code>MIN_TRADE_PROFIT</code> scos.</li>
+<li><strong><code>bots/premium.ts</code>:</strong> <code>SizeIn</code> fără <code>minProfit</code> și <code>currency</code>; <code>sizeFor</code>: <code>lower = 0</code>, fără eroarea „sub minimul”; <code>fitFunds</code>: null doar fără bani.</li>
+<li><strong><code>bots/engine.ts</code>:</strong> fără <code>minProfit()</code> (și fără prețul în dolari al monedei); mesajul pentru cont gol; <code>alloc</code> fără <code>min</code>.</li>
+<li><strong><code>bots/inputs.ts</code>:</strong> instrucțiunile AI-ului și rândul sumei („cel mult …”).</li>
+<li><strong><code>bots/service.ts</code>:</strong> rezumatul și avertismentele de la verificare, fără minim.</li>
+<li><strong>Web:</strong> <code>BotFormView.tsx</code>, textul de la „Limitele”.</li>
+<li><strong>Teste:</strong> <code>strategies.test.ts</code> (mărimea fără minim), <code>engine.test.ts</code> (contul cu puțin intră, rezumatul, promptul AI).</li>
+</ul>
+
+<h3 id="td-lateentry">TD-LATEENTRY</h3>
+<ul>
+<li><strong><code>bots/premium.ts</code>:</strong> <code>LATE_TOLERANCE = 0.1</code>, <code>lateSignals(r, closed, candles, price)</code> (pură).</li>
+<li><strong><code>bots/engine.ts</code>:</strong> <code>Bar.candles</code>; <code>nextRead = now + MIN</code> la orice citire; prima citire și citirea fără lumânare nouă apelează <code>onBar(…, newBar = false)</code>, care încearcă doar semnalele târzii; <code>late()</code> (direcția, poziția pe simbol, <code>signalTaken</code>); <code>enter()</code> (decide, confirmă, trimite; refuzurile unui semnal târziu prin <code>noteOnce</code>); <code>Candidate.late</code>; mesajul de intrare; <code>signalAiNo</code> la refuzul AI-ului.</li>
+<li><strong><code>bots/state.ts</code>:</strong> <code>PremiumState.signalTaken</code>, <code>signalAiNo</code>.</li>
+<li><strong><code>bots/inputs.ts</code>:</strong> <code>AiAsk.late</code> și rândul din prompt.</li>
+<li><strong>Teste:</strong> <code>strategies.test.ts</code> (<code>lateSignals</code>), <code>engine.test.ts</code> (intrarea la prima citire și după un minut, prețul prea departe, o singură dată, un semnal închis sau în cealaltă direcție).</li>
+</ul>
 </body></html>

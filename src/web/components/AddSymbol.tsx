@@ -1,16 +1,26 @@
 // Adding a symbol to a watch list (FD-WATCHLISTS §2, as the favourites were added in Settings before): a switch
-// Crypto / Acțiuni / Indici and a search whose results open under the field; for the indices, the seven of them at
-// once. Also the alias field of a row.
+// Crypto / Acțiuni / Indici / Forex / Mărfuri and a search whose results open under the field; for the indices, the
+// seven of them at once; forex and commodities (FD-FXCOMMODITIES, the user's Twelve Data key: hidden without it) list
+// the majors and the main commodities at once. Also the alias field of a row.
+import { FX_READY } from '../fx.ts';
 import { useEffect, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Plus } from 'lucide-react';
 import type { StockSearchHit, SymbolInfo } from '../../shared/api-types.ts';
 import { searchIndices } from '../../shared/indices.ts';
 import { api, errorMessage, qs } from '../api.ts';
+import { useSettings } from '../hooks.ts';
 import { CoinLogo } from './icons.tsx';
 
-type WatchKind = 'crypto' | 'stock' | 'index';
-const KIND_LABEL: Record<WatchKind, string> = { crypto: 'Crypto', stock: 'Acțiuni', index: 'Indici' };
+type WatchKind = 'crypto' | 'stock' | 'index' | 'forex' | 'commodity';
+const KIND_LABEL: Record<WatchKind, string> = { crypto: 'Crypto', stock: 'Acțiuni', index: 'Indici', forex: 'Forex', commodity: 'Mărfuri' };
+type FxKind = 'forex' | 'commodity';
+const isFx = (k: WatchKind): k is FxKind => k === 'forex' || k === 'commodity';
+interface FxHit {
+  symbol: string;
+  name: string;
+  group: string;
+}
 interface AddHit {
   key: string;
   label: string;
@@ -18,6 +28,7 @@ interface AddHit {
   body: object;
   coin: string;
   stock: boolean;
+  fx?: FxKind;
 }
 
 /**
@@ -38,8 +49,22 @@ export function AddSymbol({ have, onAdd }: { have: ReadonlySet<string>; onAdd: (
     staleTime: 10 * 60_000,
     retry: false,
   });
+  // FD-FXCOMMODITIES: only with the user's Twelve Data key, told by the settings read at the start (the switch has all
+  // its kinds from the first frame: nothing moves when they come).
+  const settings = useSettings();
+  const fxAvailable = FX_READY && settings.data?.twelveDataKeySet === true;
+  const kinds: WatchKind[] = fxAvailable ? ['crypto', 'stock', 'index', 'forex', 'commodity'] : ['crypto', 'stock', 'index'];
+  const fxSearch = useQuery({
+    queryKey: ['fx', 'search', kind, term],
+    queryFn: () => api.get<FxHit[]>(`/api/fx/search${qs({ kind, q: term })}`),
+    enabled: isFx(kind) && fxAvailable,
+    staleTime: 10 * 60_000,
+    retry: false,
+  });
   const hits: AddHit[] | null =
-    kind === 'index'
+    isFx(kind)
+      ? (fxSearch.data?.map((r) => ({ key: r.symbol, label: r.symbol, hint: r.name, body: { kind, coin: r.symbol, name: r.name }, coin: r.symbol, stock: false, fx: kind })) ?? null)
+      : kind === 'index'
       ? searchIndices(term).map((i) => ({ key: i.id, label: i.symbol, hint: i.name, body: { kind: 'index', coin: i.id }, coin: i.id, stock: false }))
       : kind === 'crypto'
         ? (pairs.data?.map((r) => ({ key: r.symbol, label: r.symbol, hint: '', body: { kind: 'crypto', coin: r.base, quote: r.quote }, coin: r.base, stock: false })) ?? null)
@@ -51,16 +76,29 @@ export function AddSymbol({ have, onAdd }: { have: ReadonlySet<string>; onAdd: (
             coin: r.symbol,
             stock: true,
           })) ?? null);
-  const searching = kind === 'crypto' ? pairs : kind === 'stock' ? stocks : null;
-  // The seven indices show at once (an empty field included); the pairs and the stocks once something is typed.
-  const open = focused && (kind === 'index' || (term !== '' && (hits !== null || Boolean(searching?.isError))));
-  const empty = kind === 'crypto' ? 'Nicio pereche cu acest simbol' : kind === 'stock' ? 'Nicio acțiune din SUA cu acest nume' : 'Niciun indice cu acest nume. Sunt disponibili doar indicii americani din listă.';
+  const searching = kind === 'crypto' ? pairs : kind === 'stock' ? stocks : isFx(kind) ? fxSearch : null;
+  // The seven indices, the majors and the commodities show at once (an empty field included); the pairs and the stocks
+  // once something is typed.
+  const listed = kind === 'index' || isFx(kind);
+  const open = focused && ((listed && (hits !== null || Boolean(searching?.isError))) || (term !== '' && (hits !== null || Boolean(searching?.isError))));
+  const empty =
+    kind === 'crypto'
+      ? 'Nicio pereche cu acest simbol'
+      : kind === 'stock'
+        ? 'Nicio acțiune din SUA cu acest nume'
+        : kind === 'forex'
+          ? 'Nicio pereche forex cu acest nume'
+          : kind === 'commodity'
+            ? 'Nicio marfă cu acest nume'
+            : 'Niciun indice cu acest nume. Sunt disponibili doar indicii americani din listă.';
+  const placeholder = { crypto: 'Adaugă o monedă, ex. SOL', stock: 'Adaugă o acțiune, ex. AAPL sau Apple', index: 'Alege un indice, ex. SPX sau Dow', forex: 'Alege o pereche, ex. EUR/USD', commodity: 'Alege o marfă, ex. aur sau petrol' }[kind];
+  const ariaLabel = { crypto: 'Adaugă o monedă', stock: 'Adaugă o acțiune', index: 'Adaugă un indice', forex: 'Adaugă o pereche forex', commodity: 'Adaugă o marfă' }[kind];
   return (
     // One height for the switch and the search field, on every screen (FD-UIPOLISH): the row stretches both.
     <div className="flex flex-wrap items-stretch gap-2.5">
       {/* FD-MOBILESYM §2: on a phone the switch and the field each take the whole row. */}
       <div className="seg max-sm:row-fill" role="group" aria-label="Tipul simbolului">
-        {(['crypto', 'stock', 'index'] as const).map((k) => (
+        {kinds.map((k) => (
           <button
             key={k}
             type="button"
@@ -68,8 +106,8 @@ export function AddSymbol({ have, onAdd }: { have: ReadonlySet<string>; onAdd: (
             onClick={() => {
               setKind(k);
               setQ('');
-              // The indices open their list at once: the field takes the focus.
-              if (k === 'index') input.current?.focus();
+              // The indices, the majors and the commodities open their list at once: the field takes the focus.
+              if (k === 'index' || isFx(k)) input.current?.focus();
             }}
           >
             {KIND_LABEL[k]}
@@ -79,9 +117,9 @@ export function AddSymbol({ have, onAdd }: { have: ReadonlySet<string>; onAdd: (
       <div className="relative w-80 max-w-full max-sm:w-full">
         <input
           ref={input}
-          aria-label={kind === 'crypto' ? 'Adaugă o monedă' : kind === 'stock' ? 'Adaugă o acțiune' : 'Adaugă un indice'}
+          aria-label={ariaLabel}
           aria-expanded={open}
-          placeholder={kind === 'crypto' ? 'Adaugă o monedă, ex. SOL' : kind === 'stock' ? 'Adaugă o acțiune, ex. AAPL sau Apple' : 'Alege un indice, ex. SPX sau Dow'}
+          placeholder={placeholder}
           value={q}
           onFocus={() => setFocused(true)}
           onBlur={() => setFocused(false)}
@@ -113,12 +151,12 @@ export function AddSymbol({ have, onAdd }: { have: ReadonlySet<string>; onAdd: (
                       setQ('');
                     }}
                   >
-                    {(h.stock || kind === 'index') && <CoinLogo coin={h.coin} size={16} badge={h.stock} square={h.stock} />}
+                    {(h.stock || kind === 'index' || h.fx) && <CoinLogo coin={h.coin} size={16} badge={h.stock} square={h.stock} fx={h.fx} />}
                     <span className="font-medium">{h.label}</span>
                     {h.hint && <span className="min-w-0 truncate text-faint">{h.hint}</span>}
                     {added ? (
                       <span className="ml-auto shrink-0 text-[12px] text-faint">în listă</span>
-                    ) : kind === 'index' ? (
+                    ) : listed ? (
                       <Plus size={14} aria-hidden className="ml-auto shrink-0 text-faint" />
                     ) : null}
                   </button>

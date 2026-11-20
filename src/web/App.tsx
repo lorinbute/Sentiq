@@ -359,6 +359,9 @@ function SignedInApp({ user }: { user: PublicUser }) {
               {/* Case-sensitive: /charts/S/USDT is the Sonic pair, /charts/s/AAPL a stock, /charts/i/SPX an index. */}
               <Route path="/charts/s/:ticker" caseSensitive element={<ChartsPage />} />
               <Route path="/charts/i/:index" caseSensitive element={<ChartsPage />} />
+              {/* FD-FXCOMMODITIES: a forex pair and a commodity ("-" for the "/" of the symbol). */}
+              <Route path="/charts/f/:forex" caseSensitive element={<ChartsPage />} />
+              <Route path="/charts/m/:commodity" caseSensitive element={<ChartsPage />} />
               <Route path="/charts/:base/:quote" element={<ChartsPage />} />
               <Route path="/trades" element={<TradesPage />} />
               <Route path="/watchlists" element={<WatchlistsPage />} />

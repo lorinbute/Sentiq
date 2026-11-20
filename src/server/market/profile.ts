@@ -2,6 +2,7 @@
 // industry, and the last four quarters from TradingView's screener (it has the newly listed ones Nasdaq has not yet);
 // a coin: CoinGecko's description; an index: Sentiq's own words. Kept a while in market_cache (the same for everyone).
 // The description stays as its source wrote it (the user, 18 Nov 2026: no translation into Romanian, it spent AI tokens).
+import { commodityName, fxBase, fxQuote } from '../../shared/fx.ts';
 import { z } from 'zod';
 import type { Db } from '../db/database.ts';
 import type { Logger } from '../log.ts';
@@ -10,7 +11,7 @@ import { isTvSymbol, tvScan } from '../calendar/sources.ts';
 import { indexById, plainSymbol } from '../../shared/indices.ts';
 import type { NasdaqClient } from './stocks.ts';
 
-export type ProfileKind = 'crypto' | 'stock' | 'index' | 'fund';
+export type ProfileKind = 'crypto' | 'stock' | 'index' | 'fund' | 'forex' | 'commodity';
 
 export interface ProfileQuarter {
   /** The last day of the month the quarter ended in (YYYY-MM-DD). */
@@ -246,8 +247,9 @@ export class SymbolProfiles {
   }
 
   /** What the popup shows of a symbol (FD-WATCHLISTS §3). `kind` is the list's; a stock may turn out a fund. */
-  async profile(kind: 'crypto' | 'stock' | 'index', symbol: string, name: string | null = null): Promise<SymbolProfile> {
+  async profile(kind: 'crypto' | 'stock' | 'index' | 'forex' | 'commodity', symbol: string, name: string | null = null): Promise<SymbolProfile> {
     if (kind === 'index') return this.indexProfile(symbol);
+    if (kind === 'forex' || kind === 'commodity') return this.fxProfile(kind, symbol, name);
     const ttl = kind === 'stock' ? STOCK_TTL_MS : CRYPTO_TTL_MS;
     const hit = await this.cached(kind, symbol, ttl);
     const p = hit ?? (kind === 'stock' ? await this.stockProfile(symbol, name) : await this.cryptoProfile(symbol, name));
@@ -255,6 +257,16 @@ export class SymbolProfiles {
     // A copy kept before 18 Nov 2026 carries a `translated` field: not sent (no translation any more).
     const { translated: _old, ...shown } = p as SymbolProfile & { translated?: unknown };
     return shown;
+  }
+
+  /** FD-FXCOMMODITIES: a pair or a commodity: its name (Twelve Data's, kept with it) and what it is, in Romanian. */
+  private fxProfile(kind: 'forex' | 'commodity', symbol: string, name: string | null): SymbolProfile {
+    const quote = fxQuote(symbol);
+    const text =
+      kind === 'forex'
+        ? `Cursul ${symbol}: câți ${quote} costă un ${fxBase(symbol)}. Piața valutară se tranzacționează 24 de ore din 24, de duminică seara până vineri seara (ora New York). Prețurile vin de la Twelve Data, cu cheia ta.`
+        : `${commodityName(symbol, name)}, cotat în ${quote}. Se tranzacționează aproape non-stop, de duminică seara până vineri seara (ora New York). Prețurile vin de la Twelve Data, cu cheia ta.`;
+    return { kind, symbol, name: kind === 'commodity' ? commodityName(symbol, name) : name ?? symbol, description: { text, source: 'Sentiq', lang: 'ro' }, facts: [], quarters: [], next: null, problems: [], fetchedAt: this.now() };
   }
 
   private indexProfile(symbol: string): SymbolProfile {

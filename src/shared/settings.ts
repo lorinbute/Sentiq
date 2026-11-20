@@ -22,7 +22,8 @@ export const CALENDAR_CURRENCIES = ['USD', 'EUR', 'GBP', 'JPY', 'CNY', 'CAD', 'A
 export const CANDLE_COUNTS = [1500, 3000, 5000] as const;
 
 /** The pair of a crypto chart ("BTC/USDT"), since FD-SENTIQ a stock ("stock:AAPL"), since FD-INDICES an index ("index:SPX"). */
-export const CHART_SYMBOL_RE = /^(?:[A-Z0-9][A-Z0-9._-]{0,29}\/[A-Z0-9]{1,15}|stock:[A-Z][A-Z0-9.-]{0,9}|index:[A-Z]{2,6})$/;
+// FD-FXCOMMODITIES: "forex:EUR/USD", "commodity:XAU/USD" or "commodity:HG1" too.
+export const CHART_SYMBOL_RE = /^(?:[A-Z0-9][A-Z0-9._-]{0,29}\/[A-Z0-9]{1,15}|stock:[A-Z][A-Z0-9.-]{0,9}|index:[A-Z]{2,6}|(?:forex|commodity):[A-Z0-9]{1,10}(?:\/[A-Z]{3})?)$/;
 
 export const settingsSchema = z.object({
   timezone: z.string().min(1).max(64).default('UTC'),
@@ -106,6 +107,25 @@ export const settingsSchema = z.object({
   hlineTemplate: hlineStyleSchema.nullable().default(null),
   /** How the chart looks (FD-CHARTSETTINGS); a key of its own, like `studies`. */
   chartStyle: chartStyleSchema.prefault({}),
+  /**
+   * Tranzacții (FD-TRADESALL): „Toate” with the virtual accounts too (eToro Virtual, Paper Trading; off: the real money
+   * only), and the accounts' order in the menu (those not named after, as they were added).
+   */
+  trades: z
+    .object({
+      allVirtual: z.boolean().default(false),
+      accountOrder: z.array(z.number().int().positive()).max(100).default([]),
+    })
+    .prefault({}),
+  /**
+   * Boți (FIX-BOTORDER): the bots' order in the user's list, by id (those not named after, as the server lists them:
+   * newest first). The running and the ended keep their sections; the order applies inside each.
+   */
+  bots: z
+    .object({
+      order: z.array(z.number().int().positive()).max(500).default([]),
+    })
+    .prefault({}),
 });
 
 export type Settings = z.infer<typeof settingsSchema>;

@@ -6,7 +6,9 @@ import { indexById } from '../shared/indices.ts';
 export type AddBody =
   | { kind: 'crypto'; coin: string; quote?: string }
   | { kind: 'stock'; coin: string; name?: string; exchange?: string }
-  | { kind: 'index'; coin: string };
+  | { kind: 'index'; coin: string }
+  /** FD-FXCOMMODITIES: a pair or a commodity ("EUR/USD"), priced in what follows its "/". */
+  | { kind: 'forex' | 'commodity'; coin: string; name?: string };
 
 /** The symbols of all the lists, once each, in the common order (lists in their order, a symbol at its first place). */
 function withUnion(lists: WatchView['lists'], known: ReadonlyMap<string, WatchItem>): WatchView {
@@ -33,11 +35,11 @@ export function guessAdd(v: WatchView, listId: number, body: AddBody): WatchView
   if (!known.has(body.coin)) {
     known.set(body.coin, {
       coin: body.coin,
-      quote: body.kind === 'crypto' ? (body.quote ?? 'USDT') : 'USD',
+      quote: body.kind === 'crypto' ? (body.quote ?? 'USDT') : body.kind === 'forex' || body.kind === 'commodity' ? (body.coin.split('/')[1] ?? 'USD') : 'USD',
       position: 0,
       aliases: [],
       kind: body.kind,
-      name: body.kind === 'stock' ? (body.name ?? null) : body.kind === 'index' ? (indexById(body.coin)?.name ?? null) : null,
+      name: body.kind === 'stock' || body.kind === 'forex' || body.kind === 'commodity' ? (body.name ?? null) : body.kind === 'index' ? (indexById(body.coin)?.name ?? null) : null,
       exchange: body.kind === 'stock' ? (body.exchange ?? null) : null,
     });
   }

@@ -1,5 +1,6 @@
 // Stock market data (FD-SENTIQ §4, TD-SENTIQ §5): candles from Twelve Data (free key) or Nasdaq (no key),
 // quotes / search / earnings / market status from Nasdaq, and a local budget for Twelve Data's free plan.
+import { commodityName, FX_SYMBOL_RE, fxBase, fxOpen, fxQuote, type FxKind, fxAliases } from '../../shared/fx.ts';
 import type { Candle } from '../../shared/indicator/slingshot.ts';
 import { INDEX_TIMEFRAMES, isIndexId } from '../../shared/indices.ts';
 import { tfSeconds, type Timeframe } from '../../shared/time.ts';
@@ -134,8 +135,15 @@ const parseStoredPlan = (raw: string | undefined): StoredPlan | null => {
  * Twelve Data (FD-TDPLAN), the free plan's until then. The day's count and the plan are persisted: a restart does not
  * reset the day, and the Mac and Azure use the same plan. Since FD-TDKEYS each user's key has its own (`scope`).
  */
+/** FIX-TDBOTS: who asks for credits: a bot (its candles and prices) or anything else (charts, Today, scanner, logos). */
+export type TdWho = 'bot' | 'app';
+/** FIX-TDBOTS: what a bot read in this long counts in the reserve kept for the bots. */
+export const BOT_RESERVE_WINDOW_MS = 15 * 60_000;
+
 export class CreditBudget {
   private minute: number[] = [];
+  /** FIX-TDBOTS: the bots' reads of the last `BOT_RESERVE_WINDOW_MS` (one credit each), by what they read. */
+  private readonly botReads = new Map<string, number>();
   private day = '';
   private used = 0;
   private readonly db: Db | null;
@@ -278,8 +286,29 @@ export class CreditBudget {
     return { used: this.used, perDay: this.perDay, minuteUsed: this.minute.filter((t) => now - t < 60_000).length, perMinute: this.perMinute, day: this.day, plan };
   }
 
-  /** Takes credits, or throws with the moment they are available again. */
-  take(n = 1): void {
+  /**
+   * FIX-TDBOTS: the credits of each minute kept for the bots: as many as the different things (symbol and timeframe, a
+   * price) they read in the last 15 minutes, since they read them at the same moment (a candle's close). The rest may
+   * use at least a quarter of the minute.
+   */
+  reserve(): number {
+    const now = this.now();
+    for (const [k, at] of this.botReads) if (now - at >= BOT_RESERVE_WINDOW_MS) this.botReads.delete(k);
+    return Math.min(this.botReads.size, this.perMinute - Math.max(1, Math.ceil(this.perMinute / 4)));
+  }
+
+  /** FIX-TDBOTS: a bot read `what` (a symbol and timeframe, or a price): it counts in the reserve for 15 minutes. */
+  noteBot(what: string): void {
+    this.botReads.delete(what);
+    this.botReads.set(what, this.now());
+    while (this.botReads.size > 500) this.botReads.delete(this.botReads.keys().next().value as string);
+  }
+
+  /**
+   * Takes credits, or throws with the moment they are available again. FIX-TDBOTS: a bot (`who` = 'bot') may use the
+   * whole minute; anything else leaves the bots' reserve.
+   */
+  take(n = 1, who: TdWho = 'app'): void {
     this.maybeReloadPlan();
     const now = this.now();
     const today = this.today();
@@ -296,6 +325,12 @@ export class CreditBudget {
     if (this.minute.length + n > this.perMinute) {
       const free = (this.minute[0] as number) + 60_000;
       throw new MarketError('EXCHANGE_ERROR', `limita Twelve Data de ${this.perMinute} cereri pe minut a fost atinsă; revine în ${Math.ceil((free - now) / 1000)} s`);
+    }
+    const kept = who === 'bot' ? 0 : this.reserve();
+    if (kept > 0 && this.minute.length + n > this.perMinute - kept) {
+      // The oldest credit whose freeing brings the use under the limit left to the rest.
+      const free = (this.minute[Math.max(0, this.minute.length + n - (this.perMinute - kept) - 1)] as number) + 60_000;
+      throw new MarketError('EXCHANGE_ERROR', `${kept} din cele ${this.perMinute} cereri Twelve Data pe minut sunt păstrate pentru boți; revine în ${Math.max(1, Math.ceil((free - now) / 1000))} s`);
     }
     for (let i = 0; i < n; i++) this.minute.push(now);
     this.used += n;
@@ -529,12 +564,12 @@ export class TwelveDataClient {
     return Boolean(await this.key());
   }
 
-  private async get(path: string, params: Record<string, string>, credits: number, keyOverride?: string): Promise<Record<string, unknown>> {
+  private async get(path: string, params: Record<string, string>, credits: number, keyOverride?: string, who: TdWho = 'app'): Promise<Record<string, unknown>> {
     const key = keyOverride ?? (await this.key());
     if (!key) throw new MarketError('UNSUPPORTED_TIMEFRAME', `Cheia ta Twelve Data lipsește (${TD_KEY_PLACE})`);
     // A user's budget is made on their first request (FD-TDKEYS): its stored plan and day count first.
     await this.budget.ready;
-    if (credits > 0) this.budget.take(credits);
+    if (credits > 0) this.budget.take(credits, who);
     const qs = new URLSearchParams({ ...params, apikey: key }).toString();
     let r;
     try {
@@ -562,10 +597,55 @@ export class TwelveDataClient {
     return j;
   }
 
-  async timeSeries(sym: string, interval: string, outputsize: number): Promise<{ candles: Candle[]; exchange: string }> {
-    const j = await this.get('/time_series', { symbol: sym, interval, outputsize: String(Math.min(5000, Math.max(1, outputsize))), order: 'ASC' }, 1);
+  /** FD-FXCOMMODITIES: the forex pairs or the commodities Twelve Data has (reference data, one credit). */
+  async fxCatalog(kind: FxKind): Promise<FxEntry[]> {
+    const j = await this.get(kind === 'forex' ? '/forex_pairs' : '/commodities', {}, 1);
+    const rows = Array.isArray(j.data) ? (j.data as Record<string, unknown>[]) : [];
+    return rows
+      .map((r): FxEntry | null => {
+        const symbol = typeof r.symbol === 'string' ? r.symbol : '';
+        // Upper case only (FX_SYMBOL_RE): the silver gram's "XAGg/…" is left out.
+        if (!FX_SYMBOL_RE.test(symbol)) return null;
+        return kind === 'forex'
+          ? { symbol, name: [r.currency_base, r.currency_quote].filter((x) => typeof x === 'string' && x).join(' / ') || symbol, group: typeof r.currency_group === 'string' ? r.currency_group : '' }
+          : (typeof r.name === 'string' && fxEnglish.set(symbol, r.name),
+            { symbol, name: commodityName(symbol, typeof r.name === 'string' ? r.name : null), group: typeof r.category === 'string' ? r.category : '' });
+      })
+      .filter((x): x is FxEntry => x !== null);
+  }
+
+  /** FD-FXCOMMODITIES: a pair's or a commodity's price now and its day's change (one credit). */
+  async fxQuote(sym: string, who: TdWho = 'app'): Promise<{ last: number | null; change: number | null; changePct: number | null; open: boolean | null }> {
+    const j = await this.get('/quote', { symbol: sym }, 1, undefined, who);
+    return {
+      last: nasdaqNumber(j.close),
+      change: nasdaqNumber(j.change),
+      changePct: nasdaqNumber(j.percent_change),
+      open: typeof j.is_market_open === 'boolean' ? j.is_market_open : null,
+    };
+  }
+
+  /** FIX-LOGOBACKUP: the address of a company's logo picture (one credit); null when Twelve Data gives none. */
+  async logo(sym: string): Promise<string | null> {
+    const j = await this.get('/logo', { symbol: sym }, 1);
+    return typeof j.url === 'string' && j.url ? j.url : null;
+  }
+
+  /** FIX-STOCKLIVE: the last trade's price now (one credit): the candle forming, which /time_series does not give. */
+  async price(sym: string, who: TdWho = 'app'): Promise<number | null> {
+    const j = await this.get('/price', { symbol: sym }, 1, undefined, who);
+    return nasdaqNumber(j.price);
+  }
+
+  /**
+   * `timezone`: FIX-FXTIME (the user: „15:59:00 left on a 5 minutes candle”): Twelve Data gives a pair's times in
+   * Sydney's time without saying so (no `exchange_timezone`): read as New York's they were 16 hours ahead. Asked in
+   * UTC, they are read in UTC.
+   */
+  async timeSeries(sym: string, interval: string, outputsize: number, timezone?: 'UTC', who: TdWho = 'app'): Promise<{ candles: Candle[]; exchange: string }> {
+    const j = await this.get('/time_series', { symbol: sym, interval, outputsize: String(Math.min(5000, Math.max(1, outputsize))), order: 'ASC', ...(timezone ? { timezone } : {}) }, 1, undefined, who);
     const meta = (j.meta ?? {}) as Record<string, unknown>;
-    const tz = typeof meta.exchange_timezone === 'string' && meta.exchange_timezone ? meta.exchange_timezone : NY;
+    const tz = timezone ?? (typeof meta.exchange_timezone === 'string' && meta.exchange_timezone ? meta.exchange_timezone : NY);
     const values = Array.isArray(j.values) ? (j.values as Record<string, unknown>[]) : [];
     const candles: Candle[] = [];
     for (const v of values) {
@@ -617,6 +697,44 @@ interface TdAccount {
   budget: CreditBudget;
 }
 
+/** FD-FXCOMMODITIES: a forex pair or a commodity of Twelve Data's lists. */
+/** FD-FXCOMMODITIES: a commodity's own name at Twelve Data (English), searched beside the Romanian one. */
+const fxEnglish = new Map<string, string>();
+
+export interface FxEntry {
+  /** Twelve Data's symbol ("EUR/USD", "XAU/USD", "HG1"). */
+  symbol: string;
+  /** „Euro / US Dollar”; a commodity's in Romanian („Aur”). */
+  name: string;
+  /** Major / Minor / Exotic / Exotic-Cross; a commodity's category (Precious Metal…). */
+  group: string;
+}
+
+/** FD-FXCOMMODITIES: a pair's or a commodity's quote (Twelve Data). */
+export interface FxQuote {
+  symbol: string;
+  last: number | null;
+  change: number | null;
+  changePct: number | null;
+  /** The 24/5 week's state now. */
+  open: boolean;
+  fetchedAt: number;
+}
+
+const FX_GROUP_RANK: Record<string, number> = { Major: 0, Minor: 1, Exotic: 2, 'Exotic-Cross': 3 };
+/** The commodities most followed first (gold, silver, oil…), those in USD before their other currencies. */
+const COMMODITY_ORDER = ['XAU', 'XAG', 'WTI', 'XBR', 'XPT', 'XPD', 'HG1', 'URALS', 'GAU'];
+const fxRank = (kind: FxKind, r: FxEntry): number => {
+  if (kind === 'forex') return FX_GROUP_RANK[r.group] ?? 9;
+  const i = COMMODITY_ORDER.indexOf(fxBase(r.symbol));
+  return (i < 0 ? COMMODITY_ORDER.length : i) * 2 + (fxQuote(r.symbol) === 'USD' ? 0 : 1);
+};
+/** Twelve Data's lists, the same for everyone: read once a day. */
+const fxCatalogs = new Map<FxKind, { at: number; rows: FxEntry[] }>();
+
+/** FD-FXCOMMODITIES: the forex and commodities week as a market state (no source to ask: its hours are known). */
+const fxStatus = (now: number): MarketStatus => (fxOpen(now) ? { state: 'open', label: 'Deschis (24/5)', opensAt: null, closesAt: null, fetchedAt: now } : { state: 'closed', label: 'Închis (weekend)', opensAt: null, closesAt: null, fetchedAt: now });
+
 interface CacheEntry {
   candles: Candle[];
   fetchedAt: number;
@@ -631,8 +749,24 @@ interface CacheEntry {
 
 const dayKey = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 const SOURCE_NAME: Record<string, string> = { twelvedata: 'Twelve Data', nasdaq: 'Nasdaq', cboe: 'Cboe', cnbc: 'CNBC' };
+/** FIX-TDBOTS: candle series kept in memory (each user's Twelve Data ones, Nasdaq's, the indices'). */
+const CANDLE_CACHE_MAX = 400;
+
 /** Known to be outside the regular session (an unknown state counts as open: the short TTL then applies). */
 const outsideSession = (status: MarketStatus | null): boolean => status !== null && status.state !== 'open';
+
+/**
+ * FIX-SESSIONOPEN: the state by the clock: inside the regular session Nasdaq announced (its open to its close, the same
+ * day) the market is open, whatever a "pre" read a minute before (or a late one) says; in the hour after the close
+ * it announced, it is no longer. Without both times (a weekend's), the state read.
+ */
+export function statusByClock(s: MarketStatus, now: number): MarketStatus {
+  if (s.opensAt === null || s.closesAt === null || !(s.closesAt > s.opensAt) || s.closesAt - s.opensAt > 86_400_000) return s;
+  if (s.state !== 'open' && now >= s.opensAt && now < s.closesAt) return { ...s, state: 'open', label: 'Market Open' };
+  // Within an hour of it: a close long past is no read of today's session (it would be another day's times).
+  if (s.state === 'open' && now >= s.closesAt && now - s.closesAt < 3_600_000) return { ...s, state: 'after', label: 'After-Hours' };
+  return s;
+}
 
 /** Weekly bars (weeks starting Monday, New York time) from daily ones. */
 export function weeklyFromDaily(days: Candle[]): Candle[] {
@@ -661,6 +795,12 @@ export class StockData {
   /** US indices (FD-INDICES): an id with "^" in front is served from here. */
   readonly indices: IndexData;
   private readonly cache = new Map<string, CacheEntry>();
+  /** FD-FXCOMMODITIES: the pairs' and commodities' quotes, by user and symbol. */
+  private readonly fxQuotes = new Map<string, FxQuote>();
+  /** FIX-STOCKLIVE: each user's live price of a share (one credit), kept 25 s. */
+  private readonly livePrices = new Map<string, { price: number; at: number }>();
+  /** FIX-STOCKLIVE: the candles Twelve Data has not published yet, built from the live prices read, by the cache key. */
+  private readonly liveBars = new Map<string, Candle[]>();
   private readonly inflight = new Map<string, Promise<CandlesResult>>();
   private readonly quotes = new Map<string, StockQuote>();
   private readonly sparks = new Map<string, { symbol: string; closes: number[]; fetchedAt: number }>();
@@ -705,22 +845,44 @@ export class StockData {
     return this.td(userId).hasKey();
   }
 
+  /**
+   * FIX-LOGOBACKUP: Twelve Data's logo address for a share TradingView has no logo for, with the user's key (one credit);
+   * null without a key or when Twelve Data has none.
+   */
+  async logoUrl(sym: string, userId: number): Promise<string | null> {
+    if (!(await this.hasKey(userId))) return null;
+    try {
+      return await this.td(userId).logo(sym);
+    } catch (err) {
+      if (err instanceof MarketError && err.code === 'UNKNOWN_SYMBOL') return null;
+      throw err;
+    }
+  }
+
   /** The user was deleted: their credits' state and their candles leave memory. */
   forget(userId: number): void {
     this.accounts.delete(userId);
     for (const k of this.cache.keys()) if (k.startsWith(`td|${userId}|`)) this.cache.delete(k);
   }
 
-  /** US market state, re-read at most every 5 minutes. */
+  /**
+   * US market state, re-read at most every 5 minutes. FIX-SESSIONOPEN (the user: a share's chart opened before the
+   * session „nu se mai actualizează deloc dacă începe sesiunea”): the open / close Nasdaq announced, once passed, counts
+   * at once (the state by the clock), and the state is re-read every 20 s until Nasdaq says so too: a "pre" read at
+   * 9:29 no longer keeps the candles of before the open (and no live candle) until 9:34.
+   */
   async marketStatus(): Promise<MarketStatus | null> {
     const now = this.now();
-    if (this.status && now - this.status.fetchedAt < 5 * 60_000) return this.status;
+    const kept = this.status;
+    // The clock and Nasdaq disagree (the session began or ended since): asked again soon, until Nasdaq says so too.
+    const due = kept !== null && statusByClock(kept, now).state !== kept.state;
+    if (kept && now - kept.fetchedAt < (due ? 20_000 : 5 * 60_000)) return statusByClock(kept, now);
     try {
       this.status = await this.nasdaq.marketStatus(now);
     } catch {
       // keep the last known state
     }
-    return this.status;
+    return this.status && statusByClock(this.status, now);
   }
 
   /** The market state, only when Nasdaq confirmed it in the last 15 minutes (else null: unknown). */
@@ -765,13 +927,100 @@ export class StockData {
    * state is re-read every 5 minutes, so the first bars of a new session come at most that late).
    */
   private fresh(tf: Timeframe, entry: CacheEntry, status: MarketStatus | null, now: number): boolean {
+    // FIX-STOCKLIVE: Twelve Data publishes a candle once it has closed (about a minute late): its candles kept a minute,
+    // the forming one built from the live price (`liveCandles`), read every 30 s.
     const base = tfSeconds(tf) <= 3600 ? 60_000 : tfSeconds(tf) <= 4 * 3600 ? 5 * 60_000 : 15 * 60_000;
     if (now - entry.fetchedAt < base) return true;
     return entry.closedAt && outsideSession(status);
   }
 
   /** A share's candles for the user: from Twelve Data with their key (their credits, their cache), else Nasdaq's daily. */
-  async candles(symbol: string, tf: Timeframe, count: number, userId: number): Promise<CandlesResult> {
+  /** `live` (FIX-STOCKLIVE, the chart only): with the candles Twelve Data has not published, from the live price. */
+  /** FD-FXCOMMODITIES: Twelve Data's forex pairs or commodities (read with the user's key, once a day for everyone). */
+  async fxCatalog(userId: number, kind: FxKind): Promise<FxEntry[]> {
+    const now = this.now();
+    const kept = fxCatalogs.get(kind);
+    if (kept && now - kept.at < 24 * 3600_000) return kept.rows;
+    if (!(await this.hasKey(userId))) return kept?.rows ?? [];
+    try {
+      const rows = await this.td(userId).fxCatalog(kind);
+      if (rows.length) fxCatalogs.set(kind, { at: now, rows });
+      return rows.length ? rows : (kept?.rows ?? []);
+    } catch (err) {
+      if (kept) return kept.rows;
+      throw err;
+    }
+  }
+
+  /**
+   * FD-FXCOMMODITIES: the pairs or commodities matching what was typed (the symbol with or without "/", the names);
+   * the majors first, then by symbol. Without a key: none (the categories are hidden).
+   */
+  async fxSearch(userId: number, kind: FxKind, q: string, limit = 40): Promise<FxEntry[]> {
+    if (!(await this.hasKey(userId))) return [];
+    const rows = await this.fxCatalog(userId, kind);
+    const t = q.trim().toLowerCase();
+    const flat = t.replace(/[\s/]/g, '');
+    const starts = (r: FxEntry) => r.symbol.toLowerCase().replace('/', '').startsWith(flat);
+    // The user: „de ce nu există crude oil în mărfuri?”: a commodity is found by its Romanian name, Twelve Data's English
+    // one („Crude Oil WTI Spot”) and its aliases („crude oil”, „gold”).
+    const hit = (r: FxEntry) =>
+      !t ||
+      starts(r) ||
+      r.symbol.toLowerCase().includes(t) ||
+      r.name.toLowerCase().includes(t) ||
+      (fxEnglish.get(r.symbol) ?? '').toLowerCase().includes(t) ||
+      (kind === 'commodity' && fxAliases(kind, r.symbol).some((a) => a.toLowerCase().includes(t)));
+    const rank = (r: FxEntry) => fxRank(kind, r);
+    return rows
+      .filter(hit)
+      .sort((a, b) => Number(!starts(a)) - Number(!starts(b)) || rank(a) - rank(b) || a.symbol.localeCompare(b.symbol))
+      .slice(0, limit);
+  }
+
+  /** FD-FXCOMMODITIES: one of Twelve Data's pairs or commodities (its exact symbol), else null. */
+  async fxEntry(userId: number, kind: FxKind, symbol: string): Promise<FxEntry | null> {
+    return (await this.fxCatalog(userId, kind)).find((r) => r.symbol === symbol) ?? null;
+  }
+
+  /** FD-FXCOMMODITIES: a pair's or a commodity's candles: Twelve Data only (the user's key), the 24/5 week. */
+  async fxCandles(symbol: string, tf: Timeframe, count: number, userId: number, live = false, who: TdWho = 'app'): Promise<CandlesResult> {
+    if (!(await this.hasKey(userId))) throw new MarketError('UNSUPPORTED_TIMEFRAME', `Forex și mărfurile cer cheia ta Twelve Data (${TD_KEY_PLACE})`);
+    if (TD_INTERVALS[tf] === undefined) throw new MarketError('UNSUPPORTED_TIMEFRAME', `Timeframe-ul ${tf} nu există la Twelve Data (alege 1m, 5m, 15m, 30m, 1h, 2h, 4h, 1d sau 1w)`);
+    const key = `fx|${userId}|${symbol}|${tf}`;
+    // FIX-TDBOTS: a bot's read counts in the bots' reserve and never waits on another's (that one may be refused).
+    if (who === 'bot') this.budget(userId).noteBot(`${symbol}|${tf}`);
+    const flight = `${live ? `${key}|live` : key}${who === 'bot' ? '|bot' : ''}`;
+    const pending = this.inflight.get(flight);
+    if (pending) return pending;
+    const p = this.load(symbol, tf, count, key, 'fx', userId, live, who).finally(() => this.inflight.delete(flight));
+    this.inflight.set(flight, p);
+    return p;
+  }
+
+  /**
+   * FD-FXCOMMODITIES: a pair's or a commodity's quote, kept a minute per user (a credit each); `maxAge` shorter for a
+   * bot's look (25 s, as a share's, the user's choice).
+   */
+  async fxQuote(userId: number, symbol: string, maxAge = 60_000, who: TdWho = 'app'): Promise<FxQuote> {
+    const now = this.now();
+    const k = `${userId}|fxq|${symbol}`;
+    if (who === 'bot') this.budget(userId).noteBot(`${symbol}|quote`);
+    const kept = this.fxQuotes.get(k);
+    if (kept && now - kept.fetchedAt < maxAge) return kept;
+    try {
+      const q = await this.td(userId).fxQuote(symbol, who);
+      const out: FxQuote = { symbol, last: q.last, change: q.change, changePct: q.changePct, open: q.open ?? fxOpen(now), fetchedAt: now };
+      this.fxQuotes.set(k, out);
+      while (this.fxQuotes.size > 500) this.fxQuotes.delete(this.fxQuotes.keys().next().value as string);
+      return out;
+    } catch (err) {
+      if (kept) return kept;
+      throw err;
+    }
+  }
+
+  async candles(symbol: string, tf: Timeframe, count: number, userId: number, live = false, who: TdWho = 'app'): Promise<CandlesResult> {
     const sym = symbol.toUpperCase();
     if (isIndexId(sym)) return this.indexCandles(sym, tf, count);
     if (!STOCK_SYMBOL_RE.test(sym)) throw new MarketError('UNKNOWN_SYMBOL', `Simbol invalid: ${symbol}`);
@@ -787,12 +1036,16 @@ export class StockData {
     }
     // Twelve Data's candles are the user's (bought with their key); Nasdaq's are everyone's.
     const key = useTd ? `td|${userId}|${sym}|${tf}` : `nq|${sym}|${tf}`;
-    const pending = this.inflight.get(key);
+    // FIX-TDBOTS: a bot's read counts in the bots' reserve and never waits on another's (that one may be refused).
+    if (useTd && who === 'bot') this.budget(userId).noteBot(`${sym}|${tf}`);
+    // A chart's read (with the candles built from the live price) apart from a bot's or the scanner's.
+    const flight = `${live ? `${key}|live` : key}${who === 'bot' ? '|bot' : ''}`;
+    const pending = this.inflight.get(flight);
     if (pending) return pending;
-    const p = this.load(sym, tf, count, key, useTd ? 'td' : 'nq', userId)
+    const p = this.load(sym, tf, count, key, useTd ? 'td' : 'nq', userId, live, who)
       .catch((err: unknown) => this.withSuggestions(sym, err, userId))
-      .finally(() => this.inflight.delete(key));
-    this.inflight.set(key, p);
+      .finally(() => this.inflight.delete(flight));
+    this.inflight.set(flight, p);
     return p;
   }
 
@@ -824,19 +1077,20 @@ export class StockData {
     throw new MarketError('UNKNOWN_SYMBOL', `${err.message}; încearcă ${suggestions.join(', ')}`, suggestions);
   }
 
-  private async load(sym: string, tf: Timeframe, count: number, key: string, mode: 'td' | 'nq' | 'ix', userId: number | null): Promise<CandlesResult> {
+  private async load(sym: string, tf: Timeframe, count: number, key: string, mode: 'td' | 'nq' | 'ix' | 'fx', userId: number | null, live = false, who: TdWho = 'app'): Promise<CandlesResult> {
     const now = this.now();
     const cached = this.cache.get(key);
     // A state Nasdaq could not confirm for a while is not trusted (a Friday "closed" must not freeze Monday's chart).
-    const status = await this.confirmedStatus();
+    // FD-FXCOMMODITIES: forex and commodities keep their own week (24/5), not the US stock market's hours.
+    const status = mode === 'fx' ? fxStatus(now) : await this.confirmedStatus();
     let entry: CacheEntry;
     let notice: string | undefined;
     if (cached && cached.count >= count && this.fresh(tf, cached, status, now)) {
       entry = cached;
     } else {
       try {
-        if (mode === 'td' && userId !== null) {
-          const r = await this.td(userId).timeSeries(sym, TD_INTERVALS[tf] as string, count);
+        if ((mode === 'td' || mode === 'fx') && userId !== null) {
+          const r = await this.td(userId).timeSeries(sym, TD_INTERVALS[tf] as string, count, mode === 'fx' ? 'UTC' : undefined, who);
           entry = { candles: r.candles, fetchedAt: now, count, exchange: 'twelvedata', closedAt: outsideSession(status) };
         } else if (mode === 'ix') {
           // Daily and weekly from the index's daily history; intraday from CNBC (FD-INDEXINTRA).
@@ -859,8 +1113,11 @@ export class StockData {
           entry = { candles: (tf === '1w' ? weeklyFromDaily(daily) : daily).slice(-count), fetchedAt: now, count, exchange: 'nasdaq', closedAt: outsideSession(status) };
         }
         if (entry.candles.length === 0) throw new MarketError('UNKNOWN_SYMBOL', `${sym.replace(/^\^/, '')}: nicio lumânare de la ${SOURCE_NAME[entry.exchange] ?? entry.exchange}`);
+        // FIX-TDBOTS: room for a user's bots, scanner, charts and lines together (with 100 they pushed each other out
+        // and were bought again).
+        this.cache.delete(key);
         this.cache.set(key, entry);
-        while (this.cache.size > 100) this.cache.delete(this.cache.keys().next().value as string);
+        while (this.cache.size > CANDLE_CACHE_MAX) this.cache.delete(this.cache.keys().next().value as string);
       } catch (err) {
         // The source refused (budget, network): the last candles, with their age and the reason.
         if (cached && cached.candles.length > 0) {
@@ -869,19 +1126,87 @@ export class StockData {
         } else throw err;
       }
     }
-    const candles = entry.candles.slice(-count);
+    // FIX-STOCKLIVE: intraday, while the session trades: the candles Twelve Data has not given yet, from the live price.
+    const built = live && (mode === 'td' || mode === 'fx') && userId !== null && tfSeconds(tf) < 86_400 && !outsideSession(status) ? await this.liveCandles(key, sym, tf, entry.candles, userId, now) : null;
+    // A forming candle Twelve Data gives (5m and up: it updates it with each minute closed) follows the live price too.
+    const own = built?.forming ? [...entry.candles.slice(0, -1), built.forming] : entry.candles;
+    const candles = [...own, ...(built?.bars ?? [])].slice(-count);
     const tfMs = tfSeconds(tf) * 1000;
     let lastClosedIndex = candles.length - 1;
     while (lastClosedIndex >= 0 && (candles[lastClosedIndex] as Candle).t + tfMs > now) lastClosedIndex--;
     const lastPrice = candles.at(-1)?.c ?? 1;
-    return { exchange: entry.exchange, symbol: sym, tf, candles, pricePrecision: lastPrice < 1 ? 4 : 2, lastClosedIndex, fetchedAt: entry.fetchedAt, ...(notice ? { notice } : {}) };
+    // FD-FXCOMMODITIES: a pair or a commodity under 10 with four decimals (1,0971), as in the lists and on Today.
+    const pricePrecision = mode === 'fx' ? (lastPrice < 10 ? 4 : 2) : lastPrice < 1 ? 4 : 2;
+    return { exchange: entry.exchange, symbol: sym, tf, candles, pricePrecision, lastClosedIndex, fetchedAt: entry.fetchedAt, ...(notice ? { notice } : {}) };
+  }
+
+  /**
+   * FIX-STOCKLIVE: the candles after Twelve Data's last one (it publishes a minute once it has closed, about a minute
+   * late): the one forming now, and those already passed it has not published yet, from the live prices read (one
+   * credit each 25 s): its high, low and close follow them, its open is the close before it. Twelve Data's own candle
+   * replaces each one as it comes. Without a live price: those built so far.
+   */
+  private async liveCandles(key: string, sym: string, tf: Timeframe, td: Candle[], userId: number, now: number): Promise<{ forming: Candle | null; bars: Candle[] }> {
+    const last = td.at(-1);
+    if (!last) return { forming: null, bars: [] };
+    const step = tfSeconds(tf) * 1000;
+    let bars = (this.liveBars.get(key) ?? []).filter((b) => b.t > last.t && b.t <= now);
+    const price = await this.livePrice(userId, sym, now).catch(() => null);
+    // Twelve Data's last candle still forming (5m and up): the live price moves it.
+    if (price !== null && now < last.t + step) {
+      this.liveBars.set(key, []);
+      return { forming: { ...last, h: Math.max(last.h, price), l: Math.min(last.l, price), c: price }, bars: [] };
+    }
+    if (price !== null && now >= last.t + step) {
+      const start = last.t + step * Math.floor((now - last.t) / step);
+      const at = bars.findIndex((b) => b.t === start);
+      if (at >= 0) {
+        const b = bars[at] as Candle;
+        bars[at] = { ...b, h: Math.max(b.h, price), l: Math.min(b.l, price), c: price };
+      } else {
+        const open = bars.at(-1)?.c ?? last.c;
+        bars = [...bars, { t: start, o: open, h: Math.max(open, price), l: Math.min(open, price), c: price, v: 0 }];
+      }
+    }
+    bars.sort((a, b) => a.t - b.t);
+    this.liveBars.delete(key);
+    this.liveBars.set(key, bars);
+    while (this.liveBars.size > 100) this.liveBars.delete(this.liveBars.keys().next().value as string);
+    return { forming: null, bars };
+  }
+
+  /** FD-TRADESALL: one unit of a currency in USD from the user's Twelve Data key (a credit, kept 10 minutes); null without one. */
+  async usdRate(userId: number, currency: string): Promise<number | null> {
+    const cur = currency.toUpperCase();
+    if (!/^[A-Z]{3}$/.test(cur) || !(await this.hasKey(userId))) return null;
+    const k = `${userId}|fx|${cur}`;
+    const now = this.now();
+    const kept = this.livePrices.get(k);
+    if (kept && now - kept.at < 10 * 60_000) return kept.price;
+    const p = await this.td(userId).price(`${cur}/USD`).catch(() => null);
+    if (p !== null && p > 0) this.livePrices.set(k, { price: p, at: now });
+    return p !== null && p > 0 ? p : null;
+  }
+
+  /** FIX-STOCKLIVE: the user's live price of a share, one read each 25 s (a credit), whatever the timeframes open. */
+  private async livePrice(userId: number, sym: string, now: number): Promise<number | null> {
+    const k = `${userId}|${sym}`;
+    const kept = this.livePrices.get(k);
+    if (kept && now - kept.at < 25_000) return kept.price;
+    const p = await this.td(userId).price(sym);
+    if (p !== null) {
+      this.livePrices.set(k, { price: p, at: now });
+      while (this.livePrices.size > 200) this.livePrices.delete(this.livePrices.keys().next().value as string);
+    }
+    return p;
   }
 
   /** Last price and day change (Nasdaq; an index from its source): a minute per symbol, 15 minutes while the market is closed. */
-  async quote(sym: string): Promise<StockQuote> {
+  /** `maxAge`: how old a kept quote may be while the market trades (FIX-BOTPRICE: a bot's look, 25 s). */
+  async quote(sym: string, maxAge = 60_000): Promise<StockQuote> {
     const now = this.now();
     const c = this.quotes.get(sym);
-    const ttl = this.status?.state === 'closed' && now - this.status.fetchedAt < 10 * 60_000 ? 15 * 60_000 : 60_000;
+    const ttl = this.status?.state === 'closed' && now - this.status.fetchedAt < 10 * 60_000 ? 15 * 60_000 : maxAge;
     if (c && now - c.fetchedAt < ttl) return c;
     try {
       const q = isIndexId(sym) ? await this.indices.quote(sym) : await this.nasdaq.quote(sym, now);
